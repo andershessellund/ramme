@@ -1,0 +1,75 @@
+{
+  "name": "ramme",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "author": "Anders Hessellund Jensen",
+  "description": "Hierarchical contexts for JavaScript — dependency injection, structured concurrency, and resource lifecycle in one tree: a context is a resolution scope, an execution scope, and a lifetime.",
+  "keywords": [
+    "dependency injection",
+    "di",
+    "structured concurrency",
+    "fibers",
+    "lifecycle",
+    "resource management",
+    "context",
+    "scopes"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andershessellund/ramme.git"
+  },
+  "bugs": "https://github.com/andershessellund/ramme/issues",
+  "homepage": "https://github.com/andershessellund/ramme#readme",
+  "sideEffects": [
+    "./dist/node.js",
+    "./dist/async-context.js"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    },
+    "./async-context": {
+      "types": "./dist/async-context.d.ts",
+      "default": "./dist/async-context.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.tests.json",
+    "check:package": "publint --strict && attw --pack . --profile esm-only",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.3.4",
+  "dependencies": {
+    "lookup-api": "link:../lookup-api"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/node": "^22.0.0",
+    "eslint": "^10.10.0",
+    "publint": "^0.3.24",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^5.0.1"
+  }
+}
