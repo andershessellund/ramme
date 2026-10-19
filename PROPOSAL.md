@@ -946,6 +946,14 @@ values contribute their key only. It is complete because creation-time
 reads are `inject` (§8.1). Each context keeps the union of `deps` over the
 values cached on it, so both rules are `Set` lookups along a path.
 
+**An auto-hoisted factory must inject the same keys on every run.** A
+re-creation forced by a shadow runs the factory with the recorded `deps(V)`
+in hand; if the re-run injects a different set, the resolution throws
+`PlacementError` naming both sets and nothing is cached. With equal sets the
+re-run always lands at or below the shadow, so it can never collide with an
+instance that already exists; a non-deterministic factory is a defect, not
+a supported pattern.
+
 What this gives: no context ever changes an answer it has given; no
 requester is ever served a value built from a view of its dependencies
 other than its own; both hold regardless of the order in which the tree is

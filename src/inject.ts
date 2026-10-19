@@ -58,14 +58,19 @@ function keyName(key: InjectionKey<unknown>): string {
   return getKeyDescription(key);
 }
 
+function names(keys: ReadonlySet<InjectionKey<unknown>>): string {
+  return [...keys].map(keyName).join(', ');
+}
+
+function sameKeys(a: ReadonlySet<InjectionKey<unknown>>, b: ReadonlySet<InjectionKey<unknown>>): boolean {
+  if (a.size !== b.size) return false;
+  for (const k of a) if (!b.has(k)) return false;
+  return true;
+}
+
 /** `${name ?? kind}#${id}`, for messages. */
 export function describeNode(node: NodeImpl): string {
   return `${node.name ?? node.kind}#${node.id}`;
-}
-
-/** D-26: dev mode is `process.env.NODE_ENV !== 'production'`, and always on where `process` is absent. */
-function dev(): boolean {
-  return (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV !== 'production';
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +487,7 @@ export function resolveFrom<T>(R: NodeImpl, key: InjectionKey<T>): ResolveResult
         hit.autoHoisted &&
         ((hit.pinned && R !== C) || (hit.deps !== undefined && hit.deps.size > 0 && shadowBetween(R, C, hit.deps)))
       )
-        return createAutoHoisted(R, key);
+        return createAutoHoisted(R, key, hit.deps); // the re-run must inject the same keys (D-129)
       assertLive(hit, key); // I22: R's own answer was released (D-22)
       markDecided(R, C, hit.deps === undefined ? [key] : [key, ...hit.deps]);
       return hitResult(hit, C);
@@ -533,11 +538,28 @@ function resolveScoped<T>(R: NodeImpl, key: InjectionKey<T>, scope: Scope, provi
   return r;
 }
 
-/** Auto-hoisting (D7): run the default factory from R, place the value at its deepest dependency (or the capture boundary). */
-function createAutoHoisted<T>(R: NodeImpl, key: InjectionKey<T>): ResolvedResult<T> {
+/**
+ * Auto-hoisting (D7): run the default factory from R, place the value at its deepest dependency (or the capture
+ * boundary). `expected` is the recorded deps(V) of the instance a placement-by-view re-creation refused: the
+ * re-run must inject exactly those keys, or the factory is non-deterministic and the resolution fails (D-129).
+ */
+function createAutoHoisted<T>(
+  R: NodeImpl,
+  key: InjectionKey<T>,
+  expected?: ReadonlySet<InjectionKey<unknown>>,
+): ResolvedResult<T> {
   const tracker = new DepTracker(R.autoScopeRoot);
   const cs = new CreationStateImpl({ key, requester: R, base: R, placement: undefined, tracker, outer: currentCreation() });
   const value = runCreation(cs, () => invokeDefaultFactory(key, resolveDependencies(key)));
+  if (expected !== undefined && !sameKeys(tracker.deps, expected)) {
+    const err = new PlacementError(
+      `${keyName(key)} injected {${names(tracker.deps)}} when re-created from ${describeNode(R)}, but ` +
+        `{${names(expected)}} when first created. An auto-hoisted factory must inject the same keys on every run; ` +
+        'make the factory deterministic, or give the key an explicit scope or provider (D-129).',
+    );
+    abandonCreation(cs, err);
+    throw err;
+  }
   let S = tracker.deepest;
   if (R.autoScopeRoot.depth > S.depth) S = R.autoScopeRoot; // the captureAutoScoped clamp
   if (isComplete(S)) {
@@ -557,15 +579,13 @@ function createAutoHoisted<T>(R: NodeImpl, key: InjectionKey<T>): ResolvedResult
   }
   const existing = S.cache.get(key);
   if (existing !== undefined) {
-    // D-21: a factory whose dependencies varied landed where an instance exists. Never overwrite an answer (I19).
-    abandonCreation(cs, new Error(`duplicate placement of ${keyName(key)} at ${describeNode(S)}`));
-    if (dev())
-      console.warn(
-        `ramme: ${keyName(key)} was re-created from ${describeNode(R)} and landed on ${describeNode(S)}, which already ` +
-          'holds an instance; the existing one is used. Its factory injects different keys on different runs (D-21).',
-      );
-    markDecided(R, S, existing.deps === undefined ? [key] : [key, ...existing.deps]);
-    return hitResult(existing, S);
+    // Unreachable once D-129 holds (equal deps place the re-run at or below the shadow). Kept as the I19 guard:
+    // an answer S has given is never overwritten, and a placement that would needs to fail loudly.
+    const err = new PlacementError(
+      `${keyName(key)} re-created from ${describeNode(R)} landed on ${describeNode(S)}, which already holds an instance (D-21).`,
+    );
+    abandonCreation(cs, err);
+    throw err;
   }
   const deps = new Set(tracker.deps);
   const pinned = tracker.pinned;

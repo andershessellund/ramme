@@ -166,10 +166,9 @@ describe('placement by view (§8.2)', () => {
     expect(shadow.child().get(V)).toBe(v); // every requester under S′ with the same view shares it
   });
 
-  it('a factory whose dependencies vary that lands where an instance exists gets the existing one (D-21)', () => {
+  it('a re-creation whose factory injects different keys than the first run throws PlacementError (D-129)', () => {
     const A = createInjectionKey<string>('A');
     const Bk = createInjectionKey<string>('B');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     let runs = 0;
     class V {
       b = inject(Bk);
@@ -179,12 +178,33 @@ describe('placement by view (§8.2)', () => {
     const P = root.child({ providers: [valueProvider(A, 'a@P'), valueProvider(Bk, 'b@P')] });
     const v = P.get(V);
     const C = P.child({ providers: [valueProvider(A, 'a@C')] });
-    // C's view shadows A, so V is re-created from C; this run does not inject A and lands on P again.
-    expect(C.get(V)).toBe(v);
+    // C's view shadows A, so V is re-created from C; this run injects {B} where the first injected {B, A}.
+    let err: unknown;
+    try {
+      C.get(V);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(PlacementError);
+    expect(String(err)).toMatch(/must inject the same keys/);
     expect(runs).toBe(2);
-    expect(impl(C).cache.has(V)).toBe(false);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toMatch(/D-21/);
+    expect(impl(C).cache.has(V)).toBe(false); // nothing cached at C
+    expect(P.get(V)).toBe(v); // P's answer is unchanged (I19)
+  });
+
+  it('a re-creation that injects the same keys is placed by the requester’s view, with no error', () => {
+    const A = createInjectionKey<string>('A');
+    class V {
+      a = inject(A);
+    }
+    const root = createRootContext();
+    const P = root.child({ providers: [valueProvider(A, 'a@P')] });
+    const v = P.get(V);
+    const C = P.child({ providers: [valueProvider(A, 'a@C')] });
+    const vc = C.get(V);
+    expect(vc).not.toBe(v);
+    expect(vc.a).toBe('a@C');
+    expect(impl(C).cache.get(V)?.value).toBe(vc);
   });
 });
 
