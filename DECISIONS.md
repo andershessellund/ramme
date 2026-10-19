@@ -194,11 +194,15 @@ public `NodeOptions` flag for harnesses and isolation boundaries (a node
 whose auto-hoisted instances must not leak upward); it clamps placement, it
 never changes resolution. Because creation-time reads are all `inject` (D4′) and factories
 are synchronous, `deps(V)` is complete when `V` is placed. **Cost.**
-Placement depends on what a factory injected on its run; a factory whose
-dependency set varies by input gets that run's placement, and a re-created
-value that lands where an instance already exists is discarded in favour of
-the existing one (with a development warning). Declared scopes are the way
-out. DESIGN.md §3.3.
+Placement depends on what a factory injected on its run. A factory should
+inject the same keys on every run; one that does not is a defect, not a
+supported pattern, and the only place it is visible is a corner of D10′: a
+re-creation forced by a shadow of a *first-run* dependency (`P` and `C` both
+provide `A`, `B@P` was built with `inject(A)`, `C` resolves `B` and must not
+be served `P`'s view) runs the factory again from `C`; if that run injects a
+different key instead of `A`, it may hoist back to `P`, where `B@P` already
+exists. The existing instance is kept (never change an answer, I19), the new
+one is released, and a development warning names the key. DESIGN.md §3.3.
 
 ### D9′. Async context propagation is required
 
