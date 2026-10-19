@@ -189,9 +189,10 @@ reads place only auto-hoisted values.
 
 **Why.** Inherited from the lineage and kept: it makes "placement follows
 dependencies" (I17) mechanical, sharing as wide as dependencies allow and
-never wider, without per-key scope annotations. `captureAutoScoped` exists
-for harnesses (a test node that must not leak instances upward) and is
-internal. Because creation-time reads are all `inject` (D4′) and factories
+never wider, without per-key scope annotations. `captureAutoScoped` is a
+public `NodeOptions` flag for harnesses and isolation boundaries (a node
+whose auto-hoisted instances must not leak upward); it clamps placement, it
+never changes resolution. Because creation-time reads are all `inject` (D4′) and factories
 are synchronous, `deps(V)` is complete when `V` is placed. **Cost.**
 Placement depends on what a factory injected on its run; a factory whose
 dependency set varies by input gets that run's placement, and a re-created

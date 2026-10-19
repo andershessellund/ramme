@@ -36,7 +36,11 @@ export interface NodeOptions {
   releaseTimeoutMs?: number;
   /** `node:stalled` after a delivered body has not settled for this long. Default 5000; inherited; 0 or Infinity disables. At most 2^31 - 1. */
   stallWarningMs?: number;
-  /** @internal Harness clamp for auto-hoisting (D7); kept until the suite says otherwise (§8.2). Stripped from .d.ts. */
+  /**
+   * Clamp auto-hoisting at this node: a value whose dependencies would place
+   * it above here is cached here instead, so nothing created under this node
+   * leaks upward (D7). For harnesses and isolation boundaries; default false.
+   */
   captureAutoScoped?: boolean;
 }
 
