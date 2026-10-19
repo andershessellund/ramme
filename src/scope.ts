@@ -21,7 +21,6 @@ export const RootScope: Scope = createScope('root');
 
 /**
  * Conventional scope for per-request lifecycles. Not auto-attached —
- * you attach it explicitly via `createContext({ scopes: [RequestScope] })`
- * or `runSync(fn, { scopes: [RequestScope] })`.
+ * you attach it explicitly: `child({ scopes: [RequestScope] })`.
  */
 export const RequestScope: Scope = createScope('request');

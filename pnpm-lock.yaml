@@ -108,10 +108,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      lookup-api:
-        specifier: link:../lookup-api
-        version: link:../lookup-api
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.5

@@ -1,66 +1,163 @@
 // ---------------------------------------------------------------------------
-// ManagedResource — unified lifecycle protocol for ramme contexts
+// Error types (PROPOSAL.md §9.6 plus D-01) and entry wrapping for `own`.
+//
+// A leaf module: no runtime imports, so every other module can throw these.
+// Every class sets `name` to its class name; §5 of IMPLEMENTATION.md lists
+// exactly when each is thrown.
+// ---------------------------------------------------------------------------
+
+import type { Context } from './context.js';
+
+/** A free function was called outside any node, or no context storage is registered. */
+export class NoCurrentNodeError extends Error {
+  override name = 'NoCurrentNodeError';
+}
+
+/** An operation on a node that has completed (I7). */
+export class NodeCompletedError extends Error {
+  override name = 'NodeCompletedError';
+}
+
+/** A body-shaped operation on a DI value's node before placement (§6.2). */
+export class PendingNodeError extends Error {
+  override name = 'PendingNodeError';
+}
+
+/** `release(x)` of something this node does not own (C7). */
+export class NotOwnedError extends Error {
+  override name = 'NotOwnedError';
+}
+
+/** A second release registered for one object on one node (C8). */
+export class AlreadyOwnedError extends Error {
+  override name = 'AlreadyOwnedError';
+}
+
+/** A body-shaped operation on a node that is lent to a `call` (§7.11): the call was not awaited. */
+export class UnawaitedCallError extends Error {
+  override name = 'UnawaitedCallError';
+  constructor(
+    /** The call fiber the node is lent to. */
+    readonly child: Context,
+    message?: string,
+  ) {
+    super(message ?? `the node is lent to ${label(child)}: a call() was not awaited`);
+  }
+}
+
+/** `await fiber`: fibers are not awaitable; use `join(f)` or `result(f)` (I27). */
+export class FiberNotAwaitableError extends Error {
+  override name = 'FiberNotAwaitableError';
+}
+
+/** The awaited fiber was aborted, and the awaiter is not frozen (§4.3). */
+export class FiberAbortedError extends Error {
+  override name = 'FiberAbortedError';
+  constructor(
+    /** The abort reason. */
+    readonly reason: unknown,
+    message?: string,
+  ) {
+    super(message ?? 'the fiber was aborted');
+  }
+}
+
+/** `pool.fork` after the pool was delivered or close() was requested (D-16). */
+export class PoolClosedError extends Error {
+  override name = 'PoolClosedError';
+}
+
+/** A creation-time rule was broken: `lookup`/`call`/`run` during creation, `inject` outside it (§8.1, §8.3). */
+export class CreationViolationError extends Error {
+  override name = 'CreationViolationError';
+}
+
+/** `ctx.run(fn)` returned a promise (Q8, development mode). */
+export class AsyncRunError extends Error {
+  override name = 'AsyncRunError';
+}
+
+/** A provider registered where the key has already been decided, or below its scope's owner (§8.2). */
+export class PlacementError extends Error {
+  override name = 'PlacementError';
+}
+
+// --- Additions to §9.6 (D-01) ---
+
+/** `pool.fork` on a full pool with `whenFull: 'reject'`. */
+export class PoolFullError extends Error {
+  override name = 'PoolFullError';
+}
+
+/**
+ * The abort reason ramme itself produces: a parent's body exited under
+ * `childrenOnExit: 'interrupt'`, or an entry was released at its turn by an
+ * owner that was not itself aborted. Never thrown.
+ */
+export class OwnerInterrupt extends Error {
+  override name = 'OwnerInterrupt';
+  constructor(
+    /** The node whose exit or release produced the interrupt. */
+    readonly owner: Context,
+  ) {
+    super(`${label(owner)} is exiting`);
+  }
+}
+
+/** A factory, constructor, `provide()` or default factory returned `undefined` (§8.3). */
+export class FactoryReturnedUndefinedError extends CreationViolationError {
+  override name = 'FactoryReturnedUndefinedError';
+}
+
+/** `${name ?? kind}#${id}`, the same label `describeNode` (inject.ts) produces; inlined to keep this module a leaf. */
+function label(node: Context): string {
+  return `${node.name ?? (node as { readonly kind?: string }).kind ?? 'node'}#${node.id}`;
+}
+
+// ---------------------------------------------------------------------------
+// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (D-28).
+// ---------------------------------------------------------------------------
+
+export type SuppressedErrorLike = Error & { error: unknown; suppressed: unknown };
+
+class SuppressedErrorShim extends Error {
+  override name = 'SuppressedError';
+  constructor(
+    readonly error: unknown,
+    readonly suppressed: unknown,
+    message?: string,
+  ) {
+    super(message ?? 'An error was suppressed during disposal.');
+  }
+}
+
+/** `globalThis.SuppressedError` where it exists, otherwise a shim with `.error`, `.suppressed` and `name === 'SuppressedError'`. */
+export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, message?: string) => SuppressedErrorLike =
+  (globalThis as { SuppressedError?: SuppressedErrorConstructor }).SuppressedError ?? SuppressedErrorShim;
+
+// ---------------------------------------------------------------------------
+// toDispose — the three `own` overloads as one dispose function (§3.1)
 // ---------------------------------------------------------------------------
 
 /**
- * Well-known symbols for the ManagedResource protocol.
+ * Wraps what `own` was given into the function the release loop calls.
+ * Throws `TypeError` synchronously when nothing applies, so `own` fails at
+ * the call site (C1).
  *
- * Using symbols avoids naming conflicts — any object can implement the
- * protocol (e.g., a context passes *itself* as a resource on its parent).
+ * - `release` given → `() => release(target)`
+ * - `target[Symbol.asyncDispose]` is a function → `() => target[Symbol.asyncDispose]()`
+ * - `target[Symbol.dispose]` is a function → `() => target[Symbol.dispose]()`
+ * - `target` is a function → `target` (the defer overload)
  */
-export const Drain = Symbol.for('ramme.drain.v1');
-export const Flush = Symbol.for('ramme.flush.v1');
-export const Dispose = Symbol.for('ramme.dispose.v1');
-export const Abort = Symbol.for('ramme.abort.v1');
-
-/**
- * A resource managed by a ramme context.
- *
- * Resources participate in the context's three-phase shutdown:
- *
- * 1. **Drain** — stop accepting new work, wait for in-flight work to finish.
- *    Called in parallel on all resources.
- * 2. **Flush** — finish delayed work (log buffers, metric batches).
- *    Called sequentially in reverse registration order.
- * 3. **Dispose** — release underlying resources (close connections, file handles).
- *    Called sequentially in reverse registration order.
- *
- * Additionally, `[Abort]()` propagates an abort signal down the tree as a
- * synchronous method call. It does NOT initiate disposal — the parent
- * orchestrates drain/flush/dispose separately.
- *
- * All methods are optional — implement only what you need.
- */
-export interface ManagedResource {
-  /** Stop intake, wait for in-flight work. Called in parallel. */
-  [Drain]?(): Promise<void> | void;
-  /** Finish delayed work (buffers, batches). Called in reverse order. */
-  [Flush]?(): Promise<void> | void;
-  /** Release underlying resources. Called in reverse order. */
-  [Dispose]?(): Promise<void> | void;
-  /** Propagate abort signal. Synchronous, does not initiate disposal. */
-  [Abort]?(): void;
+export function toDispose(target: object, release?: (value: any) => void | Promise<void>): () => void | Promise<void> {
+  if (release !== undefined) {
+    if (typeof release !== 'function') throw new TypeError('own(value, release): release must be a function');
+    return () => release(target);
+  }
+  const t = target as Partial<AsyncDisposable & Disposable>;
+  // The lib types asyncDispose as PromiseLike; the release loop treats any thenable as pending (isPromise is duck-typed).
+  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!() as Promise<void>;
+  if (typeof t[Symbol.dispose] === 'function') return () => t[Symbol.dispose]!();
+  if (typeof target === 'function') return target as () => void | Promise<void>;
+  throw new TypeError('own(): value is neither Disposable nor AsyncDisposable; pass a release function');
 }
-
-/**
- * Handle returned by `registerResource()`. Allows the resource to
- * unregister itself from the owning context before disposal.
- */
-export interface ResourceHandle {
-  /** Remove this resource from the context's resource list. */
-  unregister(): void;
-}
-
-/**
- * Register a `ManagedResource` on the current creation context.
- *
- * Only available during value creation (class field initializers,
- * factory functions, function keys) — same places where `inject()` works.
- *
- * The resource participates in the owning context's drain/flush/dispose
- * lifecycle. Returns a `ResourceHandle` that can be used to unregister
- * the resource early (e.g. when a fiber completes normally).
- *
- * @throws If called outside a creation context.
- */
-export type RegisterResourceFunction = (resource: ManagedResource) => ResourceHandle;

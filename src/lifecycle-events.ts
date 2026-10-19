@@ -1,109 +1,67 @@
 // ---------------------------------------------------------------------------
-// Lifecycle events — observable context and fiber lifecycle via topics
+// NodeTopic — the node tree's lifecycle as one event stream (PROPOSAL.md §10;
+// IMPLEMENTATION.md §1.14).
 //
-// These topics carry structured events about context creation/disposal,
-// resource registration, and fiber start/settle. They are standard
-// DI-based topics — provide a receiver to start observing.
+// A standard DI topic: provide a receiver on the root (at construction, D-32)
+// to observe every node of that tree. Without a receiver nothing is emitted
+// and nothing is allocated. Because every release is a fiber, "print the
+// running tree and what each node awaits" is one query and covers shutdown.
 // ---------------------------------------------------------------------------
 
+import type { InterruptMode, Outcome } from './context.js';
+import type { NodeKind, StackKind } from './internal-context.js';
 import { createTopic } from './topic.js';
-import type { ContextStatus } from './context.js';
 
-// ---------------------------------------------------------------------------
-// ContextEvent — context and resource lifecycle events
-// ---------------------------------------------------------------------------
+/** `'entry'` for `entry:*` events (their `id` is the owner's); otherwise the emitting node's kind. */
+export type NodeEventKind = NodeKind | 'entry';
 
-export type ContextEvent =
-  | {
-      type: 'context:created';
-      id: number;
-      parentId: number | null;
-      depth: number;
-      scopes: string[];
+interface Base {
+  /** A process-wide sequence number (observability only). */
+  readonly seq: number;
+  /** The emitting node; for `entry:*` events, the owner node. */
+  readonly id: number;
+  readonly kind: NodeEventKind;
+  readonly parentId: number | null;
+}
+
+export type NodeEvent =
+  | (Base & {
+      type: 'node:created';
       name?: string;
-    }
-  | { type: 'context:status'; id: number; status: ContextStatus }
-  | { type: 'context:aborted'; id: number }
-  | { type: 'resource:registered'; contextId: number; resourceIndex: number; resourceName?: string }
-  | {
-      type: 'resource:unregistered';
-      contextId: number;
-      resourceIndex: number;
-      resourceName?: string;
-    };
+      task?: string;
+      stack: StackKind;
+      subscribed: boolean;
+      mode: InterruptMode;
+    })
+  | (Base & { type: 'node:placed'; storageId: number })
+  | (Base & { type: 'node:started' })
+  | (Base & { type: 'node:delivered'; reason: unknown })
+  | (Base & { type: 'node:frozen' })
+  | (Base & { type: 'node:settled'; outcome: Outcome<unknown>['status'] })
+  | (Base & { type: 'node:lent'; childId: number })
+  | (Base & { type: 'node:returned'; childId: number })
+  | (Base & { type: 'node:releasing'; stack: 'explicit' | 'provided' })
+  | (Base & { type: 'entry:registered'; entryName: string; stack: 'explicit' | 'provided' })
+  | (Base & { type: 'entry:released'; entryName: string; stack: 'explicit' | 'provided'; error?: string })
+  | (Base & { type: 'node:complete'; outcome: Outcome<unknown>['status'] })
+  | (Base & { type: 'node:stalled'; sinceMs: number })
+  | (Base & { type: 'join:enter'; joinedId: number })
+  | (Base & { type: 'join:leave'; joinedId: number; outcome: Outcome<unknown>['status'] });
+
+/** What `NodeImpl.emit` is given: the event without the fields it fills in. */
+export type NodeEventInput = NodeEvent extends infer E
+  ? E extends NodeEvent
+    ? Omit<E, keyof Base>
+    : never
+  : never;
 
 /**
- * Topic for context lifecycle events.
+ * The topic of node lifecycle events.
  *
- * Emits events when contexts are created, change status, are aborted,
- * or when resources are registered/unregistered.
- *
- * Provide a receiver on the root context to observe all context activity:
  * ```ts
  * createRootContext({
- *   providers: [valueProvider(ContextTopic, (e) => console.log(e))],
+ *   providers: [valueProvider(NodeTopic, (e) => console.log(e))],
  * });
  * ```
  */
-export const ContextTopic = createTopic<ContextEvent>('context');
-
-// ---------------------------------------------------------------------------
-// FiberEvent — fiber lifecycle events
-// ---------------------------------------------------------------------------
-
-export type FiberEvent =
-  | {
-      type: 'fiber:started';
-      id: number;
-      name: string;
-      contextId: number;
-      mode: 'call' | 'spawn' | 'fork' | 'lifecycle';
-      phase?: 'drain' | 'flush' | 'dispose';
-      resourceName?: string;
-    }
-  | {
-      type: 'fiber:settled';
-      id: number;
-      outcome: 'success' | 'error';
-      durationMs: number;
-      error?: string;
-    }
-  | {
-      type: 'call:enter';
-      callId: number;
-      name: string;
-      contextId: number;
-    }
-  | {
-      type: 'call:leave';
-      callId: number;
-      outcome: 'success' | 'error';
-      durationMs: number;
-      error?: string;
-    }
-  | {
-      type: 'join:enter';
-      joinedFiberId: number;
-      contextId: number;
-    }
-  | {
-      type: 'join:leave';
-      joinedFiberId: number;
-      outcome: 'success' | 'error';
-      durationMs: number;
-      error?: string;
-    };
-
-/**
- * Topic for fiber lifecycle events.
- *
- * Emits events when fibers start and settle.
- *
- * Provide a receiver on the root context to observe all fiber activity:
- * ```ts
- * createRootContext({
- *   providers: [valueProvider(FiberTopic, (e) => console.log(e))],
- * });
- * ```
- */
-export const FiberTopic = createTopic<FiberEvent>('fiber');
+export const NodeTopic = createTopic<NodeEvent>('node');

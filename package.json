@@ -3,15 +3,18 @@
   "version": "0.0.1",
   "license": "Apache-2.0",
   "author": "Anders Hessellund Jensen",
-  "description": "Hierarchical contexts for JavaScript — dependency injection, structured concurrency, and resource lifecycle in one tree: a context is a resolution scope, an execution scope, and a lifetime.",
+  "description": "One tree for JavaScript services and work: dependency injection, structured concurrency and resource lifetimes, carried across await by the platform's async context. Zero dependencies.",
   "keywords": [
     "dependency injection",
     "di",
     "structured concurrency",
+    "tasks",
     "fibers",
-    "lifecycle",
+    "cancellation",
+    "async context",
+    "AsyncLocalStorage",
     "resource management",
-    "context",
+    "lifetime",
     "scopes"
   ],
   "repository": {
@@ -44,7 +47,11 @@
   "files": [
     "dist",
     "src",
-    "!src/**/*.test.ts"
+    "!src/**/*.test.ts",
+    "!src/test",
+    "NOTICE",
+    "DESIGN.md",
+    "DECISIONS.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -52,7 +59,8 @@
     "test": "vitest run",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.tests.json",
-    "check:package": "publint --strict && attw --pack . --profile esm-only",
+    "check:package": "publint --strict && attw --pack . --profile esm-only && pnpm check:surface",
+    "check:surface": "tsc -p scripts/tsconfig.surface.json && node scripts/check-surface.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepack": "pnpm build"
   },
@@ -60,9 +68,6 @@
     "node": ">=22"
   },
   "packageManager": "pnpm@12.3.4",
-  "dependencies": {
-    "lookup-api": "link:../lookup-api"
-  },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^22.0.0",

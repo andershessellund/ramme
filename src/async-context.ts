@@ -1,30 +1,36 @@
 /**
- * TC39 AsyncContext context storage registration for ramme.
+ * TC39 AsyncContext context storage for ramme.
  *
- * Import this module once in your bootstrap/setup code to enable
- * context tracking across async boundaries in environments that
- * support AsyncContext (including browsers with a polyfill).
+ * Import this module once at startup in environments that provide
+ * `AsyncContext.Variable` (natively or through a polyfill). The current
+ * node reaches across `await` only through the platform's async context
+ * (law 3).
  *
  * Usage:
- *   import 'ramme/async-context';     // register AsyncContext storage
- *   import { createContext, inject } from 'ramme'; // everything else
+ *   import 'ramme/async-context';
+ *   import { createRootContext, task } from 'ramme';
  *
  * @see https://github.com/tc39/proposal-async-context
  */
 import { registerContextStorage } from './context-storage.js';
-import type { ContextStorage } from './context-storage.js';
-import type { ContextImpl } from './context-impl.js';
+import type { Frame } from './context-storage.js';
 
 interface AsyncContextVariable<T> {
   get(): T | undefined;
   run<R>(value: T, fn: () => R): R;
 }
 
-interface AsyncContextNamespace {
-  Variable: new <T>() => AsyncContextVariable<T>;
+interface AsyncContextSnapshot {
+  run<R>(fn: () => R): R;
 }
 
-const AsyncContext = (globalThis as any).AsyncContext as AsyncContextNamespace | undefined;
+interface AsyncContextNamespace {
+  Variable: new <T>() => AsyncContextVariable<T>;
+  /** Optional here: a polyfill without it falls back to the `NO_NODE` frame (D-84). */
+  Snapshot?: new () => AsyncContextSnapshot;
+}
+
+const AsyncContext = (globalThis as { AsyncContext?: AsyncContextNamespace }).AsyncContext;
 
 if (!AsyncContext?.Variable) {
   throw new Error(
@@ -33,31 +39,20 @@ if (!AsyncContext?.Variable) {
   );
 }
 
-const variable = new AsyncContext.Variable<ContextImpl[]>();
+const variable = new AsyncContext.Variable<Frame>();
 
-/**
- * Sync fallback stack — used when not inside a variable.run() scope.
- */
-const syncStack: ContextImpl[] = [];
+const Snapshot = AsyncContext.Snapshot;
 
-function getStack(): ContextImpl[] {
-  return variable.get() ?? syncStack;
+function runnerOf(snap: AsyncContextSnapshot): <R>(fn: () => R) => R {
+  return (fn) => snap.run(fn);
 }
 
-const asyncContextStorage: ContextStorage = {
-  current() {
-    const stack = getStack();
-    return stack[stack.length - 1];
-  },
-  enterSync(ctx) {
-    getStack().push(ctx);
-  },
-  leaveSync() {
-    getStack().pop();
-  },
-  runAsync(ctx, fn) {
-    return variable.run([ctx], fn);
-  },
-};
+/** The context at import, where no variable is set (D-84). */
+const detached = Snapshot !== undefined ? new Snapshot() : undefined;
 
-registerContextStorage(asyncContextStorage);
+registerContextStorage({
+  get: () => variable.get(),
+  run: (frame, fn) => variable.run(frame, fn),
+  snapshot: Snapshot !== undefined ? () => runnerOf(new Snapshot()) : undefined,
+  runDetached: detached !== undefined ? runnerOf(detached) : undefined,
+});

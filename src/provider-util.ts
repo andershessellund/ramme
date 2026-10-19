@@ -1,8 +1,7 @@
-import { InjectionKey } from './context-key.js';
-import { inject, RegisterResource } from './inject.js';
-import { Provider } from './context.js';
-import { ManagedResource } from './resource.js';
-import { Scope } from './scope.js';
+import type { InjectionKey } from './context-key.js';
+import type { Provider } from './context.js';
+import { inject } from './inject.js';
+import type { Scope } from './scope.js';
 
 export interface ProviderOptions {
   scope?: Scope;
@@ -90,36 +89,6 @@ export function aliasProvider<T>(
   return {
     key: aliasKey,
     provide: () => inject(targetKey),
-    scope: options?.scope,
-  };
-}
-
-/**
- * Creates a provider that returns a constant value **and** registers a
- * {@link ManagedResource} on the owning context.
- *
- * Use this when the value you're providing holds a resource lease (a
- * connection, file handle, subscription, etc.) that should participate in
- * the context's lifecycle and appear in the debug-ui resource view.
- *
- * ```ts
- * resourceProvider(PgClient, client, {
- *   [Dispose]: () => client.release(),
- * })
- * ```
- */
-export function resourceProvider<T>(
-  key: InjectionKey<T>,
-  value: T,
-  resource: ManagedResource,
-  options?: ProviderOptions,
-): Provider<T> {
-  return {
-    key,
-    provide: () => {
-      inject(RegisterResource)(resource);
-      return value;
-    },
     scope: options?.scope,
   };
 }
