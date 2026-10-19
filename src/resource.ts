@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// Error types (PROPOSAL.md §9.6 plus D-01) and entry wrapping for `own`.
+// Error types (DESIGN.md §4.12, D17) and entry wrapping for `own`.
 //
 // A leaf module: no runtime imports, so every other module can throw these.
-// Every class sets `name` to its class name; §5 of IMPLEMENTATION.md lists
+// Every class sets `name` to its class name; DESIGN.md §4.12 lists
 // exactly when each is thrown.
 // ---------------------------------------------------------------------------
 
@@ -18,7 +18,7 @@ export class NodeCompletedError extends Error {
   override name = 'NodeCompletedError';
 }
 
-/** A body-shaped operation on a DI value's node before placement (§6.2). */
+/** A body-shaped operation on a DI value's node before placement (DESIGN.md §3.3). */
 export class PendingNodeError extends Error {
   override name = 'PendingNodeError';
 }
@@ -33,7 +33,7 @@ export class AlreadyOwnedError extends Error {
   override name = 'AlreadyOwnedError';
 }
 
-/** A body-shaped operation on a node that is lent to a `call` (§7.11): the call was not awaited. */
+/** A body-shaped operation on a node that is lent to a `call` (DESIGN.md §4.9): the call was not awaited. */
 export class UnawaitedCallError extends Error {
   override name = 'UnawaitedCallError';
   constructor(
@@ -50,7 +50,7 @@ export class FiberNotAwaitableError extends Error {
   override name = 'FiberNotAwaitableError';
 }
 
-/** The awaited fiber was aborted, and the awaiter is not frozen (§4.3). */
+/** The awaited fiber was aborted, and the awaiter is not frozen (DESIGN.md §4.2). */
 export class FiberAbortedError extends Error {
   override name = 'FiberAbortedError';
   constructor(
@@ -62,27 +62,27 @@ export class FiberAbortedError extends Error {
   }
 }
 
-/** `pool.fork` after the pool was delivered or close() was requested (D-16). */
+/** `pool.fork` after the pool was delivered or close() was requested (D15). */
 export class PoolClosedError extends Error {
   override name = 'PoolClosedError';
 }
 
-/** A creation-time rule was broken: `lookup`/`call`/`run` during creation, `inject` outside it (§8.1, §8.3). */
+/** A creation-time rule was broken: `lookup`/`call`/`run` during creation, `inject` outside it (DESIGN.md §3.2, §3.5). */
 export class CreationViolationError extends Error {
   override name = 'CreationViolationError';
 }
 
-/** `ctx.run(fn)` returned a promise (Q8, development mode). */
+/** `ctx.run(fn)` returned a promise (development mode; DESIGN.md §4.11, §4.4). */
 export class AsyncRunError extends Error {
   override name = 'AsyncRunError';
 }
 
-/** A provider registered where the key has already been decided, or below its scope's owner (§8.2). */
+/** A provider registered where the key has already been decided, or below its scope's owner (DESIGN.md §3.4). */
 export class PlacementError extends Error {
   override name = 'PlacementError';
 }
 
-// --- Additions to §9.6 (D-01) ---
+// --- The three error types beyond the core set (D17) ---
 
 /** `pool.fork` on a full pool with `whenFull: 'reject'`. */
 export class PoolFullError extends Error {
@@ -104,7 +104,7 @@ export class OwnerInterrupt extends Error {
   }
 }
 
-/** A factory, constructor, `provide()` or default factory returned `undefined` (§8.3). */
+/** A factory, constructor, `provide()` or default factory returned `undefined` (DESIGN.md §3.3). */
 export class FactoryReturnedUndefinedError extends CreationViolationError {
   override name = 'FactoryReturnedUndefinedError';
 }
@@ -115,7 +115,7 @@ function label(node: Context): string {
 }
 
 // ---------------------------------------------------------------------------
-// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (D-28).
+// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (A3).
 // ---------------------------------------------------------------------------
 
 export type SuppressedErrorLike = Error & { error: unknown; suppressed: unknown };
@@ -136,7 +136,7 @@ export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, mess
   (globalThis as { SuppressedError?: SuppressedErrorConstructor }).SuppressedError ?? SuppressedErrorShim;
 
 // ---------------------------------------------------------------------------
-// toDispose — the three `own` overloads as one dispose function (§3.1)
+// toDispose — the three `own` overloads as one dispose function (DESIGN.md §2.6)
 // ---------------------------------------------------------------------------
 
 /**

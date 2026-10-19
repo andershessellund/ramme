@@ -1,4 +1,4 @@
-// freeze-gc.test.ts — IMPLEMENTATION.md §6.1, §2.4 property 4, A2: a frozen
+// freeze-gc.test.ts — DESIGN.md §4.2, A2: a frozen
 // body is garbage. Each case freezes a body whose frame holds a large array,
 // then asserts a FinalizationRegistry hears the array collected. It fails if
 // any node field, listener or source reaction retains the continuation.
@@ -93,7 +93,7 @@ describe.skipIf(!hasGc)('a frozen body is collectable (A2)', () => {
     await app.close();
   });
 
-  it('the frozen node itself is collectable while the foreign fiber it joined still runs (D-84)', async () => {
+  it('the frozen node itself is collectable while the foreign fiber it joined still runs', async () => {
     const app = createRootContext();
     const foreign = spawn(app, async () => {
       await here().never();
@@ -114,7 +114,7 @@ describe.skipIf(!hasGc)('a frozen body is collectable (A2)', () => {
     await app.close();
   });
 
-  it("a frozen body's async-context values are not retained by a pending managed(p) it awaited (D-84)", async () => {
+  it("a frozen body's async-context values are not retained by a pending managed(p) it awaited", async () => {
     const { AsyncLocalStorage } = await import('node:async_hooks');
     const als = new AsyncLocalStorage<number[]>();
     const big = tracked();

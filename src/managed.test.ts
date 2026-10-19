@@ -61,10 +61,9 @@ function guard(): UnhandledRejectionGuard {
   return g;
 }
 
-describe('managed promises (§2.4)', () => {
-  // Fixed against §2.4/D-38: the plan's "(1) the source is returned untouched" predates revision 2, in which
-  // managedFor ALWAYS returns a ManagedPromise (delivery happens only in then). What stays untouched is the
-  // source's value and, for managed(p), its rejection.
+describe('managed promises (DESIGN.md §4.2)', () => {
+  // managedFor ALWAYS returns a ManagedPromise, since delivery happens only in then (DESIGN.md §4.2, D13). What
+  // stays untouched is the source's value and, for managed(p), its rejection.
   it('(1) with no current node: nothing can freeze, and the source settles the wrapper untouched', async () => {
     const value = { v: 1 };
     const mp = managedFor(Promise.resolve(value));
@@ -74,7 +73,7 @@ describe('managed promises (§2.4)', () => {
     await expect(managedFor(Promise.reject(err))).rejects.toBe(err);
   });
 
-  it('(1) the decision is made for the node current when the managed await is created, not where it is awaited (§4.3)', async () => {
+  it('(1) the decision is made for the node current when the managed await is created, not where it is awaited (DESIGN.md §4.2)', async () => {
     const a = new FakeTarget();
     const src = deferred<number>();
     const targeted = inFrame(a, () => managedFor(src.promise));
@@ -108,7 +107,7 @@ describe('managed promises (§2.4)', () => {
     expect(await creation).toBe(3);
   });
 
-  it('(2) then on an applied target calls markFrozen once, a microtask later under no frame, and the returned promise never settles (D-68)', async () => {
+  it('(2) then on an applied target calls markFrozen once, a microtask later under no frame, and the returned promise never settles', async () => {
     const t = new FakeTarget();
     const src = deferred<number>();
     const d = counting<number>();
@@ -124,7 +123,8 @@ describe('managed promises (§2.4)', () => {
     expect(t.frozen).toBe(0); // not inside the caller's synchronous code
     await micro();
     expect(t.frozen).toBe(1);
-    expect(t.frozenIn).toEqual([undefined]); // NO_NODE (D-46), not the body's frame
+    // NO_NODE, not the body's frame: ramme's own continuations run under an empty frame (DESIGN.md §6)
+    expect(t.frozenIn).toEqual([undefined]);
     expect(t.onApplied.size).toBe(0);
     src.resolve(1);
     await neverSettles(p);
@@ -138,11 +138,11 @@ describe('managed promises (§2.4)', () => {
     expect(called).toBe(false);
   });
 
-  it('(2) a .catch the body attaches after delivery never counts it frozen inside its synchronous code (D-68)', async () => {
+  it('(2) a .catch the body attaches after delivery never counts it frozen inside its synchronous code', async () => {
     const t = new FakeTarget();
     const log: string[] = [];
     t.onFrozen = () => log.push('markFrozen');
-    t.apply(); // delivered while the body runs plain code (§4.2)
+    t.apply(); // delivered while the body runs plain code (DESIGN.md §4.2)
     const src = deferred<number>();
     let resumed = false;
     const body = inFrame(t, async () => {
@@ -233,7 +233,7 @@ describe('managed promises (§2.4)', () => {
     await neverSettles(all);
   });
 
-  it('(6) a Promise.all over managed wrappers that fulfils leaves nothing armed once the body resumes (D-64)', async () => {
+  it('(6) a Promise.all over managed wrappers that fulfils leaves nothing armed once the body resumes (DESIGN.md §4.2)', async () => {
     const t = new FakeTarget();
     const s1 = deferred<number>();
     const s2 = deferred<number>();
@@ -246,13 +246,14 @@ describe('managed promises (§2.4)', () => {
     s2.resolve(2);
     expect(await all).toEqual([1, 2]);
     expect(t.onApplied.size).toBe(0);
-    t.apply(); // delivery while the resumed body runs plain code (§4.2)
+    t.apply(); // delivery while the resumed body runs plain code (DESIGN.md §4.2)
     expect(t.frozen).toBe(0);
   });
 
-  // D-64 pins these two shapes as unsupported: "then was called" outlives the suspension, a delivery counts the running
-  // body frozen, and S1's dev diagnostic reports the body when it later settles.
-  it('(6) unsupported (D-64): a Promise.race loser stays armed after the body resumed, and a later delivery counts it frozen', async () => {
+  // These two shapes are unsupported in a freeze body (DESIGN.md §4.2): "then was called" outlives the suspension, a
+  // delivery counts the running body frozen, and the development-mode diagnostic reports the body when it later
+  // settles (DESIGN.md §4.4).
+  it('(6) unsupported (DESIGN.md §4.2): a Promise.race loser stays armed after the body resumed, and a later delivery counts it frozen', async () => {
     const t = new FakeTarget();
     const s1 = deferred<number>();
     const s2 = deferred<number>();
@@ -266,7 +267,7 @@ describe('managed promises (§2.4)', () => {
     await tick();
   });
 
-  it('(6) unsupported (D-64): a bare member resumes a body counted frozen; wrapping it in managed() keeps it suspended', async () => {
+  it('(6) unsupported (DESIGN.md §4.2): a bare member resumes a body counted frozen; wrapping it in managed() keeps it suspended', async () => {
     const err = new Error('aborted fetch');
     const t = new FakeTarget();
     const bare = deferred<number>();
@@ -288,9 +289,10 @@ describe('managed promises (§2.4)', () => {
     expect(guard().seen).toEqual([]);
   });
 
-  // D-67 (a): a member's deliver consumes a failure, the combinator stores it, a sibling is cut, and the body never
-  // reads it. In a node the record has left the owner's `unconsumed`, so the failure surfaces nowhere (I11).
-  it('(6) unsupported (D-67): Promise.allSettled, or a result() member, consumes a failure the frozen body never sees', async () => {
+  // A consuming member under a combinator (DESIGN.md §4.2): a member's deliver consumes a failure, the combinator
+  // stores it, a sibling is cut, and the body never reads it. In a node the record has left the owner's `unconsumed`,
+  // so the failure surfaces nowhere (I11).
+  it('(6) unsupported (DESIGN.md §4.2): Promise.allSettled, or a result() member, consumes a failure the frozen body never sees', async () => {
     const shapes = {
       'allSettled over join': (a: Promise<unknown>, b: Promise<unknown>) => Promise.allSettled([a, b]),
       'Promise.all over result': (a: Promise<unknown>, b: Promise<unknown>) => Promise.all([a, b]),
@@ -345,8 +347,9 @@ describe('managed promises (§2.4)', () => {
     expect(record.consumed).toBe(false);
   });
 
-  // D-67 (b): `.then`/`.catch`/`.finally` on a stored wrapper is `then`: it arms the cut, and the body moves on.
-  it('(6) unsupported (D-67): a .catch attached to a stored wrapper arms the cut; a delivery during a bare await counts the running body frozen', async () => {
+  // A .then/.catch attached without awaiting (DESIGN.md §4.2): `.then`/`.catch`/`.finally` on a stored wrapper is
+  // `then`: it arms the cut, and the body moves on.
+  it('(6) unsupported (DESIGN.md §4.2): a .catch attached to a stored wrapper arms the cut; a delivery during a bare await counts the running body frozen', async () => {
     const t = new FakeTarget();
     const joined = deferred<number>();
     const fetchLike = deferred<number>();
@@ -355,7 +358,7 @@ describe('managed promises (§2.4)', () => {
       const p = managedFor(joined.promise); // join(f)
       p.catch(() => {}); // not awaited
       await fetchLike.promise; // a bare await
-      resumed = true; // in a node: runs after the owner released (I6, §4.2)
+      resumed = true; // in a node: runs after the owner released (I6, DESIGN.md §4.2)
     });
     expect(t.onApplied.size).toBe(1); // armed by the .catch
     t.apply();
@@ -365,8 +368,8 @@ describe('managed promises (§2.4)', () => {
     expect(resumed).toBe(true);
   });
 
-  // D-67 (c): the target is fixed at creation (§2.4 property 1), not at `then`.
-  it('(6) unsupported (D-67): a wrapper awaited by another body freezes its creator and strands the awaiter; dev mode reports it once (D-68)', async () => {
+  // A managed promise awaited by another body (DESIGN.md §4.2): the target is fixed at creation, not at `then`.
+  it('(6) unsupported (DESIGN.md §4.2): a wrapper awaited by another body freezes its creator and strands the awaiter; dev mode reports it once', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const a = new FakeTarget('freeze', 'a');
@@ -477,7 +480,7 @@ describe('managed promises (§2.4)', () => {
     await neverSettles(n1);
   });
 
-  it('(7) cut-only wrappers share one cut per target: racing never() in a loop keeps onApplied at one entry (D-64)', async () => {
+  it('(7) cut-only wrappers share one cut per target: racing never() in a loop keeps onApplied at one entry (DESIGN.md §4.2)', async () => {
     const t = new FakeTarget();
     for (let i = 0; i < 1000; i++) {
       const never = inFrame(t, () => managedNever());
@@ -498,7 +501,7 @@ describe('managed promises (§2.4)', () => {
     expect(t.frozen).toBe(1);
   });
 
-  it('(7) managedSignal (interrupted()): cut-only with the shared cut for a freeze awaiter of its own interrupt, the source for anyone else (D-66, D-86)', async () => {
+  it('(7) managedSignal (interrupted()): cut-only with the shared cut for a freeze awaiter of its own interrupt, the source for anyone else', async () => {
     const t = new FakeTarget();
     const delivered = deferred<string>(); // deliveredResolvers.promise
     for (let i = 0; i < 100; i++) {
@@ -523,12 +526,12 @@ describe('managed promises (§2.4)', () => {
       expect(awaiter.onApplied.size).toBe(0);
       reason.resolve('reason');
       awaiter.apply();
-      expect(await seen).toBe('reason'); // §2.4 property 5: the body sees the interrupt
+      expect(await seen).toBe('reason'); // the body sees the interrupt (DESIGN.md §4.3)
       expect(awaiter.frozen).toBe(0);
     }
     expect(await managedSignal(Promise.resolve('top level'), t)).toBe('top level');
 
-    // D-86: a freeze body awaiting ANOTHER node's interrupt. The receiver's delivery settles the source
+    // A freeze body awaiting ANOTHER node's interrupt. The receiver's delivery settles the source
     // without cutting the awaiter, so the wrapper must be sourced: it resumes with the reason, and only
     // the awaiter's own delivery cuts it.
     const awaiter = new FakeTarget('freeze', 'awaiter');
@@ -572,7 +575,7 @@ describe('managed promises (§2.4)', () => {
     applied.apply();
     const s = deferred<number>();
     void new ManagedPromise(applied, s.promise).catch(() => {});
-    await micro(); // D-68
+    await micro(); // counted frozen a microtask later (DESIGN.md §4.4)
     expect(applied.frozen).toBe(1);
     void new ManagedPromise(applied, s.promise).finally(() => {});
     await micro();
@@ -605,7 +608,7 @@ describe('managed promises (§2.4)', () => {
     }
   });
 
-  it('(10) deliver runs neither when the wrapper is cut nor when it is never awaited, and once per then (D-38)', async () => {
+  it('(10) deliver runs neither when the wrapper is cut nor when it is never awaited, and once per then (D13)', async () => {
     const t = new FakeTarget();
     const cutSrc = deferred<number>();
     const cutD = counting<number>();
@@ -628,7 +631,7 @@ describe('managed promises (§2.4)', () => {
     expect(twice.calls).toBe(2);
   });
 
-  it('(11) a deliver that throws rejects the derived promise, and a second then runs it again (D-50)', async () => {
+  it('(11) a deliver that throws rejects the derived promise, and a second then runs it again', async () => {
     const err = new Error('failure');
     const d = counting<number>(() => {
       throw err;
@@ -640,7 +643,7 @@ describe('managed promises (§2.4)', () => {
     expect(d.calls).toBe(2);
   });
 
-  it('(11) a then after a delivery is armed again: a delivery before its reaction runs cuts it (D-61, D-50)', async () => {
+  it('(11) a then after a delivery is armed again: a delivery before its reaction runs cuts it (DESIGN.md §4.12)', async () => {
     const t = new FakeTarget();
     const d = counting<number>();
     const mp = new ManagedPromise(t, Promise.resolve(1), d.deliver);
@@ -655,7 +658,7 @@ describe('managed promises (§2.4)', () => {
     expect(d.calls).toBe(1);
   });
 
-  it('(11) the cut stays armed while any cell is in flight: a delivery from the first continuation cuts the second (D-61)', async () => {
+  it('(11) the cut stays armed while any cell is in flight: a delivery from the first continuation cuts the second', async () => {
     const t = new FakeTarget();
     const src = deferred<number>();
     const d = counting<number>();
@@ -755,7 +758,7 @@ describe('managed promises (§2.4)', () => {
     // the setup hook checks again after this test
   });
 
-  it('(14) a stored wrapper awaited after a timer delivers its error to the late awaiter (D-38)', async () => {
+  it('(14) a stored wrapper awaited after a timer delivers its error to the late awaiter (D13)', async () => {
     const err = new Error('late');
     const mp = managedFor(Promise.resolve(1), () => {
       throw err;
@@ -764,10 +767,10 @@ describe('managed promises (§2.4)', () => {
     await expect(mp).rejects.toBe(err);
   });
 
-  it('(14) an awaited managed(p) whose awaiter freezes marks p handled: a rejecting p is no unhandled rejection (D-63)', async () => {
+  it('(14) an awaited managed(p) whose awaiter freezes marks p handled: a rejecting p is no unhandled rejection (D13)', async () => {
     const err = new Error('aborted fetch');
     const t = new FakeTarget();
-    t.apply(); // born delivered, or delivered while the body ran plain code (§4.2, §5.4)
+    t.apply(); // born delivered, or delivered while the body ran plain code (DESIGN.md §4.2, §2.7)
     let resumed = false;
     const body = (async () => {
       try {
@@ -792,7 +795,7 @@ describe('managed promises (§2.4)', () => {
     await neverSettles(all);
 
     // In flight, then cut: #listen subscribed before the cut, and a later then on the cut wrapper adds nothing:
-    // the cut dropped the target (D-84), so it neither subscribes nor counts the (already frozen) target again.
+    // the cut dropped the target (A2), so it neither subscribes nor counts the (already frozen) target again.
     const c = new FakeTarget();
     const slow = deferred<number>();
     const mp = new ManagedPromise(c, slow.promise);
@@ -808,7 +811,7 @@ describe('managed promises (§2.4)', () => {
     expect(guard().seen).toEqual([]);
   });
 
-  it('(15) deliver and the callbacks run in the context `then` was called in, user AsyncLocalStorage values included (D-84)', async () => {
+  it('(15) deliver and the callbacks run in the context `then` was called in, user AsyncLocalStorage values included', async () => {
     const { AsyncLocalStorage } = await import('node:async_hooks');
     const als = new AsyncLocalStorage<string>();
     const t = new FakeTarget('observe'); // current node, but nothing can freeze
@@ -835,7 +838,7 @@ describe('managed promises (§2.4)', () => {
     ]);
   });
 
-  it("(16) in a failure handler's frame `then` ignores the target: it arms nothing, the creator's delivery leaves it, and the source settles it; a spent wrapper warns (D-116, D-117)", async () => {
+  it("(16) in a failure handler's frame `then` ignores the target: it arms nothing, the creator's delivery leaves it, and the source settles it; a spent wrapper warns (DESIGN.md §4.7)", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const y = new FakeTarget('freeze', 'y');

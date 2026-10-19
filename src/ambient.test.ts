@@ -1,11 +1,12 @@
-// ambient.test.ts — IMPLEMENTATION.md §6.1: the free functions of §3.1 and
-// §1.13 (law 2, I21). Each is `current().<method>(...)`; `current()` and
+// ambient.test.ts — the free functions of ambient.ts (law 2, I21). Each is
+// `current().<method>(...)` (DESIGN.md §6); `current()` and
 // `signal()` read the current node in a fork, a call, a `run` frame, a
 // release, a creation and a failure handler; with storage registered and no
 // current node every one throws NoCurrentNodeError (the no-storage message
-// is storage.test.ts's, D-57); `runSync`; `lookup` options; `own` (D-37);
-// the creation-frame split of §1.13 (I16); and the ported `Context.run`
-// suite of push-context.test.ts (§6.2).
+// is tested in storage.test.ts, the one test file that imports no
+// context-storage adapter); `runSync`; `lookup` options; `own` (D16);
+// the creation-frame split of ambient.ts (I16; DESIGN.md §3.5); and the
+// `Context.run` suite ported from the pre-redesign push-context.test.ts.
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import './node.js';
 import {
@@ -160,7 +161,7 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
           expectVia(childed, [{ name: 'c' }], 'child');
           expect(impl(childed.ret as Context).parent).toBe(N);
 
-          expectVia(viaPrototype('interrupted', () => interrupted()), [], 'interrupted'); // dropped unawaited: safe (D-38)
+          expectVia(viaPrototype('interrupted', () => interrupted()), [], 'interrupted'); // dropped unawaited: safe (D13)
           expectVia(viaPrototype('never', () => never()), [], 'never');
           const p = Promise.resolve(5);
           const managedVia = viaPrototype('managed', () => managed(p));
@@ -240,7 +241,7 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
   });
 });
 
-describe('current() and signal() (§3.1, §5.2, D-45)', () => {
+describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
   it('inside a release, current() is the release fiber: its parent is the owner, signal() is its own deadline, and the owner outcome is readable', async () => {
     const root = createRootContext();
     const seen: Record<string, { kind: string; parentIsOwner: boolean; freshSignal: boolean; ownerOutcome: unknown }> = {};
@@ -305,7 +306,7 @@ describe('current() and signal() (§3.1, §5.2, D-45)', () => {
     expect(impl(seen!.node).parent).toBe(root); // placed after the constructor returned
   });
 
-  it('in a failure handler current() is the parent (D-45)', async () => {
+  it('in a failure handler current() is the parent', async () => {
     const root = createRootContext();
     let inHandler: Context | undefined;
     root.fork(
@@ -325,12 +326,12 @@ describe('current() and signal() (§3.1, §5.2, D-45)', () => {
   });
 });
 
-describe('NoCurrentNodeError with storage registered (§8.4)', () => {
+describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
   const freeFunctions: Record<string, () => unknown> = {
     current: () => current(),
     signal: () => signal(),
     lookup: () => lookup(createInjectionKey<string>('K')),
-    'lookup(ContextKey)': () => lookup(ContextKey), // NoCurrentNodeError first (D-95(d)); with a node it is D-18's CreationViolationError
+    'lookup(ContextKey)': () => lookup(ContextKey), // NoCurrentNodeError first; with a node it is a CreationViolationError (DESIGN.md §4.12)
     own: () => own(() => {}),
     release: () => release({}),
     releaseAll: () => releaseAll(),
@@ -378,7 +379,7 @@ describe('NoCurrentNodeError with storage registered (§8.4)', () => {
     expect(await seen.promise).toBeInstanceOf(NoCurrentNodeError);
   });
 
-  it('nothing is current after ctx.run(fn) returns or throws, and the run frame does not survive an await (P19)', async () => {
+  it('nothing is current after ctx.run(fn) returns or throws, and the run frame does not survive an await', async () => {
     const root = createRootContext();
     expect(root.run(() => current())).toBe(root);
     expect(() => current()).toThrow(NoCurrentNodeError);
@@ -394,7 +395,7 @@ describe('NoCurrentNodeError with storage registered (§8.4)', () => {
   });
 });
 
-describe('runSync (§7.8, Q10)', () => {
+describe('runSync (DESIGN.md §4.11)', () => {
   it('runs fn in a fresh child of the current node and releases it before returning', async () => {
     const t = trace();
     const root = createRootContext();
@@ -413,7 +414,7 @@ describe('runSync (§7.8, Q10)', () => {
       );
       expectTypeOf(r).toEqualTypeOf<number>();
       expect(r).toBe(3);
-      expect(t.log).toEqual(['released']); // synchronously, before runSync returned (D-25)
+      expect(t.log).toEqual(['released']); // synchronously, before runSync returned (DESIGN.md §2.4)
       expect(inner?.name).toBe('runSync');
       expect(impl(inner!).parent).toBe(me);
       expect(inner?.state).toBe('complete');
@@ -450,7 +451,7 @@ describe('runSync (§7.8, Q10)', () => {
   });
 });
 
-describe('lookup (§8.1): optional and skipSelf pass through', () => {
+describe('lookup (DESIGN.md §3.2): optional and skipSelf pass through', () => {
   it('resolves from the current node; a miss throws unless optional; the overloads type the result', async () => {
     const K = createInjectionKey<string>('K');
     const M = createInjectionKey<string>('M');
@@ -490,7 +491,7 @@ describe('lookup (§8.1): optional and skipSelf pass through', () => {
     await root.close();
   });
 
-  it('lookup(ContextKey) with a current node is a CreationViolationError pointing at current() (D-18)', async () => {
+  it('lookup(ContextKey) with a current node is a CreationViolationError pointing at current()', async () => {
     const root = createRootContext();
     await root.call(async () => {
       expect(() => lookup(ContextKey)).toThrow(CreationViolationError);
@@ -500,7 +501,7 @@ describe('lookup (§8.1): optional and skipSelf pass through', () => {
   });
 });
 
-describe('own (§6.1, D-37) and release', () => {
+describe('own (DESIGN.md §2.6, D16) and release', () => {
   it('own(x) twice with one argument returns x both times and registers one entry; own(x, release) on an owned x is AlreadyOwnedError', async () => {
     const dispose = vi.fn();
     const root = createRootContext();
@@ -573,7 +574,7 @@ describe('own (§6.1, D-37) and release', () => {
   });
 });
 
-describe('in a creation frame (§6.2, §8.1, §8.3, I16)', () => {
+describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
   it('the body-shaped free functions throw CreationViolationError before touching any node: no value node is created', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
@@ -632,7 +633,7 @@ describe('in a creation frame (§6.2, §8.1, §8.3, I16)', () => {
       readonly child: Context;
       constructor() {
         own(t.at('early'));
-        void releaseAll(); // its first (here: only) release runs before it returns; the promise is safe to drop (D-38)
+        void releaseAll(); // its first (here: only) release runs before it returns; the promise is safe to drop (D13)
         const x = own(t.at('x'));
         void release(x); // runs now
         own({ [Symbol.dispose]: t.at('kept') });
@@ -670,7 +671,7 @@ describe('in a creation frame (§6.2, §8.1, §8.3, I16)', () => {
   });
 });
 
-describe('Context.run (ported from push-context.test.ts, §6.2)', () => {
+describe('Context.run (ported from the pre-redesign push-context.test.ts)', () => {
   it('runs a function with the node as current', () => {
     const KEY = createInjectionKey<string>('run-key');
     const ctx = createRootContext({ providers: [valueProvider(KEY, 'run-val')] });
@@ -700,12 +701,12 @@ describe('Context.run (ported from push-context.test.ts, §6.2)', () => {
     expect(ctx.run(() => 42)).toBe(42);
   });
 
-  it('a callback that returns a promise is an AsyncRunError in development (Q8)', () => {
+  it('a callback that returns a promise is an AsyncRunError in development', () => {
     const ctx = createRootContext();
     expect(() => ctx.run(async () => 1)).toThrow(AsyncRunError);
   });
 
-  it('a callback whose promise rejects is one AsyncRunError, not also an unhandled rejection (Q8, I10)', async () => {
+  it('a callback whose promise rejects is one AsyncRunError, not also an unhandled rejection (I10)', async () => {
     const ctx = createRootContext();
     expect(() =>
       ctx.run(async () => {
@@ -716,7 +717,7 @@ describe('Context.run (ported from push-context.test.ts, §6.2)', () => {
     await ctx.close();
   });
 
-  it('runSync with an async fn is one AsyncRunError; the continuation that finds its child complete rejects nothing unhandled (Q8, I10)', async () => {
+  it('runSync with an async fn is one AsyncRunError; the continuation that finds its child complete rejects nothing unhandled (I10)', async () => {
     const root = createRootContext();
     let inner: Context | undefined;
     root.run(() => {

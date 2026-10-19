@@ -1,10 +1,21 @@
-// probes.test.ts — IMPLEMENTATION.md §6.1: one named test per review probe.
-// P1–P5, P7 and P19–P23 are implemented from the proposal's references; P6
-// and P8–P18 are not inferable from PROPOSAL.md and are `it.todo`
-// placeholders (D-35). Their candidate scenarios are covered under invariant
-// names in invariants.test.ts.
+// probes.test.ts — one named test per probe. Pn are test ids local to this
+// file: they number the probes of the design review of the first extraction,
+// which the redesign was checked against.
+//   P1 resource-list leak: own/release and fork/join cycles, failing ones included, leave no entries, subscribers or failure records behind.
+//   P2 double dispose: asyncDispose twice, close and abort on one node release each entry once, share one completion and complete once.
+//   P3 admission after dispose: every operation on a complete node throws NodeCompletedError; the lifecycle four are no-ops.
+//   P4 call not awaited by parent dispose: a dropped call's child is still awaited by the parent's close(), and the next body-shaped operation throws UnawaitedCallError naming it.
+//   P5 creation-context leak into a forked body: a constructor fork starts after the factory returned and sees no creation; inject throws, lookup works, current() is the fiber.
+//   P7 order-dependent override / 'No provider' at the root: both resolution orders converge, and PlacementError never depends on sibling activity.
+//   P19 enterSync bleed: nothing is current after ctx.run(fn) returns or throws, and a run frame does not leak across await.
+//   P20 shadowed explicit key: a child providing A after an ancestor cached V with A in deps(V) gets V rebuilt by its own view.
+//   P21 lazy registration order: a value first looked up by a running fiber lands on the provided stack and is released after the fiber (G1).
+//   P22 constructor-forked fiber's parent: it is the value's node at the storage node; the fiber starts after placement and outlives the request.
+//   P23 failed factory leaks resources: what a throwing factory owned is released, nothing is cached, the error rethrows, and the next get runs the factory again.
+// P6 and P8–P18 have no recorded scenario; their candidate scenarios are
+// tested under invariant names in invariants.test.ts.
 //
-// Written in the proposal's idiom: the free functions of ambient.ts inside
+// Written in ramme's idiom (law 2): the free functions of ambient.ts inside
 // bodies, the method form only where a node that is not current is named.
 import { describe, expect, it } from 'vitest';
 import './node.js';
@@ -60,7 +71,7 @@ describe('probes', () => {
       }
       expect(me.explicit.size).toBe(0); // completed fibers are unlinked
       expect(me.subscribers.size).toBe(0);
-      expect(impl(lastFiber!).body).toBeUndefined(); // D-53: a completed fiber retains no closure
+      expect(impl(lastFiber!).body).toBeUndefined(); // a completed fiber retains no closure (A2)
 
       const boom = new Error('boom');
       for (let i = 0; i < 10_000; i++) {
@@ -69,7 +80,7 @@ describe('probes', () => {
         });
         expect(await rejection(join(f))).toBe(boom);
       }
-      expect(me.unconsumed.size).toBe(0); // the record leaves the set at delivery (D-40)
+      expect(me.unconsumed.size).toBe(0); // the record leaves the set at delivery (D16)
       expect(me.subscribers.size).toBe(0);
       expect(me.explicit.size).toBe(0);
 
@@ -138,7 +149,7 @@ describe('probes', () => {
       expect([passive, asyncPassive], kind).toEqual([1, 1]);
       expect(ev.of('node:complete').filter((e) => e.id === N.id), kind).toHaveLength(1);
       expect(ev.of('entry:released').filter((e) => e.id === N.id), kind).toHaveLength(2);
-      // a context's disposal resolves; a fiber's asyncDispose acts as join and reports its abort (D-50)
+      // a context's disposal resolves; a fiber's asyncDispose acts as join and reports its abort (DESIGN.md §4.12)
       const statuses = outcomes.map((o) => o.status);
       expect(statuses, kind).toEqual(kind === 'context' ? ['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled'] : ['rejected', 'rejected', 'fulfilled', 'fulfilled']);
       await ev.root.close();
@@ -204,7 +215,7 @@ describe('probes', () => {
     expect(err).toBeInstanceOf(UnawaitedCallError);
     expect((err as UnawaitedCallError).child).toBe(child);
     const closing = root.close();
-    expect(await settled(closing)).toBe('pending'); // the parent waits for the child, whatever it costs (§5.6)
+    expect(await settled(closing)).toBe('pending'); // the parent waits for the child, whatever it costs (DESIGN.md §2.8)
     expect(child?.state).not.toBe('complete');
     gate.resolve();
     await within(closing);
@@ -257,8 +268,6 @@ describe('probes', () => {
     await root.close();
   });
 
-  it.todo('P6: author to supply');
-
   // -------------------------------------------------------------------------
   it('P7 order-dependent override / "No provider" at root: both orders converge, no "No provider" when Database has a default, and PlacementError never depends on sibling activity', async () => {
     class Database {}
@@ -279,7 +288,7 @@ describe('probes', () => {
       expect(root.get(UserRepo), order).toBe(got.root);
       await root.close();
     }
-    // The root never answered for UserRepo while only children did: providing it there is allowed (§8.2).
+    // The root never answered for UserRepo while only children did: providing it there is allowed (DESIGN.md §3.4).
     const root = createRootContext();
     const a = root.child({ providers: [classProvider(Database)] });
     const b = root.child({ providers: [classProvider(Database)] });
@@ -291,18 +300,6 @@ describe('probes', () => {
     expect(() => root.addProvider({ key: UserRepo, provide: () => new UserRepo() })).toThrow(PlacementError);
     await root.close();
   });
-
-  it.todo('P8: author to supply');
-  it.todo('P9: author to supply');
-  it.todo('P10: author to supply');
-  it.todo('P11: author to supply');
-  it.todo('P12: author to supply');
-  it.todo('P13: author to supply');
-  it.todo('P14: author to supply');
-  it.todo('P15: author to supply');
-  it.todo('P16: author to supply');
-  it.todo('P17: author to supply');
-  it.todo('P18: author to supply');
 
   // -------------------------------------------------------------------------
   it('P19 enterSync bleed: after ctx.run(fn) returns or throws nothing is current, there is no sync stack, and a run frame does not leak across await', async () => {

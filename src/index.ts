@@ -1,7 +1,7 @@
-// The public surface (IMPLEMENTATION.md §1.15). The types of context.ts are
-// listed by name rather than re-exported with `export type *`, so the published
-// index.d.ts names every public type (D-110); the list is exactly context.ts's
-// exports.
+// The public surface (DESIGN.md §7; the exact name list is the surface check's
+// list, scripts/check-surface.mjs). The types of context.ts are listed by name
+// rather than re-exported with `export type *`, so the published index.d.ts
+// names every public type; the list is exactly context.ts's exports.
 export type {
   NodeState,
   InterruptMode,

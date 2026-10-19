@@ -26,7 +26,7 @@ interface AsyncContextSnapshot {
 
 interface AsyncContextNamespace {
   Variable: new <T>() => AsyncContextVariable<T>;
-  /** Optional here: a polyfill without it falls back to the `NO_NODE` frame (D-84). */
+  /** Optional here: a polyfill without it registers source reactions under the `NO_NODE` frame (A2). */
   Snapshot?: new () => AsyncContextSnapshot;
 }
 
@@ -47,7 +47,10 @@ function runnerOf(snap: AsyncContextSnapshot): <R>(fn: () => R) => R {
   return (fn) => snap.run(fn);
 }
 
-/** The context at import, where no variable is set (D-84). */
+/**
+ * The context at import, where no variable is set: source reactions are registered here, outside
+ * the awaiting body's async context (A2).
+ */
 const detached = Snapshot !== undefined ? new Snapshot() : undefined;
 
 registerContextStorage({

@@ -1,9 +1,9 @@
-// fiber.test.ts — IMPLEMENTATION.md §6.1 (rewritten) and the ports of the
-// previous fiber suite (§6.2): tasks (§7.2, §7.10, I27), start semantics
-// (§7.3, I20), failure destinations (§7.4, Q6), join/result, the `then` trap
-// (D-29, D-49), all/race (§7.5, D-14, D-51), interruption from a body (§4),
-// the top-level call (§4.3) and the managed-promise guarantees the free
-// functions inherit (D-38).
+// fiber.test.ts — tasks and fibers, plus the ports of the pre-redesign fiber
+// suite: tasks (DESIGN.md §4.5, I27), start semantics (DESIGN.md §4.6, I20),
+// failure destinations (DESIGN.md §4.7, D14), join/result, the `then` trap
+// (DESIGN.md §4.5), all/race (DESIGN.md §4.8), interruption from a body
+// (DESIGN.md §4.1–§4.4), the top-level call (DESIGN.md §4.2) and the
+// managed-promise guarantees the free functions inherit (D13).
 //
 // Everything here uses the free functions of ambient.ts (law 2); the method
 // form appears only where a node that is not current is named on purpose
@@ -37,7 +37,7 @@ import { deferred, impl, tick, trace, within } from './test/util.js';
 
 const link = { onFailure: 'link' } as const;
 
-/** The rejection of `p`; throws if `p` fulfils. Awaits `p` directly, so a managed `p` is awaited by its own body (D-64). */
+/** The rejection of `p`; throws if `p` fulfils. Awaits `p` directly, so a managed `p` is awaited by its own body, a supported await shape in a freeze body (DESIGN.md §4.2). */
 async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
   try {
     await p;
@@ -62,7 +62,7 @@ function sleep(ms: number, s?: AbortSignal): Promise<void> {
   });
 }
 
-describe('task() (§7.2, §7.10, I27)', () => {
+describe('task() (DESIGN.md §4.5, I27)', () => {
   it('a task is an object, not a function: calling it is a TypeError at compile time and at runtime', () => {
     const t = task(async (n: number) => n);
     expect(typeof t).toBe('object');
@@ -157,7 +157,7 @@ describe('task() (§7.2, §7.10, I27)', () => {
   });
 });
 
-describe('start semantics (§7.3, I20)', () => {
+describe('start semantics (DESIGN.md §4.6, I20)', () => {
   it("fork never runs any part of the body in the forker's frame; the body sees its own node current from its first line", async () => {
     const t = trace();
     const root = createRootContext();
@@ -200,7 +200,7 @@ describe('start semantics (§7.3, I20)', () => {
       expect(inner).toBeDefined();
       expect(inner).not.toBe(me);
       expect(impl(inner!).parent).toBe(me);
-      expect(impl(me).lentTo).toBe(inner); // §7.11
+      expect(impl(me).lentTo).toBe(inner); // DESIGN.md §4.9
       expect(await p).toBe(42);
       expect(impl(me).lentTo).toBeUndefined();
     });
@@ -241,7 +241,7 @@ describe('start semantics (§7.3, I20)', () => {
   });
 });
 
-describe('failure destinations (§7.4)', () => {
+describe('failure destinations (DESIGN.md §4.7)', () => {
   it("'join' (the default): the failure is held for join; unjoined, it surfaces from the parent's completion", async () => {
     const err = new Error('held');
     const root = createRootContext();
@@ -308,8 +308,8 @@ describe('failure destinations (§7.4)', () => {
     expect(root.signal.aborted).toBe(false);
   });
 
-  describe('an async handler (D-113)', () => {
-    it('holds the parent open until it settles: after an await it still has the parent current, resolves from it and attaches to it (D-45)', async () => {
+  describe('an async handler (DESIGN.md §4.7)', () => {
+    it('holds the parent open until it settles: after an await it still has the parent current, resolves from it and attaches to it (DESIGN.md §4.7)', async () => {
       const t = trace();
       const K = createInjectionKey<string>('K');
       const root = createRootContext({ providers: [valueProvider(K, 'k')] });
@@ -402,7 +402,7 @@ describe('failure destinations (§7.4)', () => {
       expect(Y.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     });
 
-    it("a managed promise its parent's body made is the handler's own await: the parent's delivery does not cut it, the handler resumes and the parent completes (D-116)", async () => {
+    it("a managed promise its parent's body made is the handler's own await: the parent's delivery does not cut it, the handler resumes and the parent completes (DESIGN.md §4.7)", async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         const t = trace();
@@ -442,7 +442,7 @@ describe('failure destinations (§7.4)', () => {
       }
     });
 
-    it("a fiber the handler attaches after its parent's body exited is released next: awaiting it does not hold the parent forever, and the handler's own entries wait for it (D-118, §6.2)", async () => {
+    it("a fiber the handler attaches after its parent's body exited is released next: awaiting it does not hold the parent forever, and the handler's own entries wait for it (DESIGN.md §2.4)", async () => {
       const t = trace();
       const go = deferred();
       const root = createRootContext();
@@ -483,7 +483,7 @@ describe('failure destinations (§7.4)', () => {
       await root.close();
     });
 
-    describe("a handler that awaits its parent's completion or an ancestor's holds nothing, so the tree completes (D-117)", () => {
+    describe("a handler that awaits its parent's completion or an ancestor's holds nothing, so the tree completes (DESIGN.md §4.7)", () => {
       const fail = async (): Promise<never> => {
         throw new Error('fatal');
       };
@@ -556,7 +556,7 @@ describe('failure destinations (§7.4)', () => {
         });
     });
 
-    it('a handler that returns a fiber is not awaited and never trips the fiber then trap (D-29)', async () => {
+    it('a handler that returns a fiber is not awaited and never trips the fiber then trap (DESIGN.md §4.5)', async () => {
       const root = createRootContext();
       let reported: Fiber<string> | undefined;
       root.fork(
@@ -572,7 +572,7 @@ describe('failure destinations (§7.4)', () => {
     });
   });
 
-  it("Q6: fork onto a bodiless node with the default 'join' destination throws TypeError at once and attaches nothing; a destination makes it legal (D-15)", async () => {
+  it("fork onto a bodiless node with the default 'join' destination throws TypeError at once and attaches nothing; a destination makes it legal (D14)", async () => {
     const root = createRootContext();
     const body = async (): Promise<number> => 1;
     expect(() => root.fork(body)).toThrow(TypeError);
@@ -614,7 +614,7 @@ describe('failure destinations (§7.4)', () => {
   });
 });
 
-describe('join and result (§4.6, §7.4)', () => {
+describe('join and result (DESIGN.md §4.5, §4.7)', () => {
   it("join resolves with the value and throws the fiber's failure", async () => {
     const err = new Error('boom');
     const root = createRootContext();
@@ -673,7 +673,7 @@ describe('join and result (§4.6, §7.4)', () => {
     await root.close(); // the failure was consumed by result: nothing surfaces
   });
 
-  it('a fiber is not awaitable: await, Promise.resolve and Promise.all reject with FiberNotAwaitableError (D-29)', async () => {
+  it('a fiber is not awaitable: await, Promise.resolve and Promise.all reject with FiberNotAwaitableError (DESIGN.md §4.5)', async () => {
     const root = createRootContext();
     await root.call(async () => {
       const f = fork(async () => 1);
@@ -687,7 +687,7 @@ describe('join and result (§4.6, §7.4)', () => {
     await root.close();
   });
 
-  it('a sync body and an async body that return a fiber both fail with FiberNotAwaitableError; nothing escapes the start microtask (D-49)', async () => {
+  it('a sync body and an async body that return a fiber both fail with FiberNotAwaitableError; nothing escapes the start microtask (DESIGN.md §4.5)', async () => {
     const inner = task(async () => 1);
     const root = createRootContext();
     await root.call(async () => {
@@ -706,8 +706,8 @@ describe('join and result (§4.6, §7.4)', () => {
   });
 });
 
-describe('all and race (§7.5)', () => {
-  it('all resolves with the tuple in task order, typed as a tuple (D-58)', async () => {
+describe('all and race (DESIGN.md §4.8)', () => {
+  it('all resolves with the tuple in task order, typed as a tuple', async () => {
     const root = createRootContext();
     const values = await root.call(async () => {
       const p = all([
@@ -726,7 +726,7 @@ describe('all and race (§7.5)', () => {
     await root.close();
   });
 
-  it('the method all infers the tuple too, on a named node and through current() (D-58)', async () => {
+  it('the method all infers the tuple too, on a named node and through current()', async () => {
     const root = createRootContext();
     const a = task(async (n: number) => n);
     const b = task((s: string) => s);
@@ -771,7 +771,7 @@ describe('all and race (§7.5)', () => {
     await root.close();
   });
 
-  it('all rejects with FiberAbortedError when a member was aborted and none failed (D-14)', async () => {
+  it('all rejects with FiberAbortedError when a member was aborted and none failed (DESIGN.md §4.8)', async () => {
     const root = createRootContext();
     const err = await rejection(
       root.call(() =>
@@ -842,7 +842,7 @@ describe('all and race (§7.5)', () => {
     await root.close();
   });
 
-  it("members declared with 'link' or a handler run as 'join' members: the AggregateError arrives and no handler runs (D-51)", async () => {
+  it("members declared with 'link' or a handler run as 'join' members: the AggregateError arrives and no handler runs (DESIGN.md §4.8)", async () => {
     const e1 = new Error('linked');
     const e2 = new Error('handled');
     const handler = vi.fn();
@@ -879,7 +879,7 @@ describe('all and race (§7.5)', () => {
   });
 });
 
-describe('interruption seen from a body (§4)', () => {
+describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
   it('interrupted() resolves with the reason in an observe body, which then settles on its own', async () => {
     const root = createRootContext();
     const f = root.fork(task(async () => `saw ${String(await interrupted())}`, { interrupt: 'observe', ...link }));
@@ -915,7 +915,7 @@ describe('interruption seen from a body (§4)', () => {
     await root.close();
   });
 
-  it('managed(p) passes a value or a rejection through, freezes a delivered body, and plain code between delivery and the next managed await still runs (§4.2)', async () => {
+  it('managed(p) passes a value or a rejection through, freezes a delivered body, and plain code between delivery and the next managed await still runs (DESIGN.md §4.2)', async () => {
     const t = trace();
     const err = new Error('p failed');
     const root = createRootContext();
@@ -980,7 +980,7 @@ describe('interruption seen from a body (§4)', () => {
     await root.close();
   });
 
-  it('a pre-aborted { signal } settles the fiber aborted at once, without running its body (D-13)', async () => {
+  it('a pre-aborted { signal } settles the fiber aborted at once, without running its body (DESIGN.md §4.6)', async () => {
     const ac = new AbortController();
     ac.abort('pre');
     let ran = false;
@@ -999,7 +999,7 @@ describe('interruption seen from a body (§4)', () => {
     await root.close();
   });
 
-  it('top level: `await app.call(main)` rejects with FiberAbortedError when a platform callback aborts the app, and the `await using` block completes (§4.3)', async () => {
+  it('top level: `await app.call(main)` rejects with FiberAbortedError when a platform callback aborts the app, and the `await using` block completes (DESIGN.md §4.2)', async () => {
     const t = trace();
     let caught: unknown;
     let appRef: Context | undefined;
@@ -1030,7 +1030,7 @@ describe('interruption seen from a body (§4)', () => {
     expect(appRef?.outcome?.status).toBe('aborted');
   });
 
-  it("Promise.all([call(a), call(b)]) throws UnawaitedCallError on the second call; a's failure, never delivered, surfaces from the parent and is never an unhandled rejection (D-38)", async () => {
+  it("Promise.all([call(a), call(b)]) throws UnawaitedCallError on the second call; a's failure, never delivered, surfaces from the parent and is never an unhandled rejection (D13)", async () => {
     const aErr = new Error('a failed, never delivered');
     const root = createRootContext();
     let caught: unknown;
@@ -1058,7 +1058,7 @@ describe('interruption seen from a body (§4)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ports of the previous fiber suite (IMPLEMENTATION.md §6.2): Fiber.call (11),
+// Ported from the pre-redesign fiber suite: Fiber.call (11),
 // Fiber.spawn (12 of 13; `.promise` dropped), withAbortSignal (4 of 6, as
 // signal()), Fiber integration (2), linkAbortSignal (3, as task(fn, {
 // signal })), Fiber.fork (4), Fiber.join (2), Fiber.result (2), Fiber.all (3).
@@ -1173,7 +1173,7 @@ describe('ported: call', () => {
     await ctx.close();
   });
 
-  it('detects an unawaited nested call: the next call throws UnawaitedCallError naming the first (§7.11)', async () => {
+  it('detects an unawaited nested call: the next call throws UnawaitedCallError naming the first (DESIGN.md §4.9)', async () => {
     const ctx = createRootContext();
     await ctx.call(async () => {
       let first: Context | undefined;
@@ -1516,7 +1516,7 @@ describe('ported: linkAbortSignal → task(fn, { signal })', () => {
     await ctx.close();
   });
 
-  it('an already-aborted signal settles the fiber aborted before its body runs (D-13)', async () => {
+  it('an already-aborted signal settles the fiber aborted before its body runs (DESIGN.md §4.6)', async () => {
     const ctx = createRootContext();
     const controller = new AbortController();
     controller.abort();

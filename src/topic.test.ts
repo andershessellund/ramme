@@ -1,6 +1,5 @@
-// topic.test.ts — IMPLEMENTATION.md §6.1: topics are DI keys (PROPOSAL.md §8,
-// §16). Ported from the previous suite: `createContext({ parent })` →
-// `root.child()`.
+// topic.test.ts — topics are DI keys (DESIGN.md §3, §3.1). Ported from the
+// pre-redesign suite: `createContext({ parent })` → `root.child()`.
 import { describe, expect, it } from 'vitest';
 import './node.js';
 import { createRootContext, valueProvider } from './index.js';

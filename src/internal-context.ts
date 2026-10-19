@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Internal shared types (IMPLEMENTATION.md §1.6). Not part of the public
+// Internal shared types (DESIGN.md §7). Not part of the public
 // surface. Runtime content is limited to the task brand and its two helpers,
 // so this module stays a leaf.
 // ---------------------------------------------------------------------------
@@ -10,7 +10,7 @@ import type { NodeImpl } from './node-impl.js';
 import type { PoolState } from './pool.js';
 import type { Scope } from './scope.js';
 
-/** `'value'`: a DI value's node; an addition to §10's list (D-52). */
+/** `'value'`: a DI value's node (DESIGN.md §5, D10′). */
 export type NodeKind = 'context' | 'fiber' | 'pool' | 'release' | 'value';
 
 /** Which of its parent's stacks a node is pushed on at construction. */
@@ -20,7 +20,7 @@ export type StackKind = 'explicit' | 'provided' | 'none';
  * One failure. The same object is the failing node's `failure` (or the
  * entry's, for an early release) and a member of the parent's `unconsumed`;
  * `consumed` flips when a continuation is delivered or the parent surfaces it
- * (D-40, D-41).
+ * (D16).
  */
 export interface FailureRecord {
   readonly error: unknown;
@@ -39,13 +39,13 @@ export interface CacheEntry {
   /**
    * The effective scope a scoped value was stored under (`p.scope ?? getKeyScope(key)`); `undefined`
    * for an unscoped provider and for auto-hoisted values. A hit is served only to a requester whose
-   * nearest owner of this scope is the storage context (D-92).
+   * nearest owner of this scope is the storage context (DESIGN.md §3.1).
    */
   readonly scope: Scope | undefined;
   /**
    * An auto-hoisted value built from a requester-relative read: a per-creation SelfScope value, a
    * `skipSelf` read, or a pinned dependency. It is served only to a requester at its storage context;
-   * any other requester re-creates it from its own view (D-97).
+   * any other requester re-creates it from its own view (DESIGN.md §3.4).
    */
   readonly pinned: boolean;
 }
@@ -56,9 +56,9 @@ export type ResolvedResult<T> = {
   node: NodeImpl;
   autoHoisted: boolean;
   deps: ReadonlySet<InjectionKey<unknown>> | undefined;
-  /** A factory ran for this result (Q4 warning). */
+  /** A factory ran for this result; drives the development warning for a late read through a value's own node (DESIGN.md §3.5, §4.4). */
   created: boolean;
-  /** Requester-relative (D-97): a per-creation SelfScope result, or a pinned auto-hoisted value. Pins the tracking creation. */
+  /** Requester-relative (DESIGN.md §3.4): a per-creation SelfScope result, or a pinned auto-hoisted value. Pins the tracking creation. */
   pinned: boolean;
 };
 
@@ -78,7 +78,7 @@ export function isTask(x: unknown): x is TaskLike {
   return typeof x === 'object' && x !== null && (x as { readonly [TASK]?: unknown })[TASK] === true;
 }
 
-/** A task as is; an inline body becomes an anonymous task `{ name: body.name || 'anonymous', opts: {} }` (Q17). */
+/** A task as is; an inline body becomes an anonymous task `{ name: body.name || 'anonymous', opts: {} }` (D8′). */
 export function toTask<A extends unknown[], T>(t: TaskLike<A, T> | Body<T, A>): TaskLike<A, T> {
   if (isTask(t)) return t as TaskLike<A, T>;
   if (typeof t !== 'function') throw new TypeError('expected a task or a function');
@@ -99,7 +99,7 @@ export interface NodeInit {
   /**
    * Pending value node only: the requester R, which supplies `root` (for
    * events) and provisional depth/autoScopeRoot/inherited timeouts until
-   * `placeAt` (D-42).
+   * `placeAt`.
    */
   basis?: NodeImpl;
   opts: NodeOptions;

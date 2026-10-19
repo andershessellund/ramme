@@ -1,6 +1,6 @@
-// pool.test.ts — IMPLEMENTATION.md §6.1: pools (§7.7, §4.12, D-16, D-47).
-// S1 covers the core scenarios; S2 adds the seven ported fiber-set cases (a
-// pool created in a constructor on the pending node) at the end of the file.
+// pool.test.ts — pools (DESIGN.md §4.10, D15).
+// The seven ported fiber-set cases (a pool created in a constructor on the
+// pending node) are at the end of the file.
 import { describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { createInjectionKey } from './context-key.js';
@@ -15,7 +15,7 @@ import { deferred, here, impl, tick, trace } from './test/util.js';
 
 const quiet = { name: 'pool', onFailure: () => {} };
 
-describe('pools (§7.7)', () => {
+describe('pools (DESIGN.md §4.10)', () => {
   it('pool(opts) validates its options', async () => {
     const app = createRootContext();
     expect(() => app.pool({ name: 'p' } as never)).toThrow(TypeError);
@@ -112,7 +112,7 @@ describe('pools (§7.7)', () => {
     await app.close();
   });
 
-  it("a concurrency-1 'reject' pool restarts its failed worker from onFailure: the slot is free when the handler runs (D-119)", async () => {
+  it("a concurrency-1 'reject' pool restarts its failed worker from onFailure: the slot is free when the handler runs (D15)", async () => {
     const t = trace();
     const app = createRootContext();
     let runs = 0;
@@ -138,7 +138,7 @@ describe('pools (§7.7)', () => {
     expect(t.log).toEqual(['run 1', 'handler: failed complete, running 0', 'run 2']);
   });
 
-  it("with whenFull 'wait', a waiter queued behind the failed fiber takes the freed slot before the handler's restart (D-119)", async () => {
+  it("with whenFull 'wait', a waiter queued behind the failed fiber takes the freed slot before the handler's restart (D15)", async () => {
     const t = trace();
     const app = createRootContext();
     const pool: Pool = app.pool({
@@ -179,7 +179,7 @@ describe('pools (§7.7)', () => {
     expect([pool.running, pool.pending]).toEqual([0, 0]);
   });
 
-  it('pool.close() drains the queue: waiters start as slots free (Q7, D-47)', async () => {
+  it('pool.close() drains the queue: waiters start as slots free (D15)', async () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     const t = trace();
@@ -205,7 +205,7 @@ describe('pools (§7.7)', () => {
     await app.close();
   });
 
-  it('pool.abort() cancels the queue: running fibers freeze, waiters settle aborted without running (D-47)', async () => {
+  it('pool.abort() cancels the queue: running fibers freeze, waiters settle aborted without running (D15)', async () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     let waiterRan = false;
@@ -227,7 +227,7 @@ describe('pools (§7.7)', () => {
     await app.close();
   });
 
-  it('close() with waiters queued, then abort(): the waiters the close loop already passed settle aborted, and the pool completes (D-11, D-81)', async () => {
+  it('close() with waiters queued, then abort(): the waiters the close loop already passed settle aborted, and the pool completes (DESIGN.md §2.7, D15)', async () => {
     for (const force of ['pool.abort()', "the owner's close()"] as const) {
       const app = createRootContext();
       const pool = app.pool({ ...quiet, concurrency: 1 });
@@ -243,7 +243,7 @@ describe('pools (§7.7)', () => {
       await tick();
       expect(pool.state).toBe('releasing');
       if (force === 'pool.abort()') pool.abort();
-      const appClosed = app.close(); // reaches the unsubscribed pool with an abort (D-11)
+      const appClosed = app.close(); // reaches the unsubscribed pool with an abort (DESIGN.md §2.7)
       await expect(closing, force).resolves.toBeUndefined();
       await expect(appClosed, force).resolves.toBeUndefined();
       expect([busy.outcome?.status, w1.outcome?.status, w2.outcome?.status], force).toEqual(['aborted', 'aborted', 'aborted']);
@@ -252,7 +252,7 @@ describe('pools (§7.7)', () => {
     }
   });
 
-  it('a waiter that settles unstarted leaves the queue at once, even while its own release is in flight; running never goes below 0 (D-81)', async () => {
+  it('a waiter that settles unstarted leaves the queue at once, even while its own release is in flight; running never goes below 0 (D15)', async () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     const gate = deferred();
@@ -293,7 +293,7 @@ describe('pools (§7.7)', () => {
     await app.close();
   });
 
-  it('a passive pool.own(x) entry and a DI value placed on the pool leave running/pending untouched (D-47)', async () => {
+  it('a passive pool.own(x) entry and a DI value placed on the pool leave running/pending untouched (D15)', async () => {
     const V = createInjectionKey<object>('V');
     const app = createRootContext();
     const released: string[] = [];
@@ -323,7 +323,7 @@ describe('pools (§7.7)', () => {
     await app.close();
   });
 
-  it('PoolClosedError after abort() or close(); NodeCompletedError after completion (D-16)', async () => {
+  it('PoolClosedError after abort() or close(); NodeCompletedError after completion (D15)', async () => {
     const app = createRootContext();
     const a = app.pool(quiet);
     const c = app.pool(quiet);
@@ -391,14 +391,14 @@ describe('pools (§7.7)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// fiber-set.test.ts, ported (§6.2): `createFiberSet` → `pool()` in a
+// Ported from the pre-redesign fiber-set.test.ts: `createFiberSet` → `pool()` in a
 // constructor, on the value's pending node; `onError` → `onFailure`;
 // `ctx.dispose()` → `close()`; `fiberSet.context` → the pool node. The old
 // `setScope(Worker, RootScope)` is dropped so the pool really is created on a
 // pending node: Worker has no dependencies and is auto-hoisted to the root.
 //
 // One semantic change shapes these ports: a DI value's node is an unsubscribed
-// provided entry, so the root's close() *aborts* it at its turn (§5.6, D-11),
+// provided entry, so the root's close() *aborts* it at its turn (DESIGN.md §2.8, §2.7),
 // and its pool with it — a fork that has not run by then never runs. The
 // first case keeps the old "close waits for the drain" meaning with the
 // idiom that says so: an own() entry registered after the pool, released
@@ -547,7 +547,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
     // Should resolve quickly since we aborted
     await ctx.close();
     expect(abortSeen).toBe(true);
-    expect(fiber.outcome?.status).toBe('aborted'); // whatever the body threw: the node was delivered (§7.6)
+    expect(fiber.outcome?.status).toBe('aborted'); // whatever the body threw: the node was delivered (DESIGN.md §4.12)
   });
 
   it('should expose the pool node', async () => {

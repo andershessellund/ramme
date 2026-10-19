@@ -1,12 +1,16 @@
-// creation.test.ts — IMPLEMENTATION.md §6.1: the pending node and placement
-// (PROPOSAL.md §6.2, D-42), creation purity (§8.1, §8.3, D-17, D-18), the Q6
-// deferral (D-15), failed factories (P23), constructor forks (P5, P22),
+// creation.test.ts — the pending node and placement (DESIGN.md §3.3; a pending
+// value node is born with its requester's root), creation purity
+// (DESIGN.md §3.2, §3.5: get/call/run/runSync throw CreationViolationError in
+// a creation frame, and only inject reads ContextKey), the deferral of constructor forks
+// (D14), a failed factory releasing what it owned, constructor forks (no
+// creation-frame leak into a forked body, a constructor-forked fiber's parent),
 // SelfScope attachment, placement into a releasing or complete storage
-// context, cycles and skipSelf, re-entry from releases (D-101, D-105, D-106),
-// the end of a creation (D-107) and the scope rule at placement (D-108).
+// context, cycles and skipSelf, re-entry from releases (DESIGN.md §3.3), the
+// end of a creation (DESIGN.md §3.5) and the scoped-provider rule at placement
+// (DESIGN.md §3.4).
 //
-// `child`, `fork`, `lookup`, `own` and `pool` are the free functions of §1.13
-// (`./ambient.js`). The other operations use the method form on `here()`
+// `child`, `fork`, `lookup`, `own` and `pool` are the free functions of
+// ambient.ts. The other operations use the method form on `here()`
 // (= current()), which is what the free functions are.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
@@ -36,7 +40,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('the pending node (§6.2)', () => {
+describe('the pending node (DESIGN.md §3.3)', () => {
   it('a value that attaches nothing gets no node', () => {
     const ev = events();
     class Plain {}
@@ -51,7 +55,7 @@ describe('the pending node (§6.2)', () => {
       own: () => void own(() => {}),
       'current()': () => void here(),
       'inject(ContextKey)': () => void inject(ContextKey),
-      // The free functions themselves (D-104): none of them goes through current() first.
+      // The free functions themselves: none of them goes through current() first.
       fork: () => void fork(task(async () => {}, { onFailure: () => {} })),
       pool: () => void pool({ name: 'p', onFailure: () => {} }),
       child: () => void child(),
@@ -82,7 +86,7 @@ describe('the pending node (§6.2)', () => {
     }
   });
 
-  it('under a receiver, a default factory that owns, forks, reads current() and releases early emits like any node (D-42)', async () => {
+  it('under a receiver, a default factory that owns, forks, reads current() and releases early emits like any node', async () => {
     const ev = events();
     let vid = 0;
     let fid = 0;
@@ -111,14 +115,14 @@ describe('the pending node (§6.2)', () => {
     await tick();
     const placedSeq = ev.of('node:placed').find((e) => e.id === vid)!.seq;
     const startedSeq = ev.of('node:started').find((e) => e.id === fid)!.seq;
-    expect(startedSeq).toBeGreaterThan(placedSeq); // node:placed precedes the constructor fork's node:started (§4.9)
+    expect(startedSeq).toBeGreaterThan(placedSeq); // node:placed precedes the constructor fork's node:started (DESIGN.md §4.6)
     await ev.root.close();
   });
 
   it('get / call / run / abort / close and the other refused operations throw PendingNodeError on it', async () => {
     const KEY = createInjectionKey<string>('KEY');
     const root = createRootContext();
-    const f = root.fork(task(async () => 1, { onFailure: () => {} })); // a live fiber the pending node may not await (§4.10)
+    const f = root.fork(task(async () => 1, { onFailure: () => {} })); // a live fiber the pending node may not await (DESIGN.md §3.3)
     const refused: Record<string, (n: Context) => unknown> = {
       get: (n) => n.get(KEY),
       addProvider: (n) => n.addProvider(valueProvider(KEY, 'x')),
@@ -194,7 +198,7 @@ describe('the pending node (§6.2)', () => {
     expect(inside).toEqual({ state: 'running', parent: impl(S), onProvided: true });
   });
 
-  it('inject(ContextKey) is current(), and reading it does not move placement (§8.1)', () => {
+  it('inject(ContextKey) is current(), and reading it does not move placement (DESIGN.md §3.3)', () => {
     const X = createInjectionKey<string>('X');
     let same = false;
     class V {
@@ -212,8 +216,8 @@ describe('the pending node (§6.2)', () => {
   });
 });
 
-describe('creation is pure (§8.1, §8.3)', () => {
-  it('lookup / get / call / run / runSync / all / race in a factory throw CreationViolationError (D-17)', () => {
+describe('creation is pure (DESIGN.md §3.2, §3.5)', () => {
+  it('lookup / get / call / run / runSync / all / race in a factory throw CreationViolationError', () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const banned: Record<string, () => unknown> = {
@@ -244,7 +248,7 @@ describe('creation is pure (§8.1, §8.3)', () => {
     for (const op of Object.keys(banned)) expect(errors[op], op).toBeInstanceOf(CreationViolationError);
   });
 
-  it('fork on a live node passed in from outside is allowed and starts in a microtask (§8.3)', async () => {
+  it('fork on a live node passed in from outside is allowed and starts in a microtask (DESIGN.md §3.5)', async () => {
     const t = trace();
     const root = createRootContext();
     const V = createInjectionKey<object>('V', {
@@ -261,7 +265,7 @@ describe('creation is pure (§8.1, §8.3)', () => {
     await root.close();
   });
 
-  it('inject outside creation throws CreationViolationError; in a forked body inject throws and lookup works (P5)', async () => {
+  it('inject outside creation throws CreationViolationError; in a forked body inject throws and lookup works', async () => {
     const K = createInjectionKey<string>('K');
     expect(() => inject(K)).toThrow(CreationViolationError);
     let seen: { creation: unknown; injectError: unknown; looked: unknown; isFiber: boolean } | undefined;
@@ -314,7 +318,7 @@ describe('creation is pure (§8.1, §8.3)', () => {
     }
   });
 
-  it('a factory that owns, then throws, releases what it owned, caches nothing and rethrows (P23)', () => {
+  it('a factory that owns, then throws, releases what it owned, caches nothing and rethrows', () => {
     for (const placement of ['auto-hoisted', 'declared'] as const) {
       const boom = new Error('boom');
       let runs = 0;
@@ -338,8 +342,8 @@ describe('creation is pure (§8.1, §8.3)', () => {
   });
 });
 
-describe('forks in a constructor (§4.9, Q6, D-15)', () => {
-  it('a constructor fork starts after placement with the value node as parent, and lookup works inside it (P22)', async () => {
+describe('forks in a constructor (DESIGN.md §4.6, D14)', () => {
+  it('a constructor fork starts after placement with the value node as parent, and lookup works inside it', async () => {
     const Config = createInjectionKey<string>('Config');
     const t = trace();
     let svcNode: NodeImpl | undefined;
@@ -475,7 +479,7 @@ describe('SelfScope attachment', () => {
     expect(released).toBe(true);
   });
 
-  it("a SelfScope factory that touches the node first still materialises the outer value's node (D-94(b))", async () => {
+  it("a SelfScope factory that touches the node first still materialises the outer value's node", async () => {
     for (const touch of ['current()', 'own'] as const) {
       const t = trace();
       let innerNode: NodeImpl | undefined;
@@ -509,7 +513,7 @@ describe('SelfScope attachment', () => {
     }
   });
 
-  it('a SelfScope key with neither provider nor default: inject(K, { optional: true }) is undefined, inject(K) is "No provider found" (D-94(c))', () => {
+  it('a SelfScope key with neither provider nor default: inject(K, { optional: true }) is undefined, inject(K) is "No provider found"', () => {
     const K = createInjectionKey<string>('K', { scope: SelfScope });
     const V = createInjectionKey<{ k: string | undefined }>('V', { factory: () => ({ k: inject(K, { optional: true }) }) });
     expect(createRootContext().get(V).k).toBeUndefined();
@@ -518,7 +522,7 @@ describe('SelfScope attachment', () => {
   });
 });
 
-describe('placement into a releasing or complete storage context (§6.2)', () => {
+describe('placement into a releasing or complete storage context (DESIGN.md §3.3)', () => {
   it('a value created by a release during the provided phase is placed above the cursor and released next, before older provided values', async () => {
     const t = trace();
     const ev = events();
@@ -607,7 +611,7 @@ describe('placement into a releasing or complete storage context (§6.2)', () =>
     expect(impl(S).cache.size).toBe(0);
   });
 
-  it('the same for a declared placement whose factory completes its storage context (D-94)', () => {
+  it('the same for a declared placement whose factory completes its storage context', () => {
     const V = createInjectionKey<object>('V');
     const root = createRootContext();
     const S = root.child({
@@ -659,7 +663,7 @@ describe('cycles and skipSelf', () => {
     expect(root.get(Service).trace()).toBe('default');
   });
 
-  it('K → inject(J, { skipSelf }) → K is a circular dependency: only a skipSelf read of the key itself is exempt (§1.11)', () => {
+  it('K → inject(J, { skipSelf }) → K is a circular dependency: only a skipSelf read of the key itself is exempt', () => {
     const J = createInjectionKey<{ k: unknown }>('J');
     class K {
       j = inject(J, { skipSelf: true }); // J is provided at the root, above the requester's parent
@@ -678,8 +682,8 @@ describe('cycles and skipSelf', () => {
   });
 });
 
-describe('a failed or refused creation is owned by its requester (D-99)', () => {
-  it("a failed auto-hoisted value's async release holds the requester's completion (§5.6)", async () => {
+describe('a failed or refused creation is owned by its requester (DESIGN.md §3.3)', () => {
+  it("a failed auto-hoisted value's async release holds the requester's completion (DESIGN.md §2.8)", async () => {
     for (const requester of ['the root', 'a child of the root'] as const) {
       const gate = deferred();
       const t = trace();
@@ -706,7 +710,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     }
   });
 
-  it("its release failures surface from the requester's completion, as a declared placement's do (§9.2)", async () => {
+  it("its release failures surface from the requester's completion, as a declared placement's do (DESIGN.md §4.12)", async () => {
     for (const placement of ['auto-hoisted', 'declared'] as const) {
       const factory = (): object => {
         own(() => {
@@ -722,7 +726,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     }
   });
 
-  it('its releases resolve through the requester (§5.2)', async () => {
+  it('its releases resolve through the requester (DESIGN.md §2.4)', async () => {
     const Db = createInjectionKey<string>('Db');
     let seen: unknown;
     let node: NodeImpl | undefined;
@@ -743,8 +747,8 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     const R = root.child({ providers: [valueProvider(Db, 'db@R')] }); // K does not inject Db: placed, it would be at the root
     expect(() => R.get(K)).toThrow('boom');
     expect(seen).toBe('db@R'); // R's view, not its root's
-    expect(node!.parent).toBe(impl(R)); // owned by the requester itself (D-99)
-    expect(impl(R).provided.size).toBe(0); // released synchronously and gone (P1)
+    expect(node!.parent).toBe(impl(R)); // owned by the requester itself (DESIGN.md §3.3)
+    expect(impl(R).provided.size).toBe(0); // released synchronously and gone
     expect(impl(R).cache.has(K)).toBe(false);
     await root.close();
   });
@@ -826,7 +830,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
       factory: () => {
         node = here();
         const x = own({}, async () => {
-          const f = here().fork(async () => 1); // queued on the value node until placement (§4.9)
+          const f = here().fork(async () => 1); // queued on the value node until placement (DESIGN.md §4.6)
           fiberOutcome = (await here().result(f)).status;
         });
         void here().release(x); // in flight while the factory throws
@@ -841,7 +845,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     await root.close();
   });
 
-  it('a release of the failed value that resolves its key again is a circular dependency: the factory runs once and the requester completes (D-105)', async () => {
+  it('a release of the failed value that resolves its key again is a circular dependency: the factory runs once and the requester completes', async () => {
     for (const placement of ['auto-hoisted', 'declared'] as const) {
       for (const release of ['sync', 'async'] as const) {
         const label = `${placement}, ${release} release`;
@@ -861,7 +865,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
           placement === 'auto-hoisted' ? createInjectionKey<object>('K', { factory }) : createInjectionKey<object>('K');
         const root = createRootContext(placement === 'declared' ? { providers: [factoryProvider(K, factory)] } : {});
         expect(() => root.get(K), label).toThrow('boom');
-        // The release fails once, and its failure surfaces from the requester's completion (§9.2).
+        // The release fails once, and its failure surfaces from the requester's completion (DESIGN.md §4.12).
         await expect(root.close(), label).rejects.toThrow(/Circular dependency detected: K re-enters the failed creation of K/);
         expect(runs, label).toBe(1);
         expect(looked, label).toBe('not run');
@@ -870,7 +874,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     }
   });
 
-  it('a retry from the requester while the failed value still releases runs the factory again (D-105 marks only its subtree)', async () => {
+  it('a retry from the requester while the failed value still releases runs the factory again (DESIGN.md §3.3)', async () => {
     const gate = deferred();
     let runs = 0;
     const K = createInjectionKey<{ n: number }>('K', {
@@ -890,14 +894,14 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     await root.close();
   });
 
-  it('a declared value that touches its node before injecting a declared dependency is released before that dependency (G3, D-100)', async () => {
+  it('a declared value that touches its node before injecting a declared dependency is released before that dependency (G3, DESIGN.md §3.3)', async () => {
     const t = trace();
     const Svc = createInjectionKey<object>('Svc');
     const Db = createInjectionKey<{ closed: boolean }>('Db');
     const root = createRootContext({
       providers: [
         factoryProvider(Svc, () => {
-          inject(ContextKey); // the node is live on S from here (§6.2)
+          inject(ContextKey); // the node is live on S from here (DESIGN.md §3.3)
           const db = inject(Db);
           own(() => t.push(`svc release; db closed=${db.closed}`));
           return {};
@@ -918,7 +922,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
     expect(t.log).toEqual(['svc release; db closed=false', 'db release']);
   });
 
-  it('a declared factory during which its own node is released fails, caches nothing, and the next get runs it again (D-102)', async () => {
+  it('a declared factory during which its own node is released fails, caches nothing, and the next get runs it again', async () => {
     for (const how of ['abort', 'close'] as const) {
       let runs = 0;
       let released = 0;
@@ -946,7 +950,7 @@ describe('a failed or refused creation is owned by its requester (D-99)', () => 
   });
 });
 
-describe('a release started during creation cannot re-enter resolution (D-101)', () => {
+describe('a release started during creation cannot re-enter resolution (DESIGN.md §3.3)', () => {
   it("in the value's own release: get / call / run / runSync / all / race throw CreationViolationError; awaits are allowed; the factory runs once", () => {
     let runs = 0;
     const errors: Record<string, unknown> = {};
@@ -985,7 +989,7 @@ describe('a release started during creation cannot re-enter resolution (D-101)',
     expect(impl(root).cache.get(K)?.value).toEqual({ id: 1 });
     for (const op of ['lookup', 'root.get', 'call', 'root.run', 'runSync', 'all', 'race'])
       expect(errors[op], op).toBeInstanceOf(CreationViolationError);
-    expect(errors.managed).toBe('no error'); // an await enters nothing (§8.3)
+    expect(errors.managed).toBe('no error'); // an await enters nothing (DESIGN.md §3.5)
   });
 
   it('in a release of another node, resolving the key under creation is a circular dependency, and nothing is overwritten (I19)', async () => {
@@ -1016,7 +1020,7 @@ describe('a release started during creation cannot re-enter resolution (D-101)',
     await root.close();
   });
 
-  it('in a release of a node above the requester, it is a circular dependency too: the factory runs once and the root completes (D-106)', async () => {
+  it('in a release of a node above the requester, it is a circular dependency too: the factory runs once and the root completes (DESIGN.md §3.3)', async () => {
     for (const handled of [true, false]) {
       let runs = 0;
       let caught: unknown;
@@ -1041,13 +1045,13 @@ describe('a release started during creation cannot re-enter resolution (D-101)',
       if (handled) {
         expect(String(caught)).toMatch(/Circular dependency detected: V re-enters the creation of V in progress/);
         await expect(root.close()).resolves.toBeUndefined();
-      } else await expect(root.close()).rejects.toThrow(/Circular dependency detected: V re-enters/); // the early release's failure (D-41)
+      } else await expect(root.close()).rejects.toThrow(/Circular dependency detected: V re-enters/); // the early release's failure (D16)
       expect(root.state, String(handled)).toBe('complete');
     }
   });
 });
 
-describe('release continuations of a creation run under no frame (D-103)', () => {
+describe('release continuations of a creation run under no frame (DESIGN.md §6)', () => {
   it("a deadline that fires after the creation runs its listeners with no creation and no node current", async () => {
     for (const how of ['release', 'releaseAll'] as const) {
       const Other = createInjectionKey<string>('Other');
@@ -1119,7 +1123,7 @@ describe('release continuations of a creation run under no frame (D-103)', () =>
       returned = true;
       await tick();
       // The continuations the release registered (its completion, releaseAll's loop) run under no frame, so
-      // nothing retains the finished creation while the release still runs (D-103).
+      // nothing retains the finished creation while the release still runs (DESIGN.md §6).
       await gcUntil(() => ref!.deref() === undefined);
       gate.resolve();
       await root.close();
@@ -1129,7 +1133,7 @@ describe('release continuations of a creation run under no frame (D-103)', () =>
   });
 });
 
-describe('a creation ends when its factory returns (D-107)', () => {
+describe('a creation ends when its factory returns (DESIGN.md §3.5)', () => {
   it('a callback the factory scheduled runs with no frame: own, fork and inject fail loudly instead of reaching an unplaced node', async () => {
     for (const touched of [false, true]) {
       const Other = createInjectionKey<string>('Other');
@@ -1168,7 +1172,7 @@ describe('a creation ends when its factory returns (D-107)', () => {
       expect(seen, label).toEqual({ creation: undefined, node: undefined });
       expect(errors.own, label).toBeInstanceOf(NoCurrentNodeError);
       expect(errors.fork, label).toBeInstanceOf(NoCurrentNodeError);
-      expect(errors.inject, label).toBeInstanceOf(CreationViolationError); // P5/I16: inject never works at runtime
+      expect(errors.inject, label).toBeInstanceOf(CreationViolationError); // I16: inject never works at runtime
       expect(String(errors.inject), label).toMatch(/inject\(\) outside creation/);
       expect(errors.lookup, label).toBeInstanceOf(NoCurrentNodeError);
       if (touched) expect(node!.explicit.size, label).toBe(0);
@@ -1195,7 +1199,7 @@ describe('a creation ends when its factory returns (D-107)', () => {
   });
 });
 
-describe('a scoped provider built under a pending node is checked when the node is placed (D-108)', () => {
+describe('a scoped provider built under a pending node is checked when the node is placed (DESIGN.md §3.4)', () => {
   const shapes: Record<string, (p: Provider<unknown>) => void> = {
     'child({ providers })': (p) => void child({ providers: [p] }),
     'child().addProvider': (p) => child().addProvider(p),
@@ -1204,7 +1208,7 @@ describe('a scoped provider built under a pending node is checked when the node 
     'pool({ providers })': (p) => void pool({ name: 'p', providers: [p], onFailure: () => {} }),
   };
 
-  it('below the scope owner it is a PlacementError, nothing is cached, and the owner keeps its own answer (§8.2, I19)', async () => {
+  it('below the scope owner it is a PlacementError, nothing is cached, and the owner keeps its own answer (DESIGN.md §3.4, I19)', async () => {
     for (const [shape, build] of Object.entries(shapes)) {
       const K = createInjectionKey<string>('K');
       class V {
@@ -1216,7 +1220,7 @@ describe('a scoped provider built under a pending node is checked when the node 
       expect(() => root.get(V), shape).toThrow(PlacementError);
       expect(() => root.get(V), shape).toThrow(/Cannot provide scoped key 'K' .* resolves to .* above this context/);
       expect(impl(root).cache.has(V), shape).toBe(false);
-      expect(impl(root).provided.size, shape).toBe(0); // the refused node was aborted at its requester (D-99)
+      expect(impl(root).provided.size, shape).toBe(0); // the refused node was aborted at its requester (DESIGN.md §3.3)
       expect(root.get(K), shape).toBe('root');
       await root.close();
     }

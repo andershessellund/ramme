@@ -1,7 +1,8 @@
-// invariants.test.ts — IMPLEMENTATION.md §6.1: one named test per invariant
-// of PROPOSAL.md §11 (I1–I27). Each test pins the invariant end to end in the
-// proposal's idiom; the edge cases live in the per-module suites the comments
-// name. The candidate scenarios for the unnumbered probes (D-35) are here too:
+// invariants.test.ts — one named test per invariant of DESIGN.md §10
+// (I1–I27). Each test pins the invariant end to end in ramme's idiom (law 2);
+// the edge cases live in the per-module suites the comments name. The
+// candidate scenarios for the probes the review left without a scenario (see
+// probes.test.ts) are here too:
 // G1–G4, the closed door and open window, aborted-is-not-failure, no
 // unhandled rejection from an unjoined failed fork, and release failures that
 // do not stop the remaining releases.
@@ -64,8 +65,8 @@ async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
 
 /**
  * What `fn` throws, or 'ok'. A promise it returns is dropped, not caught: every promise ramme returns
- * here is a managed promise over a source that never rejects (D-38), and attaching `.catch` to one
- * without awaiting it would arm a cut in the current body (D-67).
+ * here is a managed promise over a source that never rejects (D13), and attaching `.catch` to one
+ * without awaiting it would arm a cut in the current body (DESIGN.md §4.2).
  */
 function attempt(fn: () => unknown): unknown {
   try {
@@ -83,9 +84,9 @@ function subtree(n: NodeImpl): NodeImpl[] {
   return out;
 }
 
-describe('invariants (PROPOSAL.md §11)', () => {
+describe('invariants (DESIGN.md §10)', () => {
   // -------------------------------------------------------------------------
-  it('I1 single owner: a node is on exactly one stack, own(foreign node) is NotOwnedError; a passive object owned by two nodes is released once by each (D-39)', async () => {
+  it('I1 single owner: a node is on exactly one stack, own(foreign node) is NotOwnedError; a passive object owned by two nodes is released once by each (D16)', async () => {
     const root = createRootContext();
     const A = root.child({ name: 'A' });
     const B = root.child({ name: 'B' });
@@ -96,7 +97,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     for (const n of [c, f, p]) {
       const holders = nodes.filter((x) => x.explicit.find(n) !== undefined || x.provided.find(n) !== undefined);
       expect(holders).toEqual([impl(A)]);
-      expect(() => B.own(n)).toThrow(NotOwnedError); // no transfer (Q14)
+      expect(() => B.own(n)).toThrow(NotOwnedError); // no transfer of an entry between owners (DESIGN.md §9)
     }
     let disposed = 0;
     const x = { [Symbol.dispose]: () => void disposed++ };
@@ -111,7 +112,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I2 once: a node completes once and each release runs once under concurrent abort/close/asyncDispose, releaseAll racing release(x), and abort mid-releaseAll (D-36)', async () => {
+  it('I2 once: a node completes once and each release runs once under concurrent abort/close/asyncDispose, releaseAll racing release(x), and abort mid-releaseAll (D16)', async () => {
     const ev = events();
     // (a) the lifecycle quartet, concurrently
     const N = ev.root.child({ name: 'N' });
@@ -136,7 +137,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     expect(counts).toEqual({ x: 1, y: 1 });
     // (c) abort() arriving in the middle of a releaseAll(), whose last release fails. The error is the
     // releaseAll() caller's alone: it is still awaiting when the owner's loop finds both stacks empty, so
-    // the owner does not surface it too (§9.2 "rejects that call only", I11, D-41, D-123).
+    // the owner does not surface it too (DESIGN.md §4.12, I11, D16).
     const M = ev.root.child({ name: 'M' });
     const gate = deferred();
     const m = { a: 0, b: 0 };
@@ -172,7 +173,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     expect(one).toEqual({ status: 'rejected', reason: E2 });
     expect(closed2).toEqual({ status: 'fulfilled', value: undefined });
     // (e) (c) with synchronous entries: releaseAll() records a's failure before it returns, and close()
-    // finds both stacks empty before the combinator calls releaseAll()'s `then` (D-127)
+    // finds both stacks empty before the combinator calls releaseAll()'s `then` (D16)
     const M3 = ev.root.child({ name: 'M3' });
     const E3 = new Error('a3 failed');
     M3.own(function b3() {});
@@ -226,7 +227,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     await tick();
     expect(spawned).toBeInstanceOf(Spawned);
     expect([...impl(root).provided].map((e) => e.name)).toEqual(['Service', 'Late', 'Spawned']); // hoisted to the root (I17)
-    const closing = root.close(); // waits for the fork (§5.5)
+    const closing = root.close(); // waits for the fork (DESIGN.md §2.7)
     await tick();
     expect(t.log).toEqual(['call entry']);
     gate.resolve();
@@ -467,14 +468,14 @@ describe('invariants (PROPOSAL.md §11)', () => {
         expect(impl(current()).unconsumed.size).toBe(0);
       }),
     ).resolves.toBeUndefined();
-    // a 'join' fork onto a bodiless node is refused (Q6), so the unjoined fork is made from a body
+    // a 'join' fork onto a bodiless node is refused (D14), so the unjoined fork is made from a body
     const parent = root.child();
     const err = await rejection(
       parent.call(async () => {
         fork(async () => {
           throw boom;
         });
-        await tick(); // bare: let it fail; a body that returned at once would interrupt it unstarted (§5.1, D-13)
+        await tick(); // bare: let it fail; a body that returned at once would interrupt it unstarted (DESIGN.md §2.4, §4.6)
       }),
     );
     expect(err).toBe(boom); // surfaced from the call fiber's completion
@@ -554,7 +555,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
         }),
       ),
     );
-    expect(fake).toEqual({ status: 'failure', error: abortError }); // never inspected (§7.6)
+    expect(fake).toEqual({ status: 'failure', error: abortError }); // never inspected (DESIGN.md §4.12)
     await root.close();
   });
 
@@ -584,7 +585,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
       expect(s.deadline).not.toBe(owner!.signal);
       expect(s.outcome).toEqual({ status: 'success', value: undefined });
     }
-    // the deadline fires after releaseTimeoutMs (§5.2)
+    // the deadline fires after releaseTimeoutMs (DESIGN.md §2.4)
     const N = root.child({ releaseTimeoutMs: 20 });
     let fired: unknown;
     N.own(() => {
@@ -628,7 +629,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
   // -------------------------------------------------------------------------
   it('I16 nothing runs in a creation frame: body-shaped operations throw CreationViolationError in a factory, and a fork made there starts after it returns', async () => {
     // K is a plain provided key: get(K) and lookup(K) succeed outside a creation, so their
-    // CreationViolationError here comes from the creation guard alone (ContextKey throws it in any frame, D-18).
+    // CreationViolationError here comes from the creation guard alone (ContextKey throws it in any frame, DESIGN.md §4.12).
     const K = createInjectionKey<string>('K');
     const other = createRootContext({ providers: [valueProvider(K, 'other k')] });
     expect(other.get(K)).toBe('other k');
@@ -674,7 +675,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     expect(seen.lookupInBody).toBe('k');
     delete seen.lookupInBody;
     root.get(Value);
-    expect(forkRan).toBe(false); // not in the factory, not at its return: the fork is a later job (D-46)
+    expect(forkRan).toBe(false); // not in the factory, not at its return: the fork is a later job, run under an empty frame (DESIGN.md §6)
     await tick();
     expect(Object.keys(seen)).toContain('creationInFork'); // the fork did run …
     for (const [name, v] of Object.entries(seen).filter(([k]) => k !== 'creationInFork'))
@@ -912,7 +913,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
     );
     await tick(2);
     expect(kinds).toEqual(['release', 'release']);
-    expect(handlerCurrent).toBe(root); // the one callback the design keeps runs with a node current (D-45)
+    expect(handlerCurrent).toBe(root); // the one callback the design keeps runs with a node current (DESIGN.md §4.7)
     expect(f.outcome?.status).toBe('failure');
     await root.close();
   });
@@ -983,7 +984,7 @@ describe('invariants (PROPOSAL.md §11)', () => {
       expect(await rejection(Promise.all([f]))).toBeInstanceOf(FiberNotAwaitableError);
       expect(await join(f)).toBe(42);
     });
-    // an aborted fiber awaited from the top level reports FiberAbortedError rather than freezing (§4.3)
+    // an aborted fiber awaited from the top level reports FiberAbortedError rather than freezing (DESIGN.md §4.2)
     const g = root.fork(task(async () => never(), link));
     await tick();
     g.abort('stop');

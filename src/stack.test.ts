@@ -62,7 +62,7 @@ describe('Stack', () => {
     expect(s.size).toBe(0);
   });
 
-  it('an entry pushed during the release loop is the next topPending (§6.2)', () => {
+  it('an entry pushed during the release loop is the next topPending (DESIGN.md §2.4)', () => {
     const s = new Stack('provided');
     s.push(input({}, 'a'));
     s.push(input({}, 'b'));
@@ -101,7 +101,7 @@ describe('Stack', () => {
     expect(s.hasPending()).toBe(false);
   });
 
-  it("topPendingNode passes passive and 'released' entries and returns a 'releasing' node entry (D-118)", () => {
+  it("topPendingNode passes passive and 'released' entries and returns a 'releasing' node entry (DESIGN.md §2.4)", () => {
     const s = new Stack('explicit');
     const node = (name: string): Entry => s.push({ ...input({}, name), node: {} as unknown as NodeImpl });
     expect(s.topPendingNode()).toBeUndefined();
@@ -133,7 +133,7 @@ describe('Stack', () => {
     expect(s.find(x)).toBe(again);
   });
 
-  it("a target pushed again while its old entry is 'released' but linked: both stay removable (D-62, D-65)", () => {
+  it("a target pushed again while its old entry is 'released' but linked: both stay removable", () => {
     for (const order of ['old first', 'new first'] as const) {
       const s = new Stack('explicit');
       const x = {};
@@ -165,7 +165,7 @@ describe('Stack', () => {
     }
   });
 
-  it('unlink is physical: nothing is retained (P1, data-structure half)', () => {
+  it('unlink is physical: the data structure retains nothing', () => {
     const s = new Stack('explicit');
     for (let i = 0; i < 10_000; i++) {
       const target = { i };
@@ -181,8 +181,8 @@ describe('Stack', () => {
     expect([...s]).toEqual([]);
   });
 
-  // `find` skips 'released' entries (D-62), so the checks above cannot see the identity index: only a collection can.
-  it.skipIf(!hasGc)('after unlink the stack retains neither the target nor the entry, the index included (P1)', async () => {
+  // `find` skips 'released' entries, so the checks above cannot see the identity index: only a collection can.
+  it.skipIf(!hasGc)('after unlink the stack retains neither the target nor the entry, the index included', async () => {
     const s = new Stack('explicit');
     const keep = s.push(input({}, 'keep')); // the stack stays alive and non-empty throughout
     const refs = ((): WeakRef<object>[] => {
@@ -193,7 +193,7 @@ describe('Stack', () => {
         finish(e);
         out.push(new WeakRef(target), new WeakRef(e), new WeakRef(e.dispose));
       }
-      // D-65: a target pushed again while its old entry is 'released' but linked; the index slot changes hands.
+      // A target pushed again while its old entry is 'released' but linked; the index slot changes hands.
       for (const order of ['old first', 'new first'] as const) {
         const x = {};
         const e1 = s.push(input(x, 'e1'));
@@ -238,7 +238,7 @@ describe('Stack', () => {
     expect(s.size).toBe(0);
   });
 
-  it('moveToTail moves a head or middle entry to the tail, keeps its identity, and is a no-op on the tail or a foreign entry (D-100)', () => {
+  it('moveToTail moves a head or middle entry to the tail, keeps its identity, and is a no-op on the tail or a foreign entry (DESIGN.md §3.3)', () => {
     const s = new Stack('provided');
     const ta = {};
     const a = s.push(input(ta, 'a'));
@@ -257,7 +257,7 @@ describe('Stack', () => {
     const x = other.push(input({}, 'x'));
     const y = other.push(input({}, 'y'));
     // Not linked here. `y` is not the other stack's head, so its links alone would look linked: the
-    // membership check must be this stack's (D-65).
+    // membership check must be this stack's.
     s.moveToTail(y);
     s.moveToTail(x);
     expect(names(s)).toEqual(['b', 'a', 'c']);
@@ -319,7 +319,7 @@ describe('Stack', () => {
     expect(names(s)).toEqual(['a', 'c', 'd']);
   });
 
-  it('iteration visits an entry pushed while the yielded tail is unlinked, in either order (D-65)', () => {
+  it('iteration visits an entry pushed while the yielded tail is unlinked, in either order', () => {
     for (const order of ['push, then unlink', 'unlink, then push'] as const) {
       for (const initial of [['a', 'b'], ['b']]) {
         const s = new Stack('explicit');

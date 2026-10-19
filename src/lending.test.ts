@@ -1,4 +1,4 @@
-// lending.test.ts — IMPLEMENTATION.md §6.1: lending (§7.11), D-03, D-48, D-53, D-72, D-88, D-113.
+// lending.test.ts — lending (DESIGN.md §4.9, D11, I26), skipSelf inside a call()ed body (DESIGN.md §3.2) and a failure handler while its parent is lent (DESIGN.md §4.7).
 import { describe, expect, it } from 'vitest';
 import './node.js';
 import {
@@ -32,8 +32,8 @@ function spawn<T>(on: Context, body: () => Promise<T> | T, opts: Parameters<type
   return on.fork(task(body, { ...linked, ...opts }));
 }
 
-describe('lending (§7.11)', () => {
-  it('Promise.all([call(a), call(b)]) throws UnawaitedCallError on the second call, naming the first call and all(); nothing rejects unhandled (D-38)', async () => {
+describe('lending (DESIGN.md §4.9)', () => {
+  it('Promise.all([call(a), call(b)]) throws UnawaitedCallError on the second call, naming the first call and all(); nothing rejects unhandled (D13)', async () => {
     const app = createRootContext();
     let caught: unknown;
     let firstChild: NodeImpl | undefined;
@@ -189,7 +189,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('otherCtx.call(fn) from a body lends the body (the awaiting node), not otherCtx (D-03)', async () => {
+  it('otherCtx.call(fn) from a body lends the body (the awaiting node), not otherCtx (D11)', async () => {
     const app = createRootContext();
     const other = app.child();
     const seen: boolean[] = [];
@@ -204,7 +204,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('a top-level await app.call(main) lends nothing, so app.fork(...) from a platform callback works during it (§6.7)', async () => {
+  it('a top-level await app.call(main) lends nothing, so app.fork(...) from a platform callback works during it (DESIGN.md §4.9)', async () => {
     const app = createRootContext();
     const gate = deferred();
     const main = app.call(async () => {
@@ -241,7 +241,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('get(K, { skipSelf }) inside a call()ed body resolves from the lent parent without UnawaitedCallError (D-48)', async () => {
+  it('get(K, { skipSelf }) inside a call()ed body resolves from the lent parent without UnawaitedCallError (DESIGN.md §3.2)', async () => {
     const K = createInjectionKey<number>('K');
     const app = createRootContext({ providers: [valueProvider(K, 0)] });
     const v = await app.call(
@@ -265,7 +265,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('a lender that completes before its otherCtx.call(...) child leaves child.lender undefined (D-53)', async () => {
+  it('a lender that completes before its otherCtx.call(...) child leaves child.lender undefined (A2)', async () => {
     const app = createRootContext();
     const gate = deferred();
     let work!: NodeImpl;
@@ -293,7 +293,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('a current node that is already lent cannot make a second call through another receiver; all() and race() name themselves (D-72, D-120)', async () => {
+  it('a current node that is already lent cannot make a second call through another receiver; all() and race() name themselves (DESIGN.md §4.9)', async () => {
     const app = createRootContext();
     const other = app.child();
     const caught: Record<string, unknown> = {};
@@ -327,7 +327,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('a lent current node cannot make a managed await through another receiver either: join, result, interrupted, never, managed (§7.11, I26, D-88)', async () => {
+  it('a lent current node cannot make a managed await through another receiver either: join, result, interrupted, never, managed (DESIGN.md §4.9, I26)', async () => {
     const app = createRootContext();
     const other = app.child({ name: 'other' });
     const f = spawn(app, async () => 1);
@@ -353,7 +353,7 @@ describe('lending (§7.11)', () => {
         } catch (e) {
           caught[op] = e;
         }
-      // Not the current node's managed awaits: another party may do these on `other` (§7.11).
+      // Not the current node's managed awaits: another party may do these on `other` (DESIGN.md §4.9).
       const x = other.own({}, () => {});
       void other.release(x);
       other.child().abort();
@@ -371,7 +371,7 @@ describe('lending (§7.11)', () => {
     await app.close();
   });
 
-  it('a call whose child settled at birth (an already-aborted signal) lends nothing: the caller is not left lent (D-13, D-85)', async () => {
+  it('a call whose child settled at birth (an already-aborted signal) lends nothing: the caller is not left lent (DESIGN.md §4.6)', async () => {
     const app = createRootContext();
     let lentAfter: NodeImpl | undefined | null = null;
     let forked = false;
@@ -405,8 +405,8 @@ describe('lending (§7.11)', () => {
   });
 });
 
-describe('a failure handler while its parent is lent (D-45, D-113)', () => {
-  it('a handler that runs while the parent body awaits a call can lookup, get, fork, child, pool and runSync on the parent; the parent is unaffected (§7.4)', async () => {
+describe('a failure handler while its parent is lent (DESIGN.md §4.7)', () => {
+  it('a handler that runs while the parent body awaits a call can lookup, get, fork, child, pool and runSync on the parent; the parent is unaffected (DESIGN.md §4.7)', async () => {
     const K = createInjectionKey<string>('K');
     const app = createRootContext({ providers: [valueProvider(K, 'k')] });
     const seen: unknown[] = [];
@@ -499,7 +499,7 @@ describe('a failure handler while its parent is lent (D-45, D-113)', () => {
     await expect(app.close()).resolves.toBeUndefined();
   });
 
-  it('through a receiver other than its parent, a handler may await and call while the parent is lent: join, result, managed, call and all (D-116)', async () => {
+  it('through a receiver other than its parent, a handler may await and call while the parent is lent: join, result, managed, call and all (DESIGN.md §4.7)', async () => {
     const app = createRootContext();
     const other = app.child({ name: 'other' });
     const gate = deferred();
@@ -524,7 +524,7 @@ describe('a failure handler while its parent is lent (D-45, D-113)', () => {
                 seen.push(await other.all([task(async () => 'a')]));
                 seen.push(lent !== undefined && Y.lentTo === lent); // lent all along, never overwritten
                 try {
-                  void join(g); // through the parent it stays refused (D-113)
+                  void join(g); // through the parent it stays refused (DESIGN.md §4.7)
                   seen.push('join through the parent: not refused');
                 } catch (e) {
                   seen.push(e instanceof UnawaitedCallError && /failure handler/.test((e as Error).message));

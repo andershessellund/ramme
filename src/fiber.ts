@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
-// Tasks (PROPOSAL.md §7.2, §7.10; IMPLEMENTATION.md §1.12).
+// Tasks (DESIGN.md §4.5).
 //
 // A task is a body plus options. It is an object, not a function, so it can
 // never be invoked as a bare promise (I27): each `fork`/`call` runs the body
 // in a new fiber, a child of the current node. `t.fork(...args)` is
 // `fork(t, ...args)` and `t.call(...args)` is `call(t, ...args)`: the same
 // free functions of ambient.ts, so `t.call()` in a creation frame throws
-// `CreationViolationError` before touching any node, as `call` does (§1.13).
+// `CreationViolationError` before touching any node, as `call` does (DESIGN.md §3.5).
 // ---------------------------------------------------------------------------
 
 import { call, fork } from './ambient.js';
@@ -28,7 +28,7 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
     return fork<T, A>(this, ...args);
   }
 
-  /** Run in a new child of the current node and await it; lends the current node until it settles (§7.11). */
+  /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
   call(...args: A): Promise<T> {
     return call<T, A>(this, ...args);
   }

@@ -1,11 +1,11 @@
 // ---------------------------------------------------------------------------
-// Stack — one of a node's two stacks (PROPOSAL.md §3.1, §5.1; I5).
+// Stack — one of a node's two stacks (DESIGN.md §2.1, §2.4; I5).
 //
 // A doubly linked list with an identity index. Positions never move: an
 // entry is appended at the tail and physically unlinked when its release
-// ends (P1). There is no cursor: the release loop asks for `topPending()`
+// ends, so nothing is retained after unlink. There is no cursor: the release loop asks for `topPending()`
 // afresh on every step, so an entry pushed during release is the new tail
-// and is released next (§6.2).
+// and is released next (DESIGN.md §2.4).
 // ---------------------------------------------------------------------------
 
 import type { FailureRecord } from './internal-context.js';
@@ -25,10 +25,10 @@ export interface Entry {
   state: EntryState;
   /**
    * Created when the release starts, before any dispose code runs; settles
-   * (never rejects) when it ends. Defined whenever `state !== 'live'` (D-36).
+   * (never rejects) when it ends. Defined whenever `state !== 'live'` (D16).
    */
   done: Promise<void> | undefined;
-  /** The release's own error when it threw; for an early release also in `owner.unconsumed` until delivered (D-41). */
+  /** The release's own error when it threw; for an early release also in `owner.unconsumed` until delivered (D16). */
   failure: FailureRecord | undefined;
   /** The release was started by `release(x)`/`releaseAll()`, not by the owner's loop. */
   early: boolean;
@@ -55,7 +55,7 @@ export class Stack {
   /**
    * Append at the tail. Throws `AlreadyOwnedError` if `target` is already on
    * this stack; an entry marked `'released'` but not yet unlinked does not
-   * count (D-62), and stays removable by `unlink` (D-65).
+   * count, and stays removable by `unlink`.
    */
   push(e: Omit<Entry, 'prev' | 'next' | 'stack'>): Entry {
     if (this.find(e.target) !== undefined)
@@ -76,10 +76,10 @@ export class Stack {
   }
 
   /**
-   * Physical removal (P1). Idempotent; neighbours keep their order (I5).
+   * Physical removal, so nothing is retained after unlink. Idempotent; neighbours keep their order (I5).
    * Membership is the entry's own links, not the index: a target pushed again
    * while its old entry is `'released'` but still linked owns the index slot,
-   * and the old entry must still be removable (D-65).
+   * and the old entry must still be removable.
    */
   unlink(e: Entry): void {
     if (!this.#linked(e)) return;
@@ -94,7 +94,7 @@ export class Stack {
   }
 
   /**
-   * Move a linked entry to the tail, keeping the entry object and its index slot (D-100): a declared
+   * Move a linked entry to the tail, keeping the entry object and its index slot (G3, I5; DESIGN.md §3.3): a declared
    * value's node, live on its storage context's provided stack from its first touch, takes its place
    * after the dependencies its factory created. A no-op for an entry that is not linked here, and for
    * the tail. Not called while the stack is being iterated.
@@ -129,7 +129,7 @@ export class Stack {
 
   /**
    * From the tail: the first node entry whose state is not `'released'`, passing passive entries. What the
-   * release loop takes while a failure handler still holds the owner (D-118).
+   * release loop takes while a failure handler still holds the owner (DESIGN.md §2.4).
    */
   topPendingNode(): Entry | undefined {
     let e = this.#tail;
@@ -140,7 +140,7 @@ export class Stack {
   /**
    * Head → tail. Entries pushed while iterating are visited; the yielded
    * entry may be unlinked while iterating, others may not (use
-   * `snapshotTopDown()` for that). Both may happen in one step (D-65).
+   * `snapshotTopDown()` for that). Both may happen in one step.
    */
   *[Symbol.iterator](): IterableIterator<Entry> {
     let e = this.#head;

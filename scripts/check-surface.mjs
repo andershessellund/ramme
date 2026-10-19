@@ -1,12 +1,13 @@
 // ---------------------------------------------------------------------------
-// The §7 S3 surface check over the build output (IMPLEMENTATION.md §1.15,
-// D-110). Run by `pnpm check:surface`, after `pnpm build`.
+// The surface check over the build output. Run by `pnpm check:surface`,
+// after `pnpm build`.
 //
 // Parses every export clause of dist/index.d.ts and requires the exported
-// names to be exactly §1.15's, each in its space (value or type) and from its
-// module: every name §3.1, §7.1, §7.2, §7.7 and §9.6 of the proposal define is
+// names to be exactly this file's `expected` map, each in its space (value or
+// type) and from its module: every core name (the node and the free functions,
+// task options, tasks, fibers and outcomes, pools, the error classes) is
 // there, `Fiber` only as a type, `runSync` only as the ambient function, and no
-// name listed under "Removed from the surface" or internal to ramme. Also
+// name removed by the redesign or internal to ramme. Also
 // requires that stripInternal left no `@internal` declaration in any
 // dist/*.d.ts. The type-level half is src/test/surface.check.ts.
 // ---------------------------------------------------------------------------
@@ -15,7 +16,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 
 const dist = new URL('../dist/', import.meta.url);
 
-/** §1.15, with D-110's list of context.ts's types: name → [space, module]. */
+/** The expected surface, with context.ts's types listed by name as index.ts lists them: name → [space, module]. */
 const expected = new Map([
   ...[
     'NodeState',
@@ -93,25 +94,25 @@ const expected = new Map([
   ['NodeEvent', ['type', './lifecycle-events.js']],
 ]);
 
-/** The names the proposal's §3.1, §7.1, §7.2, §7.7 and §9.6 define (S3's done criterion). */
-const proposal = [
-  // §3.1
+/** The core names: the node and the free functions, task options, tasks, fibers and outcomes, pools, and the error classes. */
+const coreNames = [
+  // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'all', 'race', 'pool', 'child',
   'join', 'result', 'interrupted', 'never', 'managed',
-  // §7.1
+  // task options
   'FailureDestination', 'TaskOptions',
-  // §7.2
+  // tasks, fibers, outcomes
   'Fiber', 'Task', 'task', 'AllResult', 'Outcome', 'ContextKey',
-  // §7.7
+  // pools
   'PoolOptions', 'Pool',
-  // §9.6
+  // errors
   'NoCurrentNodeError', 'NodeCompletedError', 'PendingNodeError', 'NotOwnedError', 'AlreadyOwnedError',
   'UnawaitedCallError', 'FiberNotAwaitableError', 'FiberAbortedError', 'PoolClosedError',
   'CreationViolationError', 'AsyncRunError', 'PlacementError',
 ];
 
-/** §1.15 "Removed from the surface", and names internal to ramme (D-110, D-111). */
+/** Names removed by the redesign, and names internal to ramme. */
 const absent = [
   'createContext', 'withAbortSignal', 'linkAbortSignal', 'createFiberSet', 'RegisterResource', 'ContextRefKey',
   'create', 'registerResource', 'addProvider', 'createRefCountedKey', 'refCountedProvider', 'Drain', 'Flush',
@@ -159,8 +160,8 @@ for (const [name, [space, from]] of expected) {
   else if (got[0] !== space || got[1] !== from)
     problems.push(`${name}: expected a ${space} export from '${from}', got a ${got[0]} export from '${got[1]}'`);
 }
-for (const name of actual.keys()) if (!expected.has(name)) problems.push(`not in §1.15: ${name}`);
-for (const name of proposal) if (!actual.has(name)) problems.push(`the proposal's ${name} is not exported`);
+for (const name of actual.keys()) if (!expected.has(name)) problems.push(`not in the expected surface: ${name}`);
+for (const name of coreNames) if (!actual.has(name)) problems.push(`the core name ${name} is not exported`);
 for (const name of absent) {
   // An identifier anywhere in an export clause, so `create` does not match './create-context.js'.
   if (new RegExp(`[{,\\s]${name}[\\s,}]`).test(text.replace(/'[^']*'/g, "''")))
@@ -172,7 +173,7 @@ for (const file of readdirSync(dist).filter((f) => f.endsWith('.d.ts'))) {
 }
 
 if (problems.length > 0) {
-  console.error(`check-surface: dist/index.d.ts does not match §1.15:\n- ${problems.join('\n- ')}`);
+  console.error(`check-surface: dist/index.d.ts does not match the expected surface:\n- ${problems.join('\n- ')}`);
   process.exit(1);
 }
-console.log(`check-surface: dist/index.d.ts exports exactly the ${expected.size} names of §1.15`);
+console.log(`check-surface: dist/index.d.ts exports exactly the ${expected.size} expected names`);

@@ -1,6 +1,6 @@
 import type { InjectionKey } from './context-key.js';
 import type { Provider } from './context.js';
-import { inject } from './inject.js';
+import { inject, resolveDependencies } from './inject.js';
 import type { Scope } from './scope.js';
 
 export interface ProviderOptions {
@@ -31,11 +31,13 @@ export function classProvider<T>(
   ClassConstructor?: new (...args: any[]) => T,
   options?: ProviderOptions,
 ): Provider<T> {
+  // Constructor arguments declared with `setDependencies(Class, ...keys)` are resolved with `inject`,
+  // exactly as a class used as its own default factory resolves them.
   if (ClassConstructor) {
     // Two-parameter version: explicit key + class
     return {
       key: keyOrClass as InjectionKey<T>,
-      provide: () => new ClassConstructor(),
+      provide: () => new ClassConstructor(...(resolveDependencies(ClassConstructor) ?? [])),
       scope: options?.scope,
     };
   } else {
@@ -43,7 +45,7 @@ export function classProvider<T>(
     const Constructor = keyOrClass as new (...args: any[]) => T;
     return {
       key: Constructor as any,
-      provide: () => new Constructor(),
+      provide: () => new Constructor(...(resolveDependencies(Constructor) ?? [])),
     };
   }
 }

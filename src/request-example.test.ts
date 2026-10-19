@@ -1,7 +1,7 @@
-// request-example.test.ts — IMPLEMENTATION.md §6.1: PROPOSAL.md §6.7 end to
-// end, as written. The handler is the §6.7 task verbatim (its unused `res`
-// parameter is spelled `_res` for the lint rule); `Pool` is a class key with
-// the §6.6 default factory; `work(req)` is a plain function that `lookup`s
+// request-example.test.ts — the request of README.md 'A request', end to
+// end. The handler is the README's request handler verbatim (its unused `res`
+// parameter is spelled `_res` for the lint rule); `Pool` is a class key whose
+// default factory has an owned reaper; `work(req)` is a plain function that `lookup`s
 // `Conn`; a fake server delivers its callbacks with no current node, and the
 // one place a node is named is `app.fork(...)` there (line 4). Each root is
 // created under `await using` and each test body runs as a top-level
@@ -72,7 +72,7 @@ class FakeServer {
   }
 }
 
-/** Everything §6.6/§6.7 names, fresh per test (the class keys included). */
+/** Everything the README's request example names, fresh per test (the class keys included). */
 function world() {
   const t: Trace = trace();
   const pending = new Map<string, PromiseWithResolvers<string>>();
@@ -92,7 +92,7 @@ function world() {
   }
   const Conn = createInjectionKey<Connection>('Conn');
 
-  /** What acquire() returns: a handle whose release() goes through the owner (§6.4, I23). */
+  /** What acquire() returns: a handle whose release() goes through the owner (DESIGN.md §2.6, I23). */
   class Lease implements Disposable {
     readonly #owner: Context;
     readonly #give: (lease: Lease) => void;
@@ -119,7 +119,7 @@ function world() {
     }
   }
 
-  /** §6.6: a DI value owning its connections; borrowers own leases. */
+  /** The Pool service: a DI value owning its connections, with an owned reaper; borrowers own leases. */
   class Pool {
     readonly #ctx: Context = current(); // the pending node, placed with the value
     #closed = false;
@@ -187,7 +187,7 @@ function world() {
     return workImpl(req);
   }
 
-  // §6.7, verbatim.
+  // The README's request handler, verbatim.
   const handle = task(async (req: Req, _res: Res) => {
     const pool = lookup(Pool); // 1
     const lease = own(await pool.acquire()); // 2
@@ -235,7 +235,7 @@ function world() {
   };
 }
 
-describe('PROPOSAL.md §6.7: a request, end to end', () => {
+describe('a request, end to end', () => {
   it('(1) Pool lands on the root’s provided stack (its only dependency is its own node), its reaper starts after placement, and a second handler gets the same instance', async () => {
     const w = world();
     const { ev, server } = w.app();
@@ -259,7 +259,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
       const cached = root.cache.get(w.Pool)!;
       expect(cached.autoHoisted).toBe(true);
       expect(cached.valueNode).toBe(poolNode);
-      expect([...cached.deps!]).toEqual([]); // current() (= inject(ContextKey)) is excluded from tracking (§8.1)
+      expect([...cached.deps!]).toEqual([]); // current() (= inject(ContextKey)) is excluded from tracking (DESIGN.md §3.3)
       expect((cached.value as InstanceType<typeof w.Pool>).node).toBe(poolNode);
       // lookup(Pool) from the second handler returned the same instance
       expect(w.acquired).toHaveLength(2);
@@ -271,7 +271,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
     expect(placed.storageId).toBe(ev.root.id);
     const reaper = ev.of('node:created').find((e) => e.parentId === poolNode!.id && e.kind === 'fiber')!;
     const started = ev.of('node:started').find((e) => e.id === reaper.id)!;
-    expect(started.seq).toBeGreaterThan(placed.seq); // §4.9: the constructor's fork starts after placement
+    expect(started.seq).toBeGreaterThan(placed.seq); // the constructor's fork starts after placement (DESIGN.md §4.6)
     expect(ev.of('node:started').filter((e) => e.id === reaper.id)).toHaveLength(1);
   });
 
@@ -283,7 +283,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
     let handler: NodeImpl | undefined;
     w.setWork(async () => {
       callChild = current();
-      handler = impl(callChild).parent; // the handler's fiber: it lent itself to this call (§7.11)
+      handler = impl(callChild).parent; // the handler's fiber: it lent itself to this call (DESIGN.md §4.9)
       expect(handler?.lentTo).toBe(impl(callChild));
       try {
         handler!.fork(async () => {});
@@ -302,7 +302,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
     expect(lentError).toBeInstanceOf(UnawaitedCallError);
     expect((lentError as UnawaitedCallError).child).toBe(callChild);
     expect(String((lentError as Error).message)).toMatch(/lent to/);
-    // D-37: acquire() attached the lease to the handler; own(lease) with one argument is a no-op by identity.
+    // D16: acquire() attached the lease to the handler; own(lease) with one argument is a no-op by identity.
     const lease = w.acquired[0].lease;
     expect(w.acquired[0].owner).toBe(handler);
     const registered = ev.of('entry:registered').filter((e) => e.id === handler!.id && e.entryName === 'Lease');
@@ -357,7 +357,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
       await expect(app.close()).resolves.toBeUndefined(); // the handler consumed it
       expect(w.failures).toHaveLength(1);
       expect(w.failures[0].error).toBe(boom);
-      expect(w.failures[0].current).toBe(app); // D-45: the handler runs with the parent current
+      expect(w.failures[0].current).toBe(app); // the handler runs with the parent current (DESIGN.md §4.7)
     }
     expect(res?.status).toBe(500);
     expect(w.t.log).toEqual(['lease', 'reaper', 'pool']);
@@ -374,7 +374,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
         await w.inFlight('/a');
         await w.inFlight('/b');
       }); // returns with both handlers still waiting on their queries
-      const closing = app.close(); // a close waits for subscribers naturally (§5.5)
+      const closing = app.close(); // a close waits for subscribers naturally (DESIGN.md §2.7)
       await tick();
       expect(w.t.log).toEqual([]);
       w.reply('/b', 'B');
@@ -394,7 +394,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
     expect(releasing.map((e) => e.stack)).toEqual(['explicit', 'provided']);
   });
 
-  it('(6) app.abort() from a platform callback with a handler still running rejects the top-level call with FiberAbortedError; the await using block completes and the lease was released (§4.3)', async () => {
+  it('(6) app.abort() from a platform callback with a handler still running rejects the top-level call with FiberAbortedError; the await using block completes and the lease was released (DESIGN.md §4.2)', async () => {
     const w = world();
     const { ev, server } = w.app();
     let caught: unknown;
@@ -409,7 +409,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
         await w.inFlight('/a');
         server.later(() => app.abort('SIGTERM')); // no current node there
         await result(handler); // managed: main freezes here
-        resumed = true; // recorded, not thrown: a delivered freeze body is aborted whatever it does (I13, D-121 (b))
+        resumed = true; // recorded, not thrown: a delivered freeze body is aborted whatever it does (I13)
       });
       try {
         await app.call(main);
@@ -420,7 +420,7 @@ describe('PROPOSAL.md §6.7: a request, end to end', () => {
     };
     await within(run());
     w.t.push('after using');
-    expect(resumed).toBe(false); // main froze at its managed await (§4.3) and never resumed (I6)
+    expect(resumed).toBe(false); // main froze at its managed await (DESIGN.md §4.2) and never resumed (I6)
     expect(ev.typesOf(mainId)).toContain('node:frozen');
     expect(ev.typesOf(mainId)).not.toContain('node:settled');
     expect(caught).toBeInstanceOf(FiberAbortedError);

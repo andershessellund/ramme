@@ -1,10 +1,9 @@
-// node-core.test.ts — IMPLEMENTATION.md §6.1: anatomy, delivery, freeze, the
-// release loop, release fibers, C1–C8, the §5.5 lifecycle table, the §5.4
-// use-after-release table, run/runSync, unstarted fibers, stall.
+// node-core.test.ts — anatomy, delivery, freeze, the release loop, release
+// fibers, C1–C8, the lifecycle table and the use-after-release table
+// (DESIGN.md §2.7), run/runSync, unstarted fibers, stall.
 //
-// S1 has no ambient free functions yet (S3's ambient.ts): `here()` is
-// `current()`, and every operation uses the method form on it, which is what
-// the free functions are (`current().<method>(...)`, §3.1).
+// `here()` is a `current()` that throws; this suite uses the method form on it,
+// which is what the free functions are (DESIGN.md §6).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { createInjectionKey } from './context-key.js';
@@ -30,7 +29,7 @@ import {
 import { RootScope } from './scope.js';
 import { deferred, events, here, impl, micro, tick, trace } from './test/util.js';
 
-/** A fiber forked onto a bodiless node needs a destination other than 'join' (Q6); 'link' surfaces failures. */
+/** A fiber forked onto a bodiless node needs a destination other than 'join' (D14); 'link' surfaces failures. */
 const linked = { onFailure: 'link' } as const;
 
 /** Fork a body onto a bodiless node with the 'link' destination. */
@@ -50,7 +49,7 @@ describe('anatomy', () => {
     const ev = events({
       providers: [
         factoryProvider(V, () => {
-          here(); // materialises the value's node (§6.2)
+          here(); // materialises the value's node (DESIGN.md §3.3)
           return {};
         }),
       ],
@@ -88,7 +87,7 @@ describe('anatomy', () => {
     await app.close();
   });
 
-  it('scopes is a read-only view: the root carries RootScope; scope-less nodes share one empty set (D-56)', async () => {
+  it('scopes is a read-only view: the root carries RootScope; scope-less nodes share one empty set', async () => {
     const app = createRootContext();
     expect(app.scopes.has(RootScope)).toBe(true);
     const a = app.child();
@@ -116,7 +115,7 @@ describe('anatomy', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('delivery (§4.1, §4.4)', () => {
+describe('delivery (DESIGN.md §4.1, §4.3)', () => {
   it('abort marks the whole subscribed subtree before any listener runs (I9)', async () => {
     const app = createRootContext();
     const A = app.child();
@@ -155,7 +154,7 @@ describe('delivery (§4.1, §4.4)', () => {
     expect(born!.outcome?.status).toBe('aborted');
   });
 
-  it("B.abort() from A's listener releases B only after B's signal fired: node:delivered before entry:released and node:complete (§5.1, D-82)", async () => {
+  it("B.abort() from A's listener releases B only after B's signal fired: node:delivered before entry:released and node:complete (DESIGN.md §2.4, §4.1)", async () => {
     const ev = events();
     const app = ev.root;
     const A = app.child({ name: 'A' });
@@ -176,7 +175,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it("close() of an already-marked node from a listener waits for the delivery's pass 2: the abort wins, after the signal (D-11, D-82)", async () => {
+  it("close() of an already-marked node from a listener waits for the delivery's pass 2: the abort wins, after the signal (DESIGN.md §2.7, §4.1)", async () => {
     const app = createRootContext();
     const A = app.child();
     const B = app.child();
@@ -191,7 +190,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it("an unstarted fiber aborted from a listener while its delivery's pass 2 runs still never runs (D-13, D-82)", async () => {
+  it("an unstarted fiber aborted from a listener while its delivery's pass 2 runs still never runs (DESIGN.md §4.1, §4.6)", async () => {
     const ev = events();
     const app = ev.root;
     let ran = false;
@@ -218,7 +217,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it("an abort() of an already-fired ancestor from a later-fired subscriber's listener waits for pass 2b: every signal of the delivery fires before the ancestor releases (§5.1, D-82, D-91)", async () => {
+  it("an abort() of an already-fired ancestor from a later-fired subscriber's listener waits for pass 2b: every signal of the delivery fires before the ancestor releases (DESIGN.md §2.4, §4.1)", async () => {
     const app = createRootContext();
     const t = trace();
     const A = app.child({ name: 'A' });
@@ -232,11 +231,11 @@ describe('delivery (§4.1, §4.4)', () => {
     B2.signal.addEventListener('abort', () => t.push('B2 listener'));
     A.abort('stop');
     expect(t.log).toEqual(['B1 listener', 'B2 listener', 'A released P; B2.signal.aborted=true']);
-    expect([A.state, B1.state, B2.state]).toEqual(['complete', 'complete', 'complete']); // still synchronous (D-25)
+    expect([A.state, B1.state, B2.state]).toEqual(['complete', 'complete', 'complete']); // still synchronous (DESIGN.md §2.4)
     await app.close();
   });
 
-  it("a close() of an already-fired observe ancestor from a later-fired restore subscriber's listener: the abort wins, and its freeze subscribers are interrupted (D-11, D-82, D-91)", async () => {
+  it("a close() of an already-fired observe ancestor from a later-fired restore subscriber's listener: the abort wins, and its freeze subscribers are interrupted (DESIGN.md §2.7, §4.1)", async () => {
     const app = createRootContext();
     const A = app.child({ name: 'A', interrupt: 'observe' });
     const R = A.child({ name: 'R', interrupt: 'restore' });
@@ -270,7 +269,7 @@ describe('delivery (§4.1, §4.4)', () => {
     const F = O.child();
     const R = F.child({ interrupt: 'restore' });
     const F2 = R.child();
-    await tick(); // started: an unstarted fiber would settle at abort (D-13)
+    await tick(); // started: an unstarted fiber would settle at abort (DESIGN.md §4.6)
     O.abort('stop');
     expect([impl(O).delivered, impl(F).delivered, impl(R).delivered, impl(F2).delivered]).toEqual([true, false, true, true]);
     expect([O.signal.aborted, F.signal.aborted, R.signal.aborted]).toEqual([true, false, true]);
@@ -288,7 +287,7 @@ describe('delivery (§4.1, §4.4)', () => {
     const viaAbort = spawn(app, () => gates[0].promise, { interrupt: 'observe' });
     const viaTimeout = spawn(app, () => gates[1].promise, { interrupt: 'observe', timeoutMs: 5 });
     const viaSignal = spawn(app, () => gates[2].promise, { interrupt: 'observe', signal: ac.signal });
-    await tick(); // started: an unstarted fiber would settle at abort (D-13)
+    await tick(); // started: an unstarted fiber would settle at abort (DESIGN.md §4.6)
     viaAbort.abort('direct');
     ac.abort('linked');
     await new Promise((r) => setTimeout(r, 20));
@@ -317,7 +316,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it('millisecond options are checked at the call site: undefined, Infinity or [0, 2^31 - 1] (D-78)', async () => {
+  it('millisecond options are checked at the call site: undefined, Infinity or [0, 2^31 - 1] (DESIGN.md §2.1)', async () => {
     const app = createRootContext();
     for (const k of ['timeoutMs', 'releaseTimeoutMs', 'stallWarningMs'] as const)
       for (const v of [-1, NaN, 2 ** 31, -Infinity, '5' as unknown as number]) {
@@ -331,7 +330,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it('timeoutMs: Infinity arms no timer; it never delivers (D-78)', async () => {
+  it('timeoutMs: Infinity arms no timer; it never delivers (DESIGN.md §2.1)', async () => {
     const app = createRootContext();
     const c = app.child({ timeoutMs: Infinity });
     const f = spawn(app, () => new Promise<void>((r) => setTimeout(r, 30)), { timeoutMs: Infinity });
@@ -344,7 +343,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  it('releaseTimeoutMs: Infinity is no deadline, also over an inherited one; a fractional value is a deadline (D-78)', async () => {
+  it('releaseTimeoutMs: Infinity is no deadline, also over an inherited one; a fractional value is a deadline (DESIGN.md §2.1)', async () => {
     const app = createRootContext({ releaseTimeoutMs: Infinity });
     const signals: AbortSignal[] = [];
     app.own(() => void signals.push(here().signal)); // synchronous: close() must not throw
@@ -390,7 +389,7 @@ describe('delivery (§4.1, §4.4)', () => {
     await app.close();
   });
 
-  describe('the birth rule under a delivered parent (D-05)', () => {
+  describe('the birth rule under a delivered parent (D12)', () => {
     const modes = ['freeze', 'observe', 'restore'] as const;
     // delivered at birth iff the parent would have forwarded to it
     const expected: Record<(typeof modes)[number], Record<(typeof modes)[number], boolean>> = {
@@ -429,7 +428,7 @@ describe('delivery (§4.1, §4.4)', () => {
       await app.close();
     });
 
-    it('unsubscribed nodes are not delivered at birth: they hear at their turn (I4; D-71)', async () => {
+    it('unsubscribed nodes are not delivered at birth: they hear at their turn (I4; D12)', async () => {
       const app = createRootContext();
       const gate = deferred();
       const P = spawn(app, () => gate.promise);
@@ -442,7 +441,7 @@ describe('delivery (§4.1, §4.4)', () => {
       expect(pool.delivered).toBe(true); // at its turn in P's release loop
     });
 
-    it("restore: the walk follows subscription edges only, so a restore fiber in an undelivered pool is not delivered, forked before or after its owner's abort (I4; D-05, D-71, D-87)", async () => {
+    it("restore: the walk follows subscription edges only, so a restore fiber in an undelivered pool is not delivered, forked before or after its owner's abort (I4; D12)", async () => {
       const app = createRootContext();
       const pool = impl(app.pool({ name: 'p', onFailure: () => {} }));
       const gate = deferred();
@@ -469,7 +468,7 @@ describe('delivery (§4.1, §4.4)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('freeze (§4.2)', () => {
+describe('freeze (DESIGN.md §4.2)', () => {
   it("a body suspended on join(f) never resumes and never runs finally; the owner's release runs in the delivery's tick", async () => {
     const t = trace();
     const app = createRootContext();
@@ -520,7 +519,7 @@ describe('freeze (§4.2)', () => {
     await app.close();
   });
 
-  it('a stored, unawaited managed promise does not freeze a body in a bare await; awaiting it later does (D-06)', async () => {
+  it('a stored, unawaited managed promise does not freeze a body in a bare await; awaiting it later does (D13)', async () => {
     const t = trace();
     const app = createRootContext();
     const f = spawn(app, async () => {
@@ -547,7 +546,7 @@ describe('freeze (§4.2)', () => {
     await app.close();
   });
 
-  it('after delivery, p.catch() on a stored join(f) does not release anything inside the body\'s synchronous code (D-68)', async () => {
+  it('after delivery, p.catch() on a stored join(f) does not release anything inside the body\'s synchronous code (DESIGN.md §4.4)', async () => {
     const t = trace();
     const app = createRootContext();
     const f = spawn(app, async () => {
@@ -579,7 +578,7 @@ describe('freeze (§4.2)', () => {
     await app.close();
   });
 
-  describe('unsupported shapes, pinned with a real node (D-64, D-67)', () => {
+  describe('unsupported shapes, pinned with a real node (DESIGN.md §4.2, §4.4)', () => {
     it('Promise.allSettled([join(f1), join(f2)]): f1 failed, the owner aborted while f2 runs — f1\'s failure is in no outcome (the accepted loss)', async () => {
       const app = createRootContext();
       let B!: NodeImpl;
@@ -637,7 +636,7 @@ describe('freeze (§4.2)', () => {
       await app.close();
     });
 
-    it('a managed promise awaited by another body: dev mode reports the foreign awaiter (D-68)', async () => {
+    it('a managed promise awaited by another body: dev mode reports the foreign awaiter (DESIGN.md §4.4)', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const app = createRootContext();
       const f = spawn(app, async () => 7);
@@ -654,7 +653,7 @@ describe('freeze (§4.2)', () => {
       await app.close();
     });
 
-    it('the loser of await Promise.race([join(f1), join(f2)]) stays armed; a delivery during a later bare await counts the body frozen; its settle is reported (D-64)', async () => {
+    it('the loser of await Promise.race([join(f1), join(f2)]) stays armed; a delivery during a later bare await counts the body frozen; its settle is reported (DESIGN.md §4.2, §4.4)', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const app = createRootContext();
       const f1 = spawn(app, async () => 1);
@@ -680,7 +679,7 @@ describe('freeze (§4.2)', () => {
       await app.close();
     });
 
-    it('await Promise.all([call(a), a bare promise rejected by the signal]): the cut counts the body frozen, the rejection reaches its catch; its settle is reported (D-64)', async () => {
+    it('await Promise.all([call(a), a bare promise rejected by the signal]): the cut counts the body frozen, the rejection reaches its catch; its settle is reported (DESIGN.md §4.2, §4.4)', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const t = trace();
       const app = createRootContext();
@@ -711,7 +710,7 @@ describe('freeze (§4.2)', () => {
     });
   });
 
-  describe('interrupted() of a node other than the awaiting body (§3.1, §4.3, D-86)', () => {
+  describe('interrupted() of a node other than the awaiting body (DESIGN.md §4.2)', () => {
     it("a freeze body awaiting another node's interrupt wakes with its reason: delivered before the await, or during it", async () => {
       const app = createRootContext();
       // Delivered before the await: c is still releasing behind a slow entry when the body asks.
@@ -745,7 +744,7 @@ describe('freeze (§4.2)', () => {
       await app.close();
     });
 
-    it("§6.6: an owned reaper awaiting its owner's interrupt wakes at the owner's delivery, before its own turn behind a slow entry", async () => {
+    it("an owned reaper awaiting its owner's interrupt wakes at the owner's delivery, before its own turn behind a slow entry (DESIGN.md §2.2)", async () => {
       const app = createRootContext();
       const svc = app.child({ name: 'svc' });
       const t = trace();
@@ -794,7 +793,7 @@ describe('freeze (§4.2)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('the release loop (§5.1, §4.2)', () => {
+describe('the release loop (DESIGN.md §2.4)', () => {
   it('explicit LIFO, then provided LIFO (I3, I5)', async () => {
     const t = trace();
     const K1 = createInjectionKey<object>('K1');
@@ -813,7 +812,7 @@ describe('the release loop (§5.1, §4.2)', () => {
     expect(t.log).toEqual(['b', 'a', 'K2', 'K1']);
   });
 
-  it('a release that own()s onto its owner has that entry released next (C2, §6.2)', async () => {
+  it('a release that own()s onto its owner has that entry released next (C2, DESIGN.md §2.4)', async () => {
     const t = trace();
     const app = createRootContext();
     app.own(t.at('first'));
@@ -825,7 +824,7 @@ describe('the release loop (§5.1, §4.2)', () => {
     expect(t.log).toEqual(['second', 'pushed during release', 'first']);
   });
 
-  it('an own() from the microtask drain after the last async release is released or refused, never left live on a complete node (D-69)', async () => {
+  it('an own() from the microtask drain after the last async release is released or refused, never left live on a complete node (I7)', async () => {
     const app = createRootContext();
     const N = impl(app.child());
     N.own(async () => {
@@ -863,7 +862,7 @@ describe('the release loop (§5.1, §4.2)', () => {
         factoryProvider(A, () =>
           here().own({}, () => {
             t.push('A');
-            here().get(LATE); // the release fiber resolves through the releasing owner (§6.2)
+            here().get(LATE); // the release fiber resolves through the releasing owner (DESIGN.md §3.3)
           }),
         ),
         factoryProvider(LATE, () => here().own({}, () => t.push('LATE'))),
@@ -916,7 +915,7 @@ describe('the release loop (§5.1, §4.2)', () => {
       expect(t.log).toEqual(kinds.map((_, i) => `${i}`).reverse());
     });
 
-  it('synchronous releases complete synchronously inside abort(), nested child() and unstarted fiber entries included (D-25)', async () => {
+  it('synchronous releases complete synchronously inside abort(), nested child() and unstarted fiber entries included (DESIGN.md §2.4)', async () => {
     const t = trace();
     const app = createRootContext();
     const outer = app.child();
@@ -942,7 +941,7 @@ describe('the release loop (§5.1, §4.2)', () => {
     await app.close();
   });
 
-  it('releaseAll() racing release(x) on one entry runs that release once, and both settle (D-36)', async () => {
+  it('releaseAll() racing release(x) on one entry runs that release once, and both settle (D16)', async () => {
     const app = createRootContext();
     let n = 0;
     const d = deferred();
@@ -960,7 +959,7 @@ describe('the release loop (§5.1, §4.2)', () => {
     expect(n).toBe(1);
   });
 
-  it('an abort() arriving in the middle of a releaseAll() runs every release once (D-36)', async () => {
+  it('an abort() arriving in the middle of a releaseAll() runs every release once (D16)', async () => {
     const ev = events();
     const N = ev.root.child({ name: 'N' });
     const counts = { a: 0, b: 0, c: 0 };
@@ -985,7 +984,7 @@ describe('the release loop (§5.1, §4.2)', () => {
     await ev.root.close();
   });
 
-  it('a release that synchronously calls owner.abort() does not throw, and the owner completes (e.done exists first, D-36)', async () => {
+  it('a release that synchronously calls owner.abort() does not throw, and the owner completes (e.done exists first, D16)', async () => {
     const app = createRootContext();
     const N = app.child();
     const x = N.own({}, () => N.abort());
@@ -996,7 +995,7 @@ describe('the release loop (§5.1, §4.2)', () => {
   });
 });
 
-describe('release errors that String() cannot convert (§4.3, I10, D-89)', () => {
+describe('release errors that String() cannot convert (DESIGN.md §2.4, I2, I10)', () => {
   const unprintable = (): unknown[] => [
     Object.create(null),
     {
@@ -1034,7 +1033,7 @@ describe('release errors that String() cannot convert (§4.3, I10, D-89)', () =>
 });
 
 // ---------------------------------------------------------------------------
-describe('release fibers (§5.2, I14)', () => {
+describe('release fibers (DESIGN.md §2.4, I14)', () => {
   it('own(x, release), own({[Symbol.asyncDispose]}) and own(fn) run in a release fiber: current, child of the owner, its own deadline, owner.outcome readable', async () => {
     const OWNER = createInjectionKey<string>('OWNER');
     const app = createRootContext();
@@ -1082,7 +1081,7 @@ describe('release fibers (§5.2, I14)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('ownership contracts (§6.3)', () => {
+describe('ownership contracts (DESIGN.md §2.6)', () => {
   it('C1: own is synchronous — the entry exists before own returns; a value without a dispose protocol throws at the call', async () => {
     const app = createRootContext();
     const x = { [Symbol.dispose]() {} };
@@ -1148,7 +1147,7 @@ describe('ownership contracts (§6.3)', () => {
     });
     await tick();
     gate.resolve();
-    await expect(p).rejects.toThrow('owned failed'); // aborted, then the failure surfaced (§9.3)
+    await expect(p).rejects.toThrow('owned failed'); // aborted, then the failure surfaced (DESIGN.md §4.12, C5)
     expect(ownerNode.signal.aborted).toBe(true);
     await app.close();
   });
@@ -1185,7 +1184,7 @@ describe('ownership contracts (§6.3)', () => {
     await app.close();
   });
 
-  it('C8: a second release for one object throws AlreadyOwnedError; own(x) with one argument on an owned x is a no-op (D-37)', async () => {
+  it('C8: a second release for one object throws AlreadyOwnedError; own(x) with one argument on an owned x is a no-op (D16)', async () => {
     const app = createRootContext();
     let n = 0;
     const x = { [Symbol.dispose]: () => void n++ };
@@ -1199,7 +1198,7 @@ describe('ownership contracts (§6.3)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('the lifecycle table (§5.5)', () => {
+describe('the lifecycle table (DESIGN.md §2.7)', () => {
   it('abort() delivers the signal and returns without waiting', async () => {
     const app = createRootContext();
     const N = app.child();
@@ -1213,7 +1212,7 @@ describe('the lifecycle table (§5.5)', () => {
     expect(N.state).toBe('complete');
   });
 
-  it('close() on a bodiless node: success, subscribed children closed recursively (Q7), unsubscribed ones aborted', async () => {
+  it('close() on a bodiless node: success, subscribed children closed recursively, unsubscribed ones aborted', async () => {
     const app = createRootContext();
     const N = app.child();
     const owned = N.own(
@@ -1240,7 +1239,7 @@ describe('the lifecycle table (§5.5)', () => {
     await app.close();
   });
 
-  it('close() on a fiber waits for its body without a signal; a later abort() wins (D-11)', async () => {
+  it('close() on a fiber waits for its body without a signal; a later abort() wins (DESIGN.md §2.7)', async () => {
     const app = createRootContext();
     const gate = deferred();
     let sub!: Fiber<unknown>;
@@ -1264,7 +1263,7 @@ describe('the lifecycle table (§5.5)', () => {
     await app.close();
   });
 
-  it("close(), then abort(), on an observe node whose bodiless exit was 'await': the abort wins and interrupts its freeze subscribers (D-11, D-90)", async () => {
+  it("close(), then abort(), on an observe node whose bodiless exit was 'await': the abort wins and interrupts its freeze subscribers (DESIGN.md §2.7)", async () => {
     const app = createRootContext();
     const A = app.child({ name: 'A', interrupt: 'observe' });
     const f = spawn(A, async () => {
@@ -1280,17 +1279,17 @@ describe('the lifecycle table (§5.5)', () => {
     expect(impl(f).delivered).toBe(true); // the body has exited: no observe body decides for the subtree
     await closing;
     expect(f.outcome).toEqual({ status: 'aborted', reason: 'stop' });
-    expect(A.outcome?.status).toBe('success'); // fixed when it settled under close() (§7.6)
+    expect(A.outcome?.status).toBe('success'); // fixed when it settled under close() (DESIGN.md §4.12)
     await app.close();
   });
 
-  it('close() of an already-delivered bodiless node is an interrupt, not a wait: the abort came first and wins (D-11, D-91)', async () => {
+  it('close() of an already-delivered bodiless node is an interrupt, not a wait: the abort came first and wins (DESIGN.md §2.7)', async () => {
     const app = createRootContext();
     const gate = deferred();
     const P = spawn(app, () => gate.promise); // a bare await: delivery does not freeze it
     await tick();
     P.abort('stop');
-    const C = P.child({ name: 'C' }); // born delivered (D-05)
+    const C = P.child({ name: 'C' }); // born delivered (D12)
     const O = C.child({ name: 'O', interrupt: 'observe' }); // observe: never delivered at birth
     const G = spawn(O, async () => {
       await here().never();
@@ -1344,8 +1343,8 @@ describe('the lifecycle table (§5.5)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('use after release (§5.4, I7, I8)', () => {
-  it('a complete node refuses every operation but the lifecycle quartet (D-09)', async () => {
+describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
+  it('a complete node refuses every operation but the lifecycle quartet (DESIGN.md §2.7)', async () => {
     const K = createInjectionKey<number>('K');
     const app = createRootContext({ providers: [valueProvider(K, 1)] });
     const f = spawn(app, async () => 1);
@@ -1426,8 +1425,8 @@ describe('use after release (§5.4, I7, I8)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('bodies and messages (D-49, §5)', () => {
-  it('a body that returns a context or a pool returns it as its value, sync or async; one that returns a fiber fails (D-49, D-83)', async () => {
+describe('bodies and messages (DESIGN.md §4.5, §4.12)', () => {
+  it('a body that returns a context or a pool returns it as its value, sync or async; one that returns a fiber fails (DESIGN.md §4.5)', async () => {
     const app = createRootContext();
     let c!: Context;
     await expect(app.call(() => (c = app.child()))).resolves.toBe(c);
@@ -1441,7 +1440,7 @@ describe('bodies and messages (D-49, §5)', () => {
     await app.close();
   });
 
-  it("inject() outside creation throws CreationViolationError starting with §5's text", () => {
+  it("inject() outside creation throws CreationViolationError starting with 'inject() outside creation'", () => {
     const K = createInjectionKey<number>('K');
     expect(() => inject(K)).toThrow(CreationViolationError);
     expect(() => inject(K)).toThrow(/^inject\(\) outside creation/);
@@ -1449,7 +1448,7 @@ describe('bodies and messages (D-49, §5)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('run and runSync (§7.8)', () => {
+describe('run and runSync (DESIGN.md §4.11)', () => {
   it('run makes the node current for a synchronous fn and restores the frame on return and on throw', async () => {
     const app = createRootContext();
     expect(currentFrame()).toBeUndefined();
@@ -1464,7 +1463,7 @@ describe('run and runSync (§7.8)', () => {
     await app.close();
   });
 
-  it('run(fn) returning a promise throws AsyncRunError (Q8)', async () => {
+  it('run(fn) returning a promise throws AsyncRunError (DESIGN.md §4.4, §4.11)', async () => {
     const app = createRootContext();
     expect(() => app.run(async () => 1)).toThrow(AsyncRunError);
     await app.close();
@@ -1502,7 +1501,7 @@ describe('run and runSync (§7.8)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('unstarted fibers (D-13)', () => {
+describe('unstarted fibers (DESIGN.md §4.6)', () => {
   it('abort() before the start microtask settles the fiber aborted; the body never runs', async () => {
     const app = createRootContext();
     let ran = false;
@@ -1544,7 +1543,7 @@ describe('unstarted fibers (D-13)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('stall diagnostics (§4.6, D-55)', () => {
+describe('stall diagnostics (DESIGN.md §4.4)', () => {
   it('node:stalled after stallWarningMs for a delivered freeze body that never reaches a managed await', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const ev = events({ stallWarningMs: 100 });
@@ -1597,8 +1596,8 @@ describe('stall diagnostics (§4.6, D-55)', () => {
   });
 });
 
-// Keeps the OwnerInterrupt import honest: a parent's natural exit interrupts its subscribers with one (D-04).
-describe('body exit (§5.1, D-04)', () => {
+// Keeps the OwnerInterrupt import honest: a parent's natural exit interrupts its subscribers with one (DESIGN.md §2.4).
+describe('body exit (DESIGN.md §2.4)', () => {
   it("a parent's natural exit delivers an OwnerInterrupt to its subscribers and does not mark itself", async () => {
     const app = createRootContext();
     let sub!: Fiber<unknown>;
@@ -1643,7 +1642,7 @@ describe('body exit (§5.1, D-04)', () => {
 
 
 // ---------------------------------------------------------------------------
-describe('NodeTopic receivers are sinks (D-45, D-74, D-113)', () => {
+describe('NodeTopic receivers are sinks (DESIGN.md §4.7, §5)', () => {
   it('a receiver that throws or returns a rejecting promise is reported with console.error; the tree completes and nothing rejects unhandled', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const thrown = new Error('receiver threw');

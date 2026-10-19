@@ -1,25 +1,26 @@
-// di.test.ts — IMPLEMENTATION.md §6.2: the ported context.test.ts suites
+// di.test.ts — ported from the pre-redesign context.test.ts suites
 // (129 tests; the 21 dropped ones are context type properties (1), the
 // probabilistic memo (1), context.create() (7), create() dep tracking (2),
 // createRefCountedKey (6), refCountedProvider (4)) plus push-context.test.ts's
-// captureAutoScoped suite (4), with `ctx.run` instead of the removed enter/leave pair (§14).
+// captureAutoScoped suite (4), with `ctx.run` instead of the removed enterSync/leaveSync pair.
 //
-// Mechanical substitutions (§6.2): `createContext({ parent: p, … })` →
+// Mechanical substitutions: `createContext({ parent: p, … })` →
 // `p.child({ … })`; `inject(RegisterResource)({ [Dispose]: f })` →
 // `own({ [Symbol.dispose]: f })` or `own(() => f())`; `ctx.dispose()` (sync) →
-// `ctx.abort()`, observed synchronously (D-25); `await ctx.dispose()` →
+// `ctx.abort()`, observed synchronously (DESIGN.md §2.4); `await ctx.dispose()` →
 // `await ctx.close()`; `ctx.runSync(fn, { providers, scopes })` →
-// `using c = ctx.child({ providers, scopes }); c.run(fn)` (D-24).
+// `using c = ctx.child({ providers, scopes }); c.run(fn)` (DESIGN.md §4.11).
 //
-// Behavioural flips (§6.3) are annotated `FLIP n` where they occur: 1–4, 6
-// and 7 here; flip 5 (release fibers exist without a receiver, events do not)
-// is a lifecycle-events flip and belongs to S4's node-topic.test.ts. Flip 6
-// had no old test (nothing read through `lookup` in a factory), so it is one
-// added case. One more change follows from the substitutions and is annotated
-// `(§6.1)`: there is no bare detach, so the old `unregister()` becomes
-// `release(x)`, which runs the release now.
+// FLIP marks a port whose expectation the redesign reversed; each is annotated
+// with the DESIGN.md section that reversed it. The flip that release fibers exist
+// without a receiver while events do not is a lifecycle-events flip and is in
+// node-topic.test.ts. The flip that `lookup` is refused in a factory had no old
+// test (nothing read through `lookup` in a factory), so it is one added case.
+// One more change follows from the substitutions and is annotated
+// `(DESIGN.md §2.6)`: there is no bare detach, so the old `unregister()`
+// becomes `release(x)`, which runs the release now.
 //
-// `lookup` and `own` are the free functions of §1.13 (`./ambient.js`).
+// `lookup` and `own` are the free functions of ambient.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { createInjectionKey, setDependencies, setScope } from './context-key.js';
@@ -352,7 +353,7 @@ describe('Execution Context', () => {
     });
   });
 
-  it('should resolve child context providers via a child and run (D-24)', () => {
+  it('should resolve child context providers via a child and run', () => {
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
 
     const ctx = createRootContext();
@@ -568,7 +569,7 @@ describe('Context.runSync', () => {
     });
   });
 
-  it('should resolve child providers via runSync (D-24: providers go on a child)', () => {
+  it('should resolve child providers via runSync: providers go on a child (DESIGN.md §4.11)', () => {
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
 
     const ctx = createRootContext();
@@ -679,7 +680,8 @@ describe('Context.runSync', () => {
   });
 
   it('runSync from within ctx.run should see the entered context as grandparent', async () => {
-    // The enter/leave pair is gone (§14: `ctx.run(fn)`): the entered context is the one `run` makes current.
+    // The removed enterSync/leaveSync pair is replaced by `ctx.run(fn)`: the entered context is the one
+    // `run` makes current.
     const OUTER = createInjectionKey<string>('OUTER');
     const INNER = createInjectionKey<string>('INNER');
 
@@ -739,7 +741,7 @@ describe('Disposal', () => {
       ctx.abort();
 
       expect(order).toEqual(['C', 'B', 'A']);
-      expect(ctx.state).toBe('complete'); // D-25: synchronous releases complete inside abort()
+      expect(ctx.state).toBe('complete'); // synchronous releases complete inside abort() (DESIGN.md §2.4)
     });
 
     it('should run multiple own() releases in reverse registration order', () => {
@@ -760,14 +762,14 @@ describe('Disposal', () => {
       expect(order).toEqual(['onDispose-2', 'onDispose-1']);
     });
 
-    it('should allow releasing resources early (§6.1: release(x) runs the release now)', () => {
+    it('should allow releasing resources early (DESIGN.md §2.6: release(x) runs the release now)', () => {
       const order: string[] = [];
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
           own(() => void order.push('kept'));
           const removed = own(() => void order.push('removed'));
-          // (§6.1) There is no bare detach: an entry nobody owns is a leak. The old unregister()
+          // There is no bare detach (DESIGN.md §2.6): an entry nobody owns is a leak. The old unregister()
           // becomes release(x), which runs the release now, exactly once (C7), in a release fiber.
           void here().release(removed);
           return 'value';
@@ -805,7 +807,7 @@ describe('Disposal', () => {
       const child = parent.child();
       child.get(CHILD_KEY);
 
-      parent.abort(); // the child entry (explicit) completes synchronously too (D-25)
+      parent.abort(); // the child entry (explicit) completes synchronously too (DESIGN.md §2.4)
 
       expect(order).toEqual(['child', 'parent']);
       expect(child.state).toBe('complete');
@@ -978,12 +980,12 @@ describe('Disposal', () => {
 
   describe('own() in creation (was RegisterResource)', () => {
     it('own() with no current node throws NoCurrentNodeError', () => {
-      // FLIP 3 (§6.2): own() is no longer creation-only; outside any node there is nothing to attach to.
+      // FLIP (DESIGN.md §2.6): own() is no longer creation-only; outside any node there is nothing to attach to.
       expect(() => own(() => {})).toThrow(NoCurrentNodeError);
     });
 
     it('own() in an execution context attaches to the current node', async () => {
-      // FLIP 3 (§6.2): in a body (here: ctx.run), own() attaches to the current node.
+      // FLIP (DESIGN.md §2.6): in a body (here: ctx.run), own() attaches to the current node.
       const ctx = createRootContext();
       let released = false;
 
@@ -1000,7 +1002,7 @@ describe('Disposal', () => {
     });
 
     it('lookup() inside a factory throws CreationViolationError', () => {
-      // FLIP 6 (§8.1): lookup used to read untracked during creation; a creation-time read is now
+      // FLIP (DESIGN.md §3.2): lookup used to read untracked during creation; a creation-time read is now
       // inject() (tracked) or nothing.
       const KEY = createInjectionKey<string>('KEY');
       const V = createInjectionKey<string>('V', { factory: () => lookup(KEY) });
@@ -1015,7 +1017,7 @@ describe('Disposal', () => {
       const KEY = createInjectionKey('KEY', {
         factory: () => {
           expect(own(resource)).toBe(resource); // every overload returns what it attached
-          expect(impl(here()).explicit.size).toBe(1); // on the value's own node (§6.2)
+          expect(impl(here()).explicit.size).toBe(1); // on the value's own node (DESIGN.md §2.6)
           return 'value';
         },
       });
@@ -1057,7 +1059,7 @@ describe('Disposal', () => {
       expect(disposed).toBe(true);
     });
 
-    it('should allow releasing early after creation (§6.1: release(x) runs the release now)', async () => {
+    it('should allow releasing early after creation (DESIGN.md §2.6: release(x) runs the release now)', async () => {
       const order: string[] = [];
 
       let node: Context | undefined;
@@ -1114,7 +1116,7 @@ describe('Disposal', () => {
         expect(order).toEqual([]);
       }
 
-      expect(order).toEqual(['ec-disposed']); // synchronous (D-24, D-25)
+      expect(order).toEqual(['ec-disposed']); // synchronous (DESIGN.md §2.4, §4.11)
     });
 
     it('a child disposes class instances placed on it', () => {
@@ -1268,7 +1270,7 @@ describe('Disposal', () => {
       // stored at the scope owner under the key's scope, not auto-hoisted
       expect(impl(root).cache.get(KEY)?.scope).toBe(appScope);
       expect(impl(root).cache.get(KEY)?.autoHoisted).toBe(false);
-      // a nested owner of the scope stores its own (D-92); an unscoped key would hit the root's
+      // a nested owner of the scope stores its own (DESIGN.md §3.1); an unscoped key would hit the root's
       const owner = root.child({ scopes: [appScope] });
       expect(owner.child().get(KEY)).toBe(42);
       expect(impl(owner).cache.get(KEY)?.scope).toBe(appScope);
@@ -1533,7 +1535,7 @@ describe('Disposal', () => {
     });
 
     it('allows adding a provider at a fresh child after the key resolved at an ancestor', () => {
-      // FLIP 1 (§8.2): a fresh child has no decisions, so providing there is allowed. The ancestor's
+      // FLIP (DESIGN.md §3.4): a fresh child has no decisions, so providing there is allowed. The ancestor's
       // answer is unchanged; the child answers for itself.
       const key = createInjectionKey<string>('Root');
       const root = createRootContext({
@@ -1547,8 +1549,8 @@ describe('Disposal', () => {
     });
 
     it('allows adding a provider at the root after an auto-scoped value was stored at a child', () => {
-      // FLIP 2 (§8.2, P7): the root never answered for UserRepo (the child did), so it may provide it,
-      // and root.get(UserRepo) builds a distinct root instance instead of "No provider found".
+      // FLIP (DESIGN.md §3.4): the root never answered for UserRepo (the child did), so it may provide it,
+      // and root.get(UserRepo) builds a distinct root instance instead of the order-dependent "No provider found".
       class Database {}
       class UserRepo {
         db = inject(Database);
@@ -1563,6 +1565,34 @@ describe('Disposal', () => {
       expect(atRoot).not.toBe(atChild);
       expect(atRoot.db).not.toBe(atChild.db);
       expect(child.get(UserRepo)).toBe(atChild); // the child's answer is unchanged (I19)
+    });
+
+    it('a scoped key that is not provided marks the whole walk, so a later provider above the scope owner is refused (I19)', () => {
+      const σ = createScope('request');
+      const key = createInjectionKey<string>('ScopedMissing', { scope: σ });
+      const root = createRootContext();
+      const T = root.child({ scopes: [σ] });
+      const R = T.child();
+      expect(R.get(key, { optional: true })).toBeUndefined(); // the provider search walked R..root
+      // A scoped key may be provided at or above its scope owner; doing so now would change R's answer.
+      expect(() => root.addProvider(valueProvider(key, 'late'))).toThrow(PlacementError);
+      expect(() => T.addProvider(valueProvider(key, 'late'))).toThrow(PlacementError);
+      expect(R.get(key, { optional: true })).toBeUndefined(); // unchanged
+    });
+
+    it('classProvider resolves constructor arguments declared with setDependencies, in both forms', () => {
+      const Url = createInjectionKey<string>('Url');
+      class Client {
+        constructor(readonly url: string) {}
+      }
+      setDependencies(Client, Url);
+      const Api = createInjectionKey<Client>('Api');
+      const root = createRootContext({
+        providers: [valueProvider(Url, 'https://x'), classProvider(Client), classProvider(Api, Client)],
+      });
+      expect(root.get(Client).url).toBe('https://x');
+      expect(root.get(Api).url).toBe('https://x');
+      expect(root.get(Api)).not.toBe(root.get(Client)); // two providers, two instances
     });
 
     it('should throw when adding provider after optional lookup returns undefined', () => {
@@ -1639,8 +1669,8 @@ describe('Disposal', () => {
           factory: () => inject(SELF_KEY),
         });
 
-        // root.create(WRAPPER) is removed (§14): two sibling children each resolve WRAPPER. A SelfScope
-        // dependency pins its value at the requester (§4.10), so each child builds its own WRAPPER.
+        // root.create(WRAPPER) is removed: two sibling children each resolve WRAPPER. A SelfScope
+        // dependency pins its value at the requester (DESIGN.md §3.4), so each child builds its own WRAPPER.
         const root = createRootContext();
         const c1 = root.child().get(WRAPPER);
         const c2 = root.child().get(WRAPPER);
@@ -1844,8 +1874,8 @@ describe('Disposal', () => {
         providers: [factoryProvider(KEY, () => ++counter, { scope: SelfScope })],
       });
 
-      // SelfScope on provider: each creation gets its own instance. root.create(WRAPPER) is removed
-      // (§14): two sibling children each resolve WRAPPER, pinned at its requester (§4.10).
+      // SelfScope on provider: each creation gets its own instance. root.create(WRAPPER) is removed:
+      // two sibling children each resolve WRAPPER, pinned at its requester (DESIGN.md §3.4).
       const WRAPPER = createInjectionKey<number>('Wrapper', {
         factory: () => inject(KEY),
       });
@@ -2019,7 +2049,7 @@ describe('Disposal', () => {
   });
 
   describe('own(v, release) in a factoryProvider (was resourceProvider)', () => {
-    // resourceProvider(k, v, r) → factoryProvider(k, () => own(v, release)) (§6.5); attached values are objects.
+    // resourceProvider(k, v, r) → factoryProvider(k, () => own(v, release)); attached values are objects.
     it('should provide the value and register a resource', async () => {
       const KEY = createInjectionKey<{ name: string }>('Conn');
       const conn = { name: 'my-connection' };
@@ -2164,7 +2194,7 @@ describe('Disposal', () => {
     });
 
     it('throws PendingNodeError when used for get() during the auto-hoisted factory body', () => {
-      // FLIP 7 (§6.2): reading inject(ContextKey) in an auto-hoisted factory is allowed — it is the
+      // FLIP (DESIGN.md §3.3): reading inject(ContextKey) in an auto-hoisted factory is allowed — it is the
       // pending node — and get() on it throws PendingNodeError (was: ContextRef.context threw).
 
       const ConfigKey = createInjectionKey<string>('Config', { factory: () => 'hello' });
@@ -2174,7 +2204,7 @@ describe('Disposal', () => {
         ctx = inject(ContextKey);
         constructor() {
           try {
-            // the pending node cannot resolve before placement (§6.2)
+            // the pending node cannot resolve before placement (DESIGN.md §3.3)
             this.ctx.get(ConfigKey);
           } catch (e) {
             caught = e;
@@ -2212,13 +2242,13 @@ describe('Disposal', () => {
       await root.close();
     });
 
-    it('throws CreationViolationError when read outside creation (D-18)', () => {
+    it('throws CreationViolationError when read outside creation (DESIGN.md §4.12)', () => {
       expect(() => inject(ContextKey)).toThrow(CreationViolationError);
       const root = createRootContext();
       expect(() => root.get(ContextKey)).toThrow(CreationViolationError);
     });
 
-    it('throws CreationViolationError when looked up inside an execution context (D-18)', () => {
+    it('throws CreationViolationError when looked up inside an execution context (DESIGN.md §4.12)', () => {
       const root = createRootContext();
       root.run(() => {
         expect(() => lookup(ContextKey)).toThrow(CreationViolationError);
@@ -2267,7 +2297,7 @@ describe('Disposal', () => {
       const svc = root.get(MyService);
       expect(svc.getConfig()).toBe('hello');
       expect(svc.getConfig()).toBe('hello');
-      // Q4: a late read on a value's node that creates a value is reported, once per key
+      // a late read on a value's node that creates a value is reported, once per key (DESIGN.md §3.5, §4.4)
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0][0])).toMatch(/late read/);
     });
@@ -2320,7 +2350,7 @@ describe('captureAutoScoped', () => {
 
     await test.close();
 
-    // FLIP 4 (§8.2): the negative memo at the boundary's parent is gone, so the suite builds a fresh
+    // FLIP (DESIGN.md §3.3, §3.4): the negative memo at the boundary's parent is gone, so the suite builds a fresh
     // instance of its own instead of throwing.
     const fresh = suite.run(() => lookup(AutoScopedService));
     expect(fresh).toBeInstanceOf(AutoScopedService);
@@ -2363,7 +2393,7 @@ describe('captureAutoScoped', () => {
 
     await test.close();
 
-    // FLIP 4 (§8.2): UserRepo was captured; the suite builds its own instead of throwing.
+    // FLIP (DESIGN.md §3.3, §3.4): UserRepo was captured; the suite builds its own instead of throwing.
     const fresh = suite.run(() => lookup(UserRepo));
     expect(fresh).not.toBe(repo);
     // Database is still served (it was explicitly provided at suite level)

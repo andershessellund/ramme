@@ -1,9 +1,10 @@
-// placement-view.test.ts — IMPLEMENTATION.md §6.1: permanent decisions and
-// placement by view (PROPOSAL.md §8.2, I19), decided markers, deps(V)
-// including optional misses (D-43), scope shadows (D-44, D-93), scoped hits
-// (D-92), P7, P20, P21, captureAutoScoped, stale provided values (I22), D-21.
+// placement-view.test.ts — permanent decisions and placement by view
+// (DESIGN.md §3.4, I19), decided markers, deps(V) including optional misses
+// and scope shadows (D10′), scoped hits (DESIGN.md §3.1), the order-dependent
+// "No provider" at the root, a shadowed explicit key, lazy registration order,
+// captureAutoScoped, stale provided values (I22), D7.
 //
-// `lookup` and `own` are the free functions of §1.13 (`./ambient.js`).
+// `lookup` and `own` are the free functions of ambient.ts (`./ambient.js`).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { createInjectionKey, getKeyDescription } from './context-key.js';
@@ -25,7 +26,7 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// The §8.2 traces: A provided at P and at C, B injects A, D injects B
+// The DESIGN.md §3.4 traces: A provided at P and at C, B injects A, D injects B
 // ---------------------------------------------------------------------------
 
 function world() {
@@ -77,7 +78,7 @@ function permutations<T>(xs: T[]): T[][] {
   return xs.flatMap((x, i) => permutations([...xs.slice(0, i), ...xs.slice(i + 1)]).map((rest) => [x, ...rest]));
 }
 
-describe('placement by view (§8.2)', () => {
+describe('placement by view (DESIGN.md §3.4)', () => {
   it('C first, then P: B@C and B@P, each built from its own A', () => {
     const w = world();
     const bc = w.C.get(w.B);
@@ -95,7 +96,7 @@ describe('placement by view (§8.2)', () => {
     expect(bc).not.toBe(bp);
     expect(bc.a).toBe('A@C');
     expect(w.P.get(w.B)).toBe(bp); // the P answer never changes (I19)
-    expect(w.C.get(w.B)).toBe(bc); // memoized at C (D-20: S′ = C, which provides A itself)
+    expect(w.C.get(w.B)).toBe(bc); // memoized at C (D10′: S′ = C, which provides A itself)
   });
 
   it('a sibling without the override shares B@P (no shadow between)', () => {
@@ -133,7 +134,7 @@ describe('placement by view (§8.2)', () => {
     }
   });
 
-  it('P20: a child providing A after an ancestor cached auto-hoisted V with A in deps(V) gets V rebuilt by its view', () => {
+  it('a child providing A after an ancestor cached auto-hoisted V with A in deps(V) gets V rebuilt by its view', () => {
     const A = createInjectionKey<{ tag: string }>('A');
     class V {
       a = inject(A);
@@ -151,7 +152,7 @@ describe('placement by view (§8.2)', () => {
     expect(child.get(V)).toBe(vc);
   });
 
-  it('a shadow on a deeper requester is placed at or below the shadow (D-20: S′, not R)', () => {
+  it('a shadow on a deeper requester is placed at or below the shadow (D10′: S′, not R)', () => {
     const A = createInjectionKey<string>('A');
     class V {
       a = inject(A);
@@ -166,7 +167,7 @@ describe('placement by view (§8.2)', () => {
     expect(shadow.child().get(V)).toBe(v); // every requester under S′ with the same view shares it
   });
 
-  it('a re-creation whose factory injects different keys than the first run throws PlacementError (D-129)', () => {
+  it('a re-creation whose factory injects different keys than the first run throws PlacementError (D7)', () => {
     const A = createInjectionKey<string>('A');
     const Bk = createInjectionKey<string>('B');
     let runs = 0;
@@ -212,7 +213,7 @@ describe('placement by view (§8.2)', () => {
 // Decided markers
 // ---------------------------------------------------------------------------
 
-describe('decided markers (§8.2)', () => {
+describe('decided markers (DESIGN.md §3.4)', () => {
   function chain() {
     const A = createInjectionKey<string>('A');
     class V {
@@ -255,7 +256,7 @@ describe('decided markers (§8.2)', () => {
     }
     const root = createRootContext({ name: 'root' });
     const R = root.child({ name: 'R' });
-    R.get(V); // pinned at R (D-97)
+    R.get(V); // pinned at R (DESIGN.md §3.4)
     expect(() => R.addProvider(factoryProvider(Self, () => ({})))).toThrow(PlacementError);
     expect(() => R.addProvider(factoryProvider(Self, () => ({})))).toThrow(/already been decided/);
     // A skipSelf read resolves from R's parent, so its own walk never marks R; V's placement does.
@@ -264,7 +265,7 @@ describe('decided markers (§8.2)', () => {
       k = inject(K, { skipSelf: true });
     }
     const R2 = root.child({ name: 'R2' });
-    R2.get(W); // pinned at R2 (D-97)
+    R2.get(W); // pinned at R2 (DESIGN.md §3.4)
     expect(impl(R2).cache.get(W)?.deps?.has(K)).toBe(true);
     expect(() => R2.addProvider(valueProvider(K, 'x'))).toThrow(PlacementError);
     expect(() => R2.addProvider(valueProvider(K, 'x'))).toThrow(/already been decided/);
@@ -316,11 +317,11 @@ describe('decided markers (§8.2)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// deps(V): optional misses (D-43) and scope shadows (D-44, D-92, D-93)
+// deps(V): optional misses and scope shadows (D10′), scoped hits (DESIGN.md §3.1)
 // ---------------------------------------------------------------------------
 
 describe('deps(V)', () => {
-  it('an optional miss is a dependency (D-43): a fresh child that provides it rebuilds V', () => {
+  it('an optional miss is a dependency (D10′): a fresh child that provides it rebuilds V', () => {
     const K = createInjectionKey<string>('K');
     class V {
       k = inject(K, { optional: true });
@@ -337,7 +338,7 @@ describe('deps(V)', () => {
     expect(() => root.addProvider(valueProvider(K, 'late'))).toThrow(PlacementError); // the miss was a decision
   });
 
-  it('a nested scope owner shadows a scoped dependency (D-44): V is rebuilt from the nested owner’s D', () => {
+  it('a nested scope owner shadows a scoped dependency (D10′): V is rebuilt from the nested owner’s D', () => {
     const σ = createScope('tenant');
     let n = 0;
     const Dk = createInjectionKey<string>('D', { factory: () => `D${++n}`, scope: σ });
@@ -375,7 +376,7 @@ describe('deps(V)', () => {
     expect(vc).not.toBe(vt);
   });
 
-  it('a provider-level scope is a scope shadow too, wherever the provider sits (D-93)', () => {
+  it('a provider-level scope is a scope shadow too, wherever the provider sits (D10′)', () => {
     const σ = createScope('request');
     let n = 0;
     const Dk = createInjectionKey<{ n: number }>('D');
@@ -395,7 +396,7 @@ describe('deps(V)', () => {
   });
 });
 
-describe('scoped cache hits are served only to requesters of the same scope owner (D-92)', () => {
+describe('scoped cache hits are served only to requesters of the same scope owner', () => {
   it('nested owners of one scope: the outer value is never served below the inner owner, in either order', () => {
     const σ = createScope('request');
     for (const order of ['outer first', 'inner first'] as const) {
@@ -440,10 +441,10 @@ describe('scoped cache hits are served only to requesters of the same scope owne
 });
 
 // ---------------------------------------------------------------------------
-// P7, P21, captureAutoScoped, I22
+// The order-dependent "No provider" at the root, lazy registration order, captureAutoScoped, I22
 // ---------------------------------------------------------------------------
 
-describe('P7: order-dependent override and "No provider" at the root', () => {
+describe('order-dependent override and "No provider" at the root', () => {
   it('child provides Database, child.get(UserRepo); then root.addProvider(UserRepo) is allowed and builds a root instance', () => {
     class Database {}
     class UserRepo {
@@ -503,7 +504,7 @@ describe('P7: order-dependent override and "No provider" at the root', () => {
   });
 });
 
-describe('P21: lazy registration order', () => {
+describe('lazy registration order', () => {
   it('a value first requested by a running fiber is placed on the provided stack of its deepest dependency and released after the fiber (G1); provided LIFO follows creation order', async () => {
     const t = trace();
     const Config = createInjectionKey<string>('Config');
@@ -574,7 +575,7 @@ describe('captureAutoScoped', () => {
   });
 });
 
-describe('a released provided value fails loudly (I22, D-22)', () => {
+describe('a released provided value fails loudly (I22, DESIGN.md §2.7)', () => {
   it("a cache hit whose value node completed throws NodeCompletedError", () => {
     class Svc {
       ctx: Context = inject(ContextKey);
@@ -612,10 +613,10 @@ describe('a released provided value fails loudly (I22, D-22)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Requester-relative reads (D-96, D-97) and the hit branch's order (D-98)
+// Requester-relative reads (DESIGN.md §3.1, §3.4) and the hit branch's order (I22)
 // ---------------------------------------------------------------------------
 
-describe('a SelfScope key is per-creation inside every creation, cached at a boundary or not (D-96)', () => {
+describe('a SelfScope key is per-creation inside every creation, cached at a boundary or not', () => {
   it('a value injecting a SelfScope key that a [SelfScope] boundary has cached gets its own instance, whichever resolves first', () => {
     for (const order of ['boundary first', 'value first'] as const) {
       let n = 0;
@@ -654,7 +655,7 @@ describe('a SelfScope key is per-creation inside every creation, cached at a bou
   });
 });
 
-describe('requester-relative reads pin an auto-hoisted value at its requester (D-97)', () => {
+describe('requester-relative reads pin an auto-hoisted value at its requester', () => {
   it('a SelfScope dependency: every order ends in the same state, and a descendant is never served the ancestor’s instance', () => {
     for (const order of ['R0 first', 'R first'] as const) {
       const Self = createInjectionKey<object>('Self', { scope: SelfScope, factory: () => ({}) });
@@ -712,7 +713,7 @@ describe('requester-relative reads pin an auto-hoisted value at its requester (D
   });
 });
 
-describe('the hit branch checks liveness after placement by view (D-98)', () => {
+describe('the hit branch checks liveness after placement by view', () => {
   it("a released value across a shadow is not the requester's answer: it is re-created by the requester's view", () => {
     const A = createInjectionKey<string>('A');
     class V {

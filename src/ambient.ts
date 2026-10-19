@@ -1,12 +1,11 @@
 // ---------------------------------------------------------------------------
-// The ambient surface (PROPOSAL.md §3.1, law 2, I21; IMPLEMENTATION.md §1.13,
-// §2.2).
+// The ambient surface (DESIGN.md §6, law 2, I21).
 //
 // Each free function is `current().<method>(...)`: it acts on the current
 // node, which the platform's async context carries across `await` (law 3).
 // The current node is a body's own fiber, the release fiber during a release,
 // the node `ctx.run(fn)` entered, or, in a creation frame, the value's node,
-// created on demand (§6.2).
+// created on demand (DESIGN.md §3.3).
 //
 // Two groups differ in a creation frame:
 //
@@ -14,8 +13,8 @@
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `all`, `race`, `join`, `result`,
 //   `interrupted`, `never`, `managed` and `runSync`, throw
-//   `CreationViolationError` first, before touching any node (§8.1, §8.3,
-//   I16): a refused call never creates the value's node.
+//   `CreationViolationError` first, before touching any node (DESIGN.md §3.2,
+//   §3.5, I16): a refused call never creates the value's node.
 //
 // Outside any node every one of them throws `NoCurrentNodeError`; when no
 // context storage is registered the message names `import 'ramme/node'`.
@@ -41,8 +40,8 @@ import { CreationViolationError, NoCurrentNodeError } from './resource.js';
 
 /**
  * @internal The current node for a free function: a body frame's node, or the value node of a creation
- * frame, materialised on first use (§6.2). Throws `NoCurrentNodeError` outside any node, naming the
- * adapter import when no storage is registered (§8.4, D-02).
+ * frame, materialised on first use (DESIGN.md §3.3). Throws `NoCurrentNodeError` outside any node, naming the
+ * adapter import when no storage is registered (DESIGN.md §6, D9′).
  */
 export function requireCurrent(op: string): NodeImpl {
   const f = currentFrame();
@@ -55,7 +54,7 @@ export function requireCurrent(op: string): NodeImpl {
   return f.node ?? f.creation!.node();
 }
 
-/** The body-shaped free functions refuse a creation frame before touching any node (I16, §8.1, §8.3). */
+/** The body-shaped free functions refuse a creation frame before touching any node (I16, DESIGN.md §3.2, §3.5). */
 function requireBodyShaped(op: string): NodeImpl {
   if (currentCreation() !== undefined)
     throw new CreationViolationError(op === 'lookup' ? 'lookup() during creation; use inject()' : `${op}() during creation`);
@@ -85,7 +84,7 @@ export function signal(): AbortSignal {
  * Resolve a borrow for the current node: `current().get(key, options)`. The
  * result must not be stored on anything that outlives the current node.
  *
- * @throws CreationViolationError during creation; use `inject()` there (§8.1).
+ * @throws CreationViolationError during creation; use `inject()` there (DESIGN.md §3.2).
  */
 export function lookup<T>(key: InjectionKey<T>): T;
 export function lookup<T>(key: InjectionKey<T>, options: LookupOptions & { optional?: false | undefined }): T;
@@ -94,12 +93,12 @@ export function lookup<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
   return requireBodyShaped('lookup').get(key, options as LookupOptions);
 }
 
-// --- attachment: the current node's explicit stack (§6) -------------------------------
+// --- attachment: the current node's explicit stack (DESIGN.md §2.6) ---------------------
 
 /**
  * Attach to the current node; it is released when the node completes, or
  * earlier with `release(x)`. Returns what it attached. `own(x)` with one
- * argument on an object the node already owns returns it (D-37).
+ * argument on an object the node already owns returns it (D16).
  */
 export function own<T extends Disposable | AsyncDisposable>(resource: T): T;
 export function own<T extends object>(value: T, release: Release<T>): T;
@@ -119,43 +118,43 @@ export function releaseAll(): Promise<void> {
   return requireCurrent('releaseAll').releaseAll();
 }
 
-// --- running bodies in a child of the current node (§7) ---------------------------
+// --- running bodies in a child of the current node (DESIGN.md §4.5) -----------------
 
 /** Run `t` concurrently in a new child of the current node; the body starts in a microtask (I20). */
 export function fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Fiber<T> {
   return requireCurrent('fork').fork(t, ...args);
 }
 
-/** Run `t` in a new child of the current node and await it; lends the current node until it settles (§7.11). */
+/** Run `t` in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
 export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
   return requireBodyShaped('call').call(t, ...args);
 }
 
 /**
  * Run the tasks as subscribers of a fresh child and await every one: the
- * tuple of their values, or an `AggregateError` of every real failure (§7.5).
- * `const T` keeps an array literal a tuple (D-58).
+ * tuple of their values, or an `AggregateError` of every real failure (DESIGN.md §4.8).
+ * `const T` keeps an array literal a tuple.
  */
 export function all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>> {
   return requireBodyShaped('all').all(tasks, opts);
 }
 
-/** The first success among the tasks; the rest are aborted and awaited (§7.5). */
+/** The first success among the tasks; the rest are aborted and awaited (DESIGN.md §4.8). */
 export function race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T> {
   return requireBodyShaped('race').race(tasks, opts);
 }
 
-/** An unsubscribed pool on the current node; its forks report to `onFailure` (§7.7). */
+/** An unsubscribed pool on the current node; its forks report to `onFailure` (DESIGN.md §4.10). */
 export function pool(opts: PoolOptions): Pool {
   return requireCurrent('pool').pool(opts);
 }
 
-/** A subscribed bodiless child of the current node: a block scope (§3.3). */
+/** A subscribed bodiless child of the current node: a block scope (DESIGN.md §2.3). */
 export function child(opts?: NodeOptions): Context {
   return requireCurrent('child').child(opts);
 }
 
-// --- awaiting; the freeze decision is the current node's (§4.3) ----------------------
+// --- awaiting; the freeze decision is the current node's (DESIGN.md §4.2) ------------
 
 /** The fiber's value, or its failure thrown. A managed await. */
 export function join<T>(fiber: Fiber<T>): Promise<T> {
@@ -167,7 +166,7 @@ export function result<T>(fiber: Fiber<T>): Promise<Outcome<T>> {
   return requireBodyShaped('result').result(fiber);
 }
 
-/** Resolves with the reason when the current node is delivered; in a `freeze` body it never resumes (§4.4). */
+/** Resolves with the reason when the current node is delivered; in a `freeze` body it never resumes (DESIGN.md §4.3). */
 export function interrupted(): Promise<unknown> {
   return requireBodyShaped('interrupted').interrupted();
 }
@@ -177,14 +176,14 @@ export function never(): Promise<never> {
   return requireBodyShaped('never').never();
 }
 
-/** Make a bare promise a managed await: in a delivered `freeze` body it never settles (§4.3). */
+/** Make a bare promise a managed await: in a delivered `freeze` body it never settles (DESIGN.md §4.2). */
 export function managed<T>(promise: Promise<T>): Promise<T> {
   return requireBodyShaped('managed').managed(promise);
 }
 
 // --- synchronous frames -------------------------------------------------------------
 
-/** `current().runSync(fn, ...args)`: `child()` + `run` + `abort()` on exit (§7.8). */
+/** `current().runSync(fn, ...args)`: `child()` + `run` + `abort()` on exit (DESIGN.md §4.11). */
 export function runSync<R, A extends unknown[]>(fn: (...args: A) => R, ...args: A): R {
   return requireBodyShaped('runSync').runSync(fn, ...args);
 }

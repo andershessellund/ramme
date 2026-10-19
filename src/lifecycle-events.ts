@@ -1,11 +1,11 @@
 // ---------------------------------------------------------------------------
-// NodeTopic — the node tree's lifecycle as one event stream (PROPOSAL.md §10;
-// IMPLEMENTATION.md §1.14).
+// NodeTopic — the node tree's lifecycle as one event stream (DESIGN.md §5).
 //
-// A standard DI topic: provide a receiver on the root (at construction, D-32)
-// to observe every node of that tree. Without a receiver nothing is emitted
-// and nothing is allocated. Because every release is a fiber, "print the
-// running tree and what each node awaits" is one query and covers shutdown.
+// A standard DI topic: provide a receiver on the root at construction (it is
+// resolved once per root) to observe every node of that tree. Without a
+// receiver nothing is emitted and nothing is allocated. Because every release
+// is a fiber, "print the running tree and what each node awaits" is one query
+// and covers shutdown.
 // ---------------------------------------------------------------------------
 
 import type { InterruptMode, Outcome } from './context.js';

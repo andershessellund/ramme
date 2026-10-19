@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
-// createRootContext — the only free constructor (PROPOSAL.md §3.3; §1.15).
+// createRootContext — the only free constructor (DESIGN.md §2.3, §7).
 //
-// No global side effect (§8.5): a root is a node with no parent, carrying
+// No global side effect (DESIGN.md §8): a root is a node with no parent, carrying
 // RootScope. Children are made with `child()`, fibers with `fork`/`call`.
 // ---------------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ import { NodeImpl } from './node-impl.js';
 import { RootScope } from './scope.js';
 import type { Scope } from './scope.js';
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- the §1.15 shape: a named options type for the root
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- a named options type for the root, part of the public surface (DESIGN.md §7)
 export interface CreateRootContextOptions extends NodeOptions {}
 
 /** Root contexts always carry RootScope. */

@@ -6,7 +6,7 @@
 // errors for the whole run too; this hook attributes them to a test.
 //
 // Deliberately imports no ramme module: `storage.test.ts` must be able to
-// run without a context storage adapter (D-57).
+// run without a context storage adapter, the one test file that imports none.
 // ---------------------------------------------------------------------------
 
 import { afterAll, afterEach } from 'vitest';

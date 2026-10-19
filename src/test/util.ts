@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Test helpers (IMPLEMENTATION.md §6).
+// Test helpers.
 //
 // No adapter import: `storage.test.ts` runs without one, and these helpers
 // must not register one. The ramme modules imported here register nothing.
@@ -162,7 +162,7 @@ export function here(): NodeImpl {
 }
 
 export interface EventLog {
-  /** A root whose construction-time providers include the NodeTopic receiver (D-32). */
+  /** A root whose construction-time providers include the NodeTopic receiver (DESIGN.md §5). */
   readonly root: Context;
   /** Every event the root's tree emitted, in order. */
   readonly log: NodeEvent[];
@@ -174,8 +174,8 @@ export interface EventLog {
 
 /**
  * A root that records its tree's NodeEvents. A receiver must be provided at
- * the root's construction (D-32), so this creates the root rather than taking
- * one (the plan's `events(root)`).
+ * the root's construction (DESIGN.md §5), so this creates the root rather
+ * than taking one.
  */
 export function events(opts: NodeOptions = {}): EventLog {
   const log: NodeEvent[] = [];

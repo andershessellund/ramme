@@ -13,8 +13,18 @@ How the mechanisms work is [DESIGN.md](DESIGN.md)'s job; an entry here
 states the decision and points there. ramme is the extraction of the
 DI/fiber/lifecycle core of a private monorepo package (internally
 "spindle"); entries note where a choice was inherited from that lineage.
-Choices made while implementing the redesign are cited by their number in
-the implementation plan (`plan D-nn`), where the measured reasoning is kept.
+The guarantees G1–G4, contracts C1–C8, invariants I1–I27, assumptions
+A1–A8 and the numbered design laws cited here are defined in DESIGN.md
+§2.5, §2.6 and §10.
+
+Choices settled while implementing the redesign are recorded in the entry
+they refine, in its text or under "Settled while implementing it". The
+redesign was specified in PROPOSAL.md and planned in IMPLEMENTATION.md;
+both were removed once it was implemented and remain in git history (added
+in commit 72a0448, last revised in 19759ae). Every decision here is
+complete without them. Source comments and test names still cite those two
+documents by section (`§n`), plan decision (`D-nn`), probe (`Pn`) and open
+question (`Qn`); read those against 19759ae, not against DESIGN.md.
 
 ## Shape
 
@@ -23,46 +33,61 @@ the implementation plan (`plan D-nn`), where the measured reasoning is kept.
 ramme is one package whose tree of nodes is at once the resolution scope,
 the execution scope and the lifetime. Contexts, fibers, pools, release
 fibers and the nodes of DI values are all nodes, differing in three bits
-(has a body; subscribed; interrupt mode). A node's resolution parent is an
-ancestor-or-self of its lifetime owner; by default they are the same node.
-The layering survives as module structure (keys/scopes and storage under
-the node, the fiber surface over it), not as package boundaries.
+(has a body; subscribed; interrupt mode). A node has one parent, which is
+both what it resolves from and the owner that releases it and waits for it.
+An entry stays on the stack it was attached to until it is released: there
+is no detach and no transfer between owners. The layering survives as
+module structure (keys/scopes and storage under the node, the fiber surface
+over it), not as package boundaries.
 
 **Why.** Auto-hoisting already answers "where may this value be cached?"
 with "at the deepest context whose values it consumed", which is a lifetime
 answer: placement *is* lifetime assignment. One tree in which ancestors
 outlive descendants and you resolve only from ancestors makes untyped
-ambient DI safe: everything you can resolve outlives you. Effect gets the
-same guarantee from its type system (a resource's `Scope` in the `R`
-channel), which is what lets it keep the fiber tree and the scope tree
-apart; ramme has no `R` channel, so structure must do the tracking, and one
-tree is the smallest structure that does. Fibers are inherent rather than a
-layer: the core's one asynchronous act is release, and a release needs a
-node to run in (a deadline to read, a place to acquire, a place to be seen),
-and a node running a body is a fiber. What is *not* conflated is execution
-history with lifetime: the fiber that runs a factory does not own what it
-builds; placement does. **Rejected:** three packages (scope tree, DI,
-fibers), a version-skew and plugin-API cost with one client per seam;
-fibers as a separate package over a public tree API, when the core needs
-fibers for its own releases; a tree that registers every object, when most
-objects are values and a resource is an entry, a property of a
-relationship. **Cost.** Cross-lifetime communication is explicit data: a
-long-lived actor cannot `lookup` request-scoped values, it receives a
-payload; propagated non-owning variables (Effect's `FiberRef`) are not
-provided. DI-only consumers carry fiber code (tree-shaking mitigates).
+ambient DI safe: everything you can resolve outlives you. Effect, a
+TypeScript effect system, gets the same guarantee from its type system: the
+type of every computation lists the services it still needs (its `R`
+parameter), and acquiring a resource adds a `Scope` to that list, so the
+compiler refuses to run it where no scope encloses it. That is what lets
+Effect keep the fiber tree and the scope tree apart; ramme has no such type
+parameter, so structure must do the tracking, and one tree is the smallest
+structure that does. One parent for both roles is what makes the argument
+mechanical, and it is why an entry cannot move: a node handed to a
+longer-lived owner would outlive the ancestors it resolved its borrows from,
+and a passive entry's release may read the outcome of the owner it was
+attached to (D16); a detached entry would have no owner to release it (law
+1). Fibers are inherent rather than a layer: the core's one asynchronous act
+is release, and a release needs a node to run in (a deadline to read, a
+place to acquire, a place to be seen), and a node running a body is a fiber.
+What is *not* conflated is execution history with lifetime: the fiber that
+runs a factory does not own what it builds; placement does. **Rejected:**
+three packages (scope tree, DI, fibers), a version-skew and plugin-API cost
+with one client per seam; fibers as a separate package over a public tree
+API, when the core needs fibers for its own releases; a tree that registers
+every object, when most objects are values and a resource is an entry, a
+property of a relationship; a resolution parent separate from the owner (an
+option to resolve from one of the owner's ancestors), which would be sound,
+since those outlive the owner, but which nothing needs, so it is left out;
+transferring or detaching an entry. **Cost.** Cross-lifetime communication
+is explicit data: a long-lived actor cannot `lookup` request-scoped values,
+it receives a payload; propagated non-owning variables (Effect's `FiberRef`,
+a per-fiber variable that child fibers inherit) are not provided. A resource
+cannot be handed from a short-lived owner to a longer-lived one: the
+longer-lived one acquires it (a producer that takes an `owner`, DESIGN.md
+§2.6). DI-only consumers carry fiber code (tree-shaking mitigates).
 DESIGN.md §1, §2.
 
 ### D2. The name: ramme
 
-**Why.** Danish for *frame*, in the family of kilde, valsem, spor. A
-context is literally a ramme: "inden for rammerne af", within the frame of,
-is what scoped resolution means, and the frame metaphor covers all three
-faces (a frame you resolve in, run in, and that is torn down as one). The
-internal codename "spindle" was English in a Danish-named ecosystem, and
-its best Danish rendering (*spindel*) is taken on npm. **Accepted:**
-one-letter adjacency to the sibling package `samme`; they are different
-domains (codec vs DI) and rarely meet in an import block. Extraction-time
-decision.
+**Why.** Danish for *frame*, like the Danish names of its sibling packages
+(kilde, the reactive library of D6′; `samme`, a codec). A context is
+literally a ramme: "inden for rammerne af", within the frame of, is what
+scoped resolution means, and the frame metaphor covers all three faces (a
+frame you resolve in, run in, and that is torn down as one). The internal
+codename "spindle" was English in a Danish-named ecosystem, and its best
+Danish rendering (*spindel*) is taken on npm. **Accepted:** one-letter
+adjacency to `samme`; they are different domains (codec vs DI) and rarely
+meet in an import block. Extraction-time decision.
 
 ### D3′. One release contract: `[Symbol.asyncDispose]`
 
@@ -70,50 +95,92 @@ The resource protocol is the platform's: an entry is an `AsyncDisposable`
 (a `Disposable` is accepted and wrapped), and `own(value, release)` and
 `own(deferFn)` are sugar that build one. A node releases in one sequence:
 signal, explicit stack LIFO, provided stack LIFO. Every release runs in a
-release fiber, current while it runs, whose signal is the deadline.
+release fiber, a node current while it runs, in `observe` mode, whose
+signal is the deadline.
 
-**Why.** The four versioned lifecycle symbols (`ramme.drain/flush/dispose/
-abort.v1`) and three tree-wide phases existed so that a resource could
-drain, then flush, then dispose. Under the redesign each of those has a
-better home: draining is a subscribed `observe` task that stops intake and
-settles; flushing before disposal is release order (what was acquired later
-releases first); a deadline is the release fiber's `signal()`. With those
-gone, a ramme-specific protocol would only cost interop: `await using`,
-platform resources and every library that already implements
-`Symbol.asyncDispose` are entries with no adapter. The release fiber gives
-every release, ramme-native or foreign, a place to read the deadline,
-acquire temporaries and see `owner.outcome` (D16). **Rejected:** the `.v1`
-symbol set with tree-wide phases (the previous D3), which made every node's
-shutdown wait for the slowest drain in the tree and needed "lifecycle
-fibers" only when observed; keeping phases beside `asyncDispose`, two
-protocols for one act. **Cost.** No separate flush phase: a resource that
-must flush before a sibling closes expresses it by acquisition order or
-inside its own release. DESIGN.md §2.4.
+**Why.** The four versioned lifecycle symbols
+(`ramme.drain/flush/dispose/ abort.v1`) and three tree-wide phases existed
+so that a resource could drain, then flush, then dispose. Under the redesign
+each of those has a better home: draining is a subscribed `observe` task
+that stops intake and settles; flushing before disposal is release order
+(what was acquired later releases first); a deadline is the release fiber's
+`signal()`. With those gone, a ramme-specific protocol would only cost
+interop: `await using`, platform resources and every library that already
+implements `Symbol.asyncDispose` are entries with no adapter. The release
+fiber gives every release, ramme-native or foreign, a place to read the
+deadline, acquire temporaries and see `owner.outcome` (D16), and because it
+is a node, a trace of the running tree and what each node awaits covers
+shutdown with no separate mechanism. It runs in `observe` mode because a
+release past its deadline must be told, not stopped: a release cut short
+leaves its resource half-released, and nothing else would finish it, since
+the owner runs each release once (C4) and waits for it (D21). **Rejected:**
+the `.v1` symbol set with tree-wide phases (the previous D3), which made
+every node's shutdown wait for the slowest drain in the tree and ran a phase
+call in a fiber (a "lifecycle fiber") only when a topic receiver was
+observing; keeping phases beside `asyncDispose`, two protocols for one act;
+a release frozen at its deadline. **Cost.** No separate flush phase: a
+resource that must flush before a sibling closes expresses it by acquisition
+order or inside its own release. Every release of every entry, a passive
+`own(x)` included, creates a node, an `AbortSignal` (a timeout, or one that
+never fires) and its events. DESIGN.md §2.4.
+
+### D21. The parent waits; a deadline is a signal
+
+A node does not complete until every entry on its stacks has completed,
+however long that takes. `releaseTimeoutMs` (none by default) only sets the
+signal of the node's release fibers (D3′), and `timeoutMs` only delivers to
+the node; nothing abandons a child or a release. `[Symbol.dispose]()` on a
+root throws `TypeError`, because a root has no owner to wait for its
+completion.
+
+**Why.** Abandoning a child at a deadline would let its parent, and then the
+parent's ancestors, release the values the child still uses: G1–G3 hold
+only because completion waits. An abandoned release leaves its resource
+half-released with nothing responsible for it, against law 1. Only the
+child can stop safely, so the deadline goes to the child, and a child that
+does not stop is a defect that is reported (`node:stalled`), not hidden.
+There is no default release deadline because no single value fits every
+resource (a flush may rightly take minutes), and a default would signal
+resources that are working correctly; a deadline is policy, set where the
+budget is known. A synchronous `[Symbol.dispose]()` aborts and returns, and
+on a child the owner's completion still waits for it; on a root nothing
+would, so `using root` would leave the tree releasing unobserved, with its
+failures reported to no one. **Rejected:** abandoning a child or a release
+after its deadline; a default release deadline; a root
+`[Symbol.dispose]()` that aborts and returns. **Cost.** A stuck release
+hangs shutdown indefinitely; the mitigations are `node:stalled` and
+whatever supervises the process. DESIGN.md §2.1, §2.7, §2.8.
 
 ### D6′. kilde depends on ramme
 
 kilde is the reactive library for ramme applications: it depends on ramme
 and is written in its idiom; ramme never imports kilde. kilde's cold core
 (signals, computeds, operators, channels) needs no lifetime and changes
-little. Its hot layer is rewritten on ramme: hot constructs attach to the
-current node, async callbacks are tasks (a derivation is a fiber; the
-previous one is aborted and frozen when its input changes; failures have
-destinations), and async states are values on a factory's node. kilde's
-`Owner` seam, `createOwner`, `withOwner`, `installOwnerProvider` and its
-staleness counters are removed.
+little. Its hot layer, the constructs that hold a subscription or run
+asynchronous work and so must be torn down, is built on ramme: hot
+constructs attach to the current node, async callbacks are tasks (a
+derivation that recomputes asynchronously is a fiber; the previous one is
+aborted and frozen when its input changes; failures have destinations),
+and the state of an asynchronous value lives on a factory's node. kilde's
+own lifetime seam is removed: an `Owner` interface that a host installed
+(`installOwnerProvider`) and kilde created and entered (`createOwner`,
+`withOwner`), and the counters kilde used to discard the late result of a
+superseded derivation, which a frozen fiber never produces.
 
 **Why.** The previous arrangement kept kilde dependency-free and reached
-lifecycle through an `Owner` seam served over lookup-api, which needed a
-neutral contract layer, a bridge, and a `ramme/kilde` integration entry to
-glue them. Once lookup-api was retired (D5) the seam had one implementation
-and was only an indirection; and the hot layer's correctness (aborting a
-stale derivation, never leaking a subscription) is exactly what ramme's
-tasks, freeze and ownership provide. **Rejected:** the previous D6 (kilde
-dependency-free; async-DI glue deferred to a `ramme/kilde` entry point);
-kilde depending on a ramme-neutral lifetime interface, a second seam with
-one implementation. **Cost.** kilde's hot layer cannot be used without
-ramme; its cold core still can. Specified in kilde's own proposal.
-DESIGN.md §1.1.
+lifecycle through that `Owner` seam, a provider hook kilde kept on
+`globalThis` so that a host could install itself; the plan was to serve it
+over lookup-api (D5), which would have needed a neutral contract layer, a
+bridge, and a `ramme/kilde` integration entry to glue them. Once lookup-api was retired the seam had one
+implementation and was only an indirection; and the hot layer's correctness
+(aborting a stale derivation, never leaking a subscription) is exactly what
+ramme's tasks, freeze and ownership provide. **Rejected:** the previous D6
+(kilde dependency-free; async-DI glue deferred to a `ramme/kilde` entry
+point); kilde depending on a ramme-neutral lifetime interface, a second seam
+with one implementation. **Cost.** kilde's hot layer cannot be used without
+ramme; its cold core still can. How each kilde construct maps onto ramme is
+kilde's design, documented with kilde; ramme commits only to what this entry
+states, and nothing in ramme is kilde-specific. DESIGN.md §1.1.
 
 ### D8′. A fiber is one run of a task, and the ambient node is the default
 
@@ -125,23 +192,62 @@ over the **current node** (`fork`, `call`, `own`, `lookup`, `join`, …); the
 same operations exist as `Context` methods for the one case that needs a
 name: acting on behalf of a node that is not current.
 
-**Why.** "A fiber is a child context" (the previous D8) was the
-load-bearing unification and is kept, strengthened: every fiber is a node,
-so its temporaries are released when it ends, it is interruptible and
-visible, and it is found ambiently. The redesign closes the two gaps the old
-API left. An async function used as a fiber could also be called bare,
-running as an untracked promise; a `Task` cannot be invoked, so the
-decision "this is a node" is made once, at the definition. And
-`Fiber.spawn(fn, { context })` threaded the parent through every call
-site; the ambient node makes the parent the current node by default (I21),
-which is never wrong, only sometimes not what was meant, and the method form
-exists for that case. Inline bodies are accepted as anonymous tasks.
-**Rejected:** the `Fiber` namespace (`Fiber.call/spawn/fork/join/all`),
-`fiber.promise` (a bare promise for work), `withAbortSignal`/
-`linkAbortSignal` (replaced by `signal()` and the `signal` option);
-requiring `task()` for inline bodies too. **Cost.** A node per fiber
-(fibers are not free); application code must decide function vs task at
-the definition. DESIGN.md §4.5–§4.9.
+**Why.** "A fiber is a child context" (the previous D8) was the load-bearing
+unification and is kept, strengthened: every fiber is a node, so its
+temporaries are released when it ends, it is interruptible and visible, and
+it is found ambiently. The redesign closes the two gaps the old API left. An
+async function used as a fiber could also be called bare, running as an
+untracked promise; a `Task` cannot be invoked, so the decision "this is a
+node" is made once, at the definition. And `Fiber.spawn(fn, { context })`
+threaded the parent through every call site; the ambient node makes the
+parent the current node by default (I21), which is never wrong, only
+sometimes not what was meant, and the method form exists for that case.
+Inline bodies (`call(async () => …)`) are accepted as anonymous tasks,
+because an inline arrow has no name by which it could also be called bare;
+the gap is a named function used both ways. A fiber is not thenable because
+awaiting is where ramme decides freezing and consumes failures (D13): a
+managed promise is made for the body that is current when it is made and is
+awaited only by that body. A thenable fiber would be awaited wherever anyone
+held it, including by `Promise.resolve` inside foreign code, by an async
+function's `return`, or by no body at all, so the freeze decision and the
+one consumption of its failure (I11) would happen wherever that `then` call
+happened. `join(f)` and `result(f)` make the managed await at the call, for
+the current body. **Rejected:** the `Fiber` namespace
+(`Fiber.call/spawn/fork/join/all`); `fiber.promise`, a bare promise for
+work, which either rejects unhandled when nobody awaits it or consumes the
+failure when the fiber settles, reaching no one if its awaiter froze (the
+failure mode D13 rejects); `withAbortSignal`/`linkAbortSignal`, separate
+functions for running with a signal and linking a foreign one, which a
+current node makes redundant: `signal()` reads the node's signal anywhere,
+and the `signal` option links a foreign signal at the definition or per use;
+requiring `task()` for inline bodies too, ceremony that closes no gap.
+**Cost.** A node per fiber (fibers are not free); application code must
+decide function vs task at the definition. `fork` and `call` also accept a
+plain function, so for a named async function the gap stays open:
+`fork(parse)` and `parse()` both compile. The `ramme/no-bare-task` lint rule
+flags it (DESIGN.md §9); the type does not. DESIGN.md §4.5–§4.9.
+
+### D22. `fork` starts in a microtask; `call` starts synchronously
+
+`fork` never runs any part of the body in the forker's frame: the body
+starts in a microtask, or after placement when it was forked during
+creation (I20). `call` starts the body synchronously, with the child
+current.
+
+**Why.** A synchronous start would run the body's first segment inside the
+forker's frame. During a creation that is a creation frame, so the body
+would begin where `inject` is legal and `lookup` is not (D4′, I16), on a
+node not yet placed. Outside creation the forker has not yet returned, so
+an `own(fork(t))` (D19), or any other attachment the forker makes right
+after `fork`, would race the body's start. Starting in a microtask gives
+the body exactly its own node as current from its first line. `call` has
+none of these hazards: the caller awaits it at once and is lent (D11), and
+`call` is refused during creation, so a synchronous start costs nothing and
+keeps a call as close to a plain function call as a node allows.
+**Rejected:** a synchronous `fork`; a microtask start for `call` too, which
+delays every call by a tick and protects nothing. **Cost.** A fork's body
+starts a microtask later than a plain call would, and code that forks and
+then inspects the fiber synchronously sees it unstarted. DESIGN.md §4.6.
 
 ## Semantics
 
@@ -169,16 +275,37 @@ read that does not (logging the construction) is either scope-invariant,
 where tracking is free, or mislabelled telemetry (a root singleton stamped
 with one request's id), whose fix is a scope on the key. Banning rather than
 silently tracking means nothing a borrow returned can end up on `this`, and
-the two verbs keep disjoint meanings. **Rejected:** the previous split
-(`lookup` untracked in creation), whose documented hazard baked one scope's
-answer into a shared value; the previous planned convergence (track every
-creation-time read), which keeps the hazard's shape and blurs the verbs;
-an `untracked` verb, which gives placement to the caller. **Cost.** A helper
-written for bodies cannot be called from a factory and must be handed its
-dependencies, which is what a factory should be doing anyway. DESIGN.md
-§3.2, §3.5.
+the two verbs keep disjoint meanings. The value's own node is not a
+dependency: it has no position until the value is placed, and its position
+follows from the value's dependencies, not the other way round. Tracked as
+a read, it would have to count as served at the requester, the only
+position an unplaced node has, so every value that attaches anything would
+be stored at its requester and no service that owns a resource would be
+shared. **Rejected:** the previous split (`lookup` untracked in creation),
+whose documented hazard baked one scope's answer into a shared value; the
+previous planned convergence (track every creation-time read), which keeps
+the hazard's shape and blurs the verbs; an `untracked` verb, which gives
+placement to the caller; tracking the value's own node like any read.
+**Cost.** A helper written for bodies cannot be called from a factory and
+must be handed its dependencies, which is what a factory should be doing
+anyway. DESIGN.md §3.2, §3.5.
 
-### D7. Auto-hoisted values store at the deepest tracked dependency (amended)
+Settled while implementing it:
+
+- *A late read through a value's node that creates a value is warned.* A
+  service may keep `#ctx = current()` and read through it after
+  construction (DESIGN.md §3.2). When such a read creates the value it
+  reads, that value is placed after its reader, and where both land on one
+  provided stack it is released first, the reverse of G3, while the reader
+  may still use it in its own release; declaring it with `inject` creates
+  it first. A read that hits an existing value creates no new order, so it
+  is not warned. It is a development warning (D30), once per key per root,
+  not an error, because the read is legal and the hazard needs both values
+  on one stack and a release that uses the later one. **Rejected:** an
+  error; a warning on every late read, which would flag the `#ctx` idiom
+  itself.
+
+### D7. Auto-hoisted values store at the deepest tracked dependency
 
 A default-factory value with no declared placement is cached on the deepest
 node that served one of its `inject`ed dependencies, clamped by the nearest
@@ -192,19 +319,115 @@ dependencies" (I17) mechanical, sharing as wide as dependencies allow and
 never wider, without per-key scope annotations. `captureAutoScoped` is a
 public `NodeOptions` flag for harnesses and isolation boundaries (a node
 whose auto-hoisted instances must not leak upward); it clamps placement, it
-never changes resolution. Because creation-time reads are all `inject` (D4′) and factories
-are synchronous, `deps(V)` is complete when `V` is placed. **Cost.**
-Placement depends on what a factory injected on its run, so **an
-auto-hoisted factory must inject the same keys on every run.** A factory
-that does not is a defect, and it is detected where it can be: a
-re-creation forced by a shadow of a *first-run* dependency (`P` and `C` both
-provide `A`, `B@P` was built with `inject(A)`, `C` resolves `B` and must not
-be served `P`'s view) runs the factory again from `C` with the recorded
-`deps(B)` in hand; if that run injects a different set of keys, the
-resolution throws `PlacementError` naming both sets, the new instance is
-released, and `P`'s answer is untouched (I19). With equal sets the re-run
-always lands at or below the shadow, so it can never collide with an
-existing instance. DESIGN.md §3.3.
+never changes resolution. It is public rather than a test-harness option
+because an application's isolation boundary (a plugin's or a tenant's
+subtree) has the same need, and without the flag the only way to keep
+instances below a node would be a scope on every key. Because creation-time
+reads are all `inject` (D4′) and factories are synchronous, `deps(V)` is
+complete when `V` is placed. **Rejected:** a clamp only test harnesses can
+set; handling only the symptom, the previous behaviour: a re-creation forced
+by placement by view (D10′) that landed on a node already caching the key
+abandoned the new instance and served the existing one, with a development
+warning. That collision happens only when a factory's key set varies, and
+serving the existing instance hid the defect; checking the key set at the
+re-run names the cause, and the collision branch remains only as an I19
+guard that throws. **Cost.** Placement depends on what a factory injected on
+its run, so **an auto-hoisted factory must inject the same keys on every
+run.** A factory that does not is a defect, and it is detected where it can
+be: a re-creation forced by a shadow of a *first-run* dependency (`P` and
+`C` both provide `A`; `B@P`, the instance of `B` cached at `P`, was built
+with `inject(A)`; `C` resolves `B` and must not be served `P`'s view) runs
+the factory again from `C` with the recorded `deps(B)` in hand; if that run
+injects a different set of keys, the resolution throws `PlacementError`
+naming both sets, the new instance is released, and `P`'s answer is
+untouched (I19). With equal sets the re-run always lands at or below the
+shadow, so it can never collide with an existing instance. What is not
+detected: a factory whose key set varies, but whose cached instance meets no
+shadow of a first-run dependency, is never re-run, so every requester under
+it is served that instance, built from the keys its first run read. A
+requester whose view provides a key only another run would have injected
+gets a value its own view would not have built, and nothing reports it;
+placement by view's guarantees (D10′) assume the same keys on every run. The
+clamp costs sharing: a value whose dependencies are all served above a
+`captureAutoScoped` node gets one instance per such node instead of one
+shared instance. DESIGN.md §3.3, §3.4.
+
+### D25. Requester-relative values are pinned
+
+A value built from a requester-relative read (a per-creation `SelfScope`
+value, a `skipSelf` read) is **pinned**: placed at its requester and served
+only to requesters at that same node. Pinning carries through an injected
+auto-hoisted value that is itself pinned; a declared-placement value is
+never pinned.
+
+**Why.** A requester-relative read answers differently for each requester,
+a descendant included: a `skipSelf` read from a child skips the child's
+provider, not the parent's, and a `SelfScope` value is made per creation.
+Placement by view compares a requester's view with the cached value's
+through the keys of `deps(V)` (D10′), and no key records "relative to
+whom", so no shadow check can tell when the cache is another requester's
+answer; the only placement that serves each requester its own view is not
+to share. A declared-placement value stays where its author declared it,
+and its author answers for what it holds (D4′). **Rejected:** treating such
+reads as ordinary dependencies, which serves a descendant a value built
+from its ancestor's relative view; forbidding requester-relative reads in
+auto-hoisted factories, which denies the decorator pattern (`skipSelf`) to
+default factories. **Cost.** No sharing: every requester, descendants of
+the first included, builds its own instance, and so does every value that
+injects one. DESIGN.md §3.4.
+
+### D26. Factories are synchronous
+
+A factory, constructor or provider function runs to completion
+synchronously (A5), and `inject` is legal only until it returns.
+Asynchronous initialisation is not part of creation.
+
+**Why.** Creation runs in the same async context as everything else, as a
+frame that `inject` reads (D9′). A synchronous factory is the only kind
+whose frame ends exactly when it returns, so a continuation it schedules
+never runs as part of it (I16), and the dependency set it records is
+complete at placement (D7). An asynchronous factory would keep creation
+open across awaits: its node could not be placed until it settled, every
+concurrent resolution of the key would wait for it or race it, and an
+`inject` after an await would change placement after other requesters had
+started waiting for the value. Beneath the mechanics is the harder
+problem: an asynchronous factory can fail part-way, and concurrent
+requesters of one key would have to either share one in-flight creation,
+and its failure, or race to create; dealing with failure during creation is
+what makes asynchronous DI containers hard, and ramme declines the problem.
+**Rejected:** asynchronous factories (`await inject(...)`, or a factory
+whose promise the container awaits before caching). **Cost.** Asynchronous
+acquisition happens in a body, where failure and cancellation are already
+structured, and the result is provided to what needs it synchronously:
+`const db = own(await connect()); await call(task(work, { providers:
+[valueProvider(Db, db)] }))`, or a `child({ providers })`. A service that
+must own asynchronous setup starts it with a fork in its constructor or
+performs it at first use behind a managed await; consumers cannot await a
+value's construction. DESIGN.md §3.3.
+
+### D27. A declared value's node is live from the start and moves above its dependencies
+
+A declared-placement value knows its storage node `S` before its factory
+runs, so its node is created live on `S`'s provided stack the first time
+the factory needs it, never pending; when the creation ends, its entry
+moves to the top of `S`'s provided stack. That is the one time an entry
+changes position (I5).
+
+**Why.** Pending exists because an auto-hoisted value's storage node is
+unknown until its last `inject`. A declared value's is known, so its node
+is an ordinary live node owned by `S` from the start, and the pending
+state's refusals and its re-homing at the requester after a failed factory
+(DESIGN.md §3.3) stay confined to where they are needed. The entry,
+though, is pushed when the factory first needs the node, and values the
+factory injects after that are placed on `S` above it, where LIFO would
+release them first while the value may still use them. Moving the entry
+once, at the end of its creation, restores reverse creation order, which is
+dependency order (G3). **Rejected:** keeping a declared value's node
+pending until its factory returns, which keeps I5 without exception at the
+price of a pending node whose storage is already known; leaving the entry
+where it was pushed, which releases a value's late dependencies before the
+value. **Cost.** One exception to fixed positions, which any reasoning
+about release order has to remember. DESIGN.md §3.3.
 
 ### D9′. Async context propagation is required
 
@@ -214,137 +437,299 @@ context: `import 'ramme/node'` (`AsyncLocalStorage`) or
 mechanism, a frame in that storage; creation uses it synchronously. Without
 an adapter every frame-needing operation, including the first factory run,
 throws `NoCurrentNodeError` whose message names the import; there is no
-synchronous fallback stack (plan D-02). There is no default root either:
+synchronous fallback stack. There is no default root either:
 `createRootContext()` is one line and is where shutdown lives.
 
 **Why.** The ambient idiom (`lookup`, `own`, `fork`, `signal()` with nothing
-passed) is what makes application code read like ordinary JavaScript, and
-it is only sound if the current node survives `await`. That is a platform
-fact, not a choice: native `await` resumes a function in a job that
-userland cannot wrap. Every server runtime has propagation today
-(`AsyncLocalStorage` on Node ≥ 22, Bun, Deno, Workers with `nodejs_compat`;
-`AsyncContextFrame` on current Node makes it cheap); browsers get it when
-AsyncContext ships or through a build-time async-to-generator transform.
-The previous default, a synchronous stack that honestly lost context at the
-first `await`, was half an idiom: code that worked until its first await.
-It also left a bleed surface (`enterSync` without `leaveSync`) and needed a
-separate module-level creation stack, both removed. Side-effect imports
-remain the idiom for "register a platform binding once"; `sideEffects` in
-package.json names exactly those two files. **Rejected:** the synchronous
-default (the previous D9); a Zone-style polyfill; a silent default root,
-which would hide the "where does this die?" question the design asks.
-**Cost.** Browsers without AsyncContext are unsupported except through a
-transform; forgetting the import fails at the first ambient operation, with
-the fix in the message. DESIGN.md §6.
+passed) is what makes application code read like ordinary JavaScript, and it
+is only sound if the current node survives `await`. That is a platform fact,
+not a choice: native `await` resumes a function in a job that userland
+cannot wrap. Every server runtime has propagation today (`AsyncLocalStorage`
+on Node ≥ 22, Bun, Deno, Workers with `nodejs_compat`; `AsyncContextFrame`
+on current Node makes it cheap); browsers get it when AsyncContext ships or
+through a build-time async-to-generator transform. The previous default, a
+synchronous stack that honestly lost context at the first `await`, was half
+an idiom: code that worked until its first await. It also left a bleed
+surface (a context entered with `enterSync()` and never left with
+`leaveSync()` stayed current for unrelated code) and needed a separate
+module-level creation stack, both removed. The adapter is chosen by an
+explicit side-effect import (`sideEffects` in package.json names exactly
+those two files), not by conditional exports or by detection at load: one
+runtime can offer both mechanisms, a bundler resolves export conditions for
+its build target rather than for the realm that runs the bundle, and
+detection would have ramme's main entry probe `node:async_hooks`, which
+bundles for other platforms cannot resolve. The import puts the choice in
+the application's entry file, and its absence is reported by name.
+**Rejected:** the synchronous default (the previous D9); a Zone-style
+polyfill; a silent default root, which would hide the "where does this die?"
+question the design asks; package.json conditional exports choosing the
+adapter; detecting `AsyncLocalStorage` or `AsyncContext` at load. **Cost.**
+Browsers without AsyncContext are unsupported except through a transform;
+forgetting the import fails at the first ambient operation, with the fix in
+the message. The choice lives in `context-storage.ts`: a synchronous
+fallback, if one is ever wanted back, would be a default storage registered
+there. DESIGN.md §6.
 
 ### D10′. Permanent decisions and placement by view
 
-Two rules replace the probabilistic resolution memo and the negative memo at
-the auto-scope root. **Decided markers:** when a requester resolves `K`,
-every node on the walk, up to and including the one that answered, marks
-`K` decided, whether the answer was a value or "not provided here", and for
-an auto-hoisted answer `V` every key in `deps(V)` too; `addProvider(K)` at
-a node where `K` is decided throws `PlacementError`, and a fresh child has
-no decisions, so providing at construction is always allowed. **Placement
-by view:** a
-cache hit on auto-hoisted `V` at `S` is not requester `R`'s answer when a
-key in `deps(V)` is provided strictly between `R` and `S`; `V`'s factory
-runs from `R` and the result is placed by `R`'s view.
+Two rules replace the first extraction's two resolution memos. In the
+probabilistic one each node counted the answers it took from an ancestor,
+across all keys, and cached every tenth, so whether a later `addProvider`
+at or below it was refused depended on unrelated traffic. The negative one,
+the *tombstone*: when an auto-hoisted value was stored below the auto-scope
+root (the root, or the nearest `captureAutoScoped` node), that root
+recorded the key as "not resolved here". **Decided markers:** when a
+requester resolves `K`, every node on the walk, up to and including the one
+that answered, marks `K` decided, whether the answer was a value or "not
+provided here", and for an auto-hoisted answer `V` every key in `deps(V)`
+too; `addProvider(K)` at a node where `K` is decided throws
+`PlacementError`, and a fresh child has no decisions, so providing at
+construction is always allowed. **Placement by view:** a cache hit on
+auto-hoisted `V` at `S` is not requester `R`'s answer when a key in
+`deps(V)` is provided at `R` or between `R` and `S` (such a provider, or a
+node carrying a scope as below, is a *shadow*); `V`'s factory runs from `R`
+and the result is placed by `R`'s view.
 
-**Why.** The old tombstone stopped a context from *providing* a key it had
-answered for, which is right, and also stopped the root from
-*instantiating* a value some descendant had placed lower, which was the
-order-dependent "No provider found" at the root. Decisions keep the correct
-half. Placement by view makes overrides compose: a default factory may
-inject request-scoped things, land at the request context, and be
-overridden by a request context that provides one, and two instances on one
-path are two consistent views, arising only where someone deliberately
-provided a dependency at two levels. No node ever changes an answer it has
-given; no requester is served a value built from a view of its dependencies
-other than its own; both hold in every order of resolution. **Rejected:**
-forbidding shadowing (R-a), which also forbids the natural override of a
-request-flavoured default; "auto-hoisted keys only at the root", which
-equates a default factory with living at the root; an error on a cache hit
-across a shadow (R-b), whose error is order-dependent unless paired with a
-second-placement check and which treats two consistent instances as a
+**Why.** The tombstone stopped a node from *providing* a key it had answered
+for, which is right. It also stopped the root from *instantiating* a value
+some descendant had placed lower, which is wrong and depends on order: after
+a child that provides `Database` resolved `UserRepo` (which injects
+`Database`), `root.get(UserRepo)` failed with "No provider found" although
+`Database` has a default, and the opposite order worked. Decisions keep the
+correct half. A walk that answered auto-hoisted `V` also marks every key in
+`deps(V)`: its nodes answered `V` from a view in which each of `V`'s
+dependencies resolved as it did, so a provider for one of them added later
+at such a node would make placement by view rebuild `V` for requesters that
+were already given the cached one, changing an answer. Placement by view
+makes overrides compose: a default factory may inject request-scoped things,
+land at the request context, and be overridden by a request context that
+provides one, and two instances on one path are two consistent views,
+arising only where someone deliberately provided a dependency at two levels.
+No node ever changes an answer it has given; no requester is served a value
+built from a view of its dependencies other than its own; both hold in every
+order of resolution, for factories that inject the same keys on every run
+(D7). **Rejected:** forbidding shadowing, which also forbids the natural
+override of a request-flavoured default; "auto-hoisted keys only at the
+root", which equates a default factory with living at the root; an error on
+a cache hit across a shadow, whose error is order-dependent unless paired
+with a second-placement check and which treats two consistent instances as a
 fault. **Cost.** Two instances on one path where a dependency is provided
-twice; a `Set` lookup per node on each walk. DESIGN.md §3.4.
+twice. A node that answered `V` can no longer provide any of `V`'s
+dependencies, more `addProvider` refusals than marking `K` alone would give.
+Each cache hit on an auto-hoisted value writes its key and every key of
+`deps(V)` into the decided set of every node on the walk, and the shadow
+check tests each key of `deps(V)` against the providers of every node
+between `R` and `S` and, at each node that carries scopes, against the key's
+effective scope, found by a provider walk from `S` up: work proportional to
+the walk's length times `|deps(V)|` per hit. Decided sets grow with every
+key resolved through a node and are dropped only when it completes.
+DESIGN.md §3.4.
 
 Settled while implementing it:
 
-- *The memo lands at the requester's own placement* (plan D-20). The rebuilt
-  value is cached at `S′`, the placement `R`'s view computes: `R` itself when
-  `R` provides the shadowing key, otherwise the node strictly between `R`
-  and the shadow where its deepest dependency lives. Every requester under
-  `S′` with the same view shares it, which is the rule's "memoized at `R`"
-  for every one of them.
-- *`deps(V)` records optional misses* (plan D-43). "K is not provided" is as
-  much a part of `V`'s view as a value: without it a fresh child providing
-  `K` would be served a `V` built without `K` across a shadow nobody could
-  see.
-- *A scope-owning node shadows a scoped dependency* (plan D-44, amended by
-  D-93). A node between `R` and `S` that owns the effective scope of some
-  `d ∈ deps(V)` (`SelfScope` excluded) changes `R`'s view of `d` exactly as
-  a provider would, so it is a shadow too. The effective scope is the
-  provider's, else the key's.
-- *A DI value's node has its own event kind, `'value'`* (plan D-52). It is
-  the one node kind whose placement the design explains; emitting it as a
-  context would hide it in `node:created`/`node:placed`/`node:complete`.
+- *The rebuilt value is cached at the requester's own placement, not at the
+  requester.* It lands at `S′`, the node D7 picks for the run from `R`: the
+  deepest node that served one of its dependencies in `R`'s view, so `R`
+  itself when `R` provides the shadowing key, and otherwise a node at or
+  below the shadow. Every requester at or under `S′` with the same view
+  shares it. A memo at `R` itself would give each of them (a sibling of `R`,
+  another child of the overriding node) its own instance built from the
+  same view: sharing narrower than the dependencies allow, against D7.
+- *`deps(V)` records optional misses.* An optional `inject` of `K` that
+  finds no provider still adds `K` to `deps(V)`; no node served it, so
+  `V`'s placement is unchanged. "K is not provided" is as much a part of
+  `V`'s view as a value, and the walk that missed already marked `K`
+  decided; the tracker records the same decision. Without it a fresh child
+  providing `K` would be served a `V` built without `K`, across a shadow
+  placement by view could not see, since `K` was not in `deps(V)`.
+- *A node carrying a scope shadows a scoped dependency.* The rule names
+  providers, but a node at `R` or between `R` and `S` that carries the
+  effective scope of some `d ∈ deps(V)` changes `R`'s view of `d` exactly
+  as a provider would, since `R`'s walk resolves `d` at the nearest node
+  carrying that scope; so it is a shadow too. The effective scope is that
+  of the first provider for `d` at or above `S` (one at `R` or between them
+  is a shadow already), else the key's own. The key's alone misses the usual
+  case, an unscoped key given a `{ scope: σ }` provider at the root: `R`
+  under a nested node carrying σ would be served a `V` built from the outer
+  one's `d`. `SelfScope` is excluded: inside a creation a `SelfScope`
+  dependency is made per creation, and a value that reads one is pinned to
+  its requester instead (D25).
+- *A scoped provider below the node carrying its scope is refused.* A
+  provider for a σ-scoped key stores its value on the nearest node carrying
+  σ. Declared below that node, it would still store there, and every
+  requester under that node would be served whichever value was created
+  first: the provider's, if a requester below it asked first, or the
+  default's or another provider's, if a sibling did. That answer would
+  depend on order, which these rules exist to prevent, so it is a
+  `PlacementError` at `addProvider` and at `child({ providers })`; a
+  pending value node that built such a child is checked when it is placed,
+  since the node carrying σ above it is unknown until then. **Rejected:**
+  storing the value at the provider's node, which turns the key's scope
+  into a suggestion.
+- *A DI value's node has its own event kind, `'value'`.* It is the one node
+  kind whose placement the design explains; emitting it as a context would
+  hide it in `node:created`/`node:placed`/`node:complete`.
 
 ### D11. `call` lends the current node, never the receiver
 
 `call` (and `all`, `race`, which are calls) records `lentTo` on the node
 that was current when it ran, and that node's body-shaped operations throw
 `UnawaitedCallError` until the call settles (the child completes, its
-releases included); `own`, `release`, `abort`, `close` and the `Symbol`
-methods do not. With no current node, nothing is lent. (plan D-03)
+releases included); `own`, `release`, `releaseAll`, `abort`, `close` and
+the `Symbol` methods do not. With no current node, or from a failure handler (which
+runs with its parent current but is not its body), nothing is lent.
 
 **Why.** The awaiting body is the one that is supposed to be suspended on
 the call's promise, so it is the one whose further use means the `await`
-was forgotten; that replaces the old stack-top enforcement with one field
-that works after any number of awaits. Lending the receiver instead would
-make `app.fork(...)` from a platform callback throw while a top-level
-`await app.call(main)` runs, the exact shape of a server's main loop.
-Attaching and cancelling stay open, because another party (a producer
-granting a lease, a signal handler) may legitimately do them while the
-body waits. **Rejected:** lending the receiver; no detection (a forgotten
-await on a call silently runs two bodies on one node). **Cost.** One more
-error a newcomer meets; `Promise.all([call(a), call(b)])` is refused and
-must be `all([...])`. DESIGN.md §4.9.
+was forgotten; a handler's call lent to its parent would fail the parent's
+body over an await nobody forgot. One field works after any number of
+awaits and catches every body-shaped use; the first extraction's stack-top
+check (a nested `Fiber.call` compared the ambient context with the top of
+its fiber's stack of calls) caught a forgotten await only at that fiber's
+next call. Lending the receiver instead would make `app.fork(...)` from a
+platform callback throw while a top-level `await app.call(main)` runs, the
+exact shape of a server's main loop. Attaching and cancelling stay open,
+because another party (a producer granting a lease, a signal handler) may
+legitimately do them while the body waits. **Rejected:** lending the
+receiver; no detection (a forgotten await on a call silently runs two
+bodies on one node). **Cost.** One more error a newcomer meets;
+`Promise.all([call(a), call(b)])` is refused and must be `all([...])`. The
+check misses a forgotten await whose call completed synchronously, since
+the node is no longer lent when it is next used. DESIGN.md §4.9.
+
+### D19. Subscribed and unsubscribed children; `own(node)` unsubscribes
+
+A child node is **subscribed** (work: it hears its parent's interrupt when
+the parent's body exits or the parent is aborted) or **unsubscribed**
+(infrastructure: it hears at its turn in the parent's release loop, I4).
+`fork`, `call` and `child` make subscribed children; a pool, a DI value's
+node and a release fiber are unsubscribed; `own(node)` makes a subscribed
+child of the current node unsubscribed and leaves its stack entry where it
+is.
+
+**Why.** Interruption and release answer different questions. Work should
+stop when its parent stops (D18). Infrastructure the work uses (a pool the
+handlers fork into, a reaper fiber that maintains a cache, a connection's
+keep-alive) must outlive that work's cleanup: subscribers are interrupted
+together and in no order (G4), so a subscriber that uses a subscribed
+sibling during its cleanup finds it already stopping. Hearing at its turn
+makes an infrastructure child live exactly as long as a passive resource
+attached at the same position, until everything attached after it has been
+released (G2). Subscription is a relation between a node and its owner,
+not a property of the task (the same task is work in one place and
+infrastructure in another), so it is decided where the node is attached,
+by the verb that attaches every other resource; since `fork` never starts
+the body in the forker's frame (D22), `own(fork(t))` is in effect before
+the body runs. **Rejected:** interrupting every child at once, which stops
+infrastructure while the work that uses it is still cleaning up (a pool
+would refuse intake from handlers still forking into it, D15); a
+`subscribed: false` task option, which fixes at the definition what depends
+on the attachment, and per use would be a second spelling of `own`.
+**Cost.** `own` has two meanings, attaching a passive entry and
+unsubscribing a node, and a second `own` of a node throws where a second
+`own` of a passive object is a no-op (D16). Whether a child hears at the
+parent's exit or at its turn is not visible at the `fork` call. DESIGN.md
+§2.2, §2.3.
+
+### D18. A body's exit interrupts its subscribers
+
+When a body settles or freezes, every subscriber of its node that is still
+running is delivered an `OwnerInterrupt` (`childrenOnExit: 'interrupt'`,
+the default); `childrenOnExit: 'await'` waits for them instead. The exiting
+node is not itself marked delivered: the interrupt starts there, and its
+own signal stays unfired.
+
+**Why.** A fork the body did not join is work whose result nobody will
+read: the body has produced its own result without it. What it still does
+is either a forgotten `join` or background work that belongs to a
+longer-lived owner (a pool, or an owned fiber with a handler). Interrupting
+it ends the parent promptly and keeps the fork's lifetime within the
+body's, which is what structured concurrency promises; waiting would let a
+forgotten `join` hold the parent, and everything awaiting the parent, for
+as long as the fork runs. A natural exit is not an interruption of the
+exiting node, so it does not mark it: the node's signal means "this node
+was interrupted" (DESIGN.md §4.1), which a resource reading it must not see
+after a body that returned, and work forked onto the node while it
+releases (a failure handler's restart) would be born delivered (D12).
+**Rejected:** waiting as the default, the nursery rule of other
+structured-concurrency libraries, which turns every unjoined fork into a
+hang its author does not see at the call site; marking the exiting node.
+**Cost.** A body that needs its forks finished must `join` them, use `all`,
+or set `childrenOnExit: 'await'`; a fork forgotten under the default is cut
+short without a report. DESIGN.md §2.1, §2.4.
+
+### D20. Three interruption modes
+
+A node's `interrupt` option is `'freeze'` (the default: a delivery is
+applied, so managed awaits freeze, D13, and it is forwarded to every
+subscriber), `'observe'` (delivered but not applied: the body reads
+`signal()` or awaits `interrupted()` and settles on its own; while it runs,
+the delivery is forwarded only to `restore` subscribers), or `'restore'`
+(applied, and delivered whenever an ancestor on its subscription path is,
+through any `observe` region).
+
+**Why.** Freezing is right for work (D13), but some shutdowns are work that
+must finish: a server draining its connections, a writer flushing a batch,
+a consumer committing offsets. Such a body must see the interrupt and keep
+running, so the mode is chosen per node, and the default is the one
+application code needs. An `observe` body withholds the interrupt from its
+subtree because the subtree is its own work: a drain that forks a task per
+connection to finish must not have those tasks frozen by the interrupt it
+is handling; the body decides when its children stop, at the latest when
+it exits (D18). `restore` re-opens cancellation inside such a region for
+work that should stop anyway (a keep-alive ping in a draining server)
+without making the whole region cancellable. **Rejected:** a per-await
+opt-out (`await uninterruptible(p)`), which would have to be repeated at
+every await of a drain, including inside library code it calls; a single
+cancellable flag per node with no forwarding rule, which leaves an
+`observe` body's forks either frozen by the interrupt it handles or never
+interruptible. **Cost.** Three modes to learn. An `observe` body that
+ignores its signal never ends, and its owner waits for it (D21); the report
+is `node:stalled`. A `freeze` fork inside an `observe` region runs until
+the region's body exits (D12). DESIGN.md §4.3.
 
 ### D12. The birth rule: delivered at birth iff the parent would have forwarded
 
-A `freeze` child born under a delivered parent is delivered at birth iff the
-parent would have forwarded to it: under a delivered `freeze` parent yes,
-under a delivered `observe` parent no. A `restore` child is delivered at
-birth when an ancestor on its subscription path is delivered. An `observe`
-child never is. (plan D-05)
+A subscribed `freeze` child born under a delivered parent is delivered at
+birth iff the parent would have forwarded to it: under a delivered `freeze`
+parent yes, under a delivered `observe` parent no. A subscribed `restore`
+child is delivered at birth when an ancestor on its subscription path is
+delivered; the walk up stops at the first unsubscribed node, whose own
+parent would not have forwarded to it. An `observe` child never is, nor is
+an unsubscribed one (a pool, a release fiber, a DI value's node), which
+hears at its turn in its owner's release loop (I4).
 
-**Why.** Reading the mode table literally (a `freeze` child is "delivered at
-birth" under any delivered parent) would make behaviour depend on whether a
-handler was forked before or after the shutdown signal: a server in
-`observe` mode draining its connections would see handlers forked before the
-signal keep running and handlers forked after it freeze at once. The design
-is order-independent everywhere else (D10′), so the rule is phrased as the
-forwarding rule applied at birth. **Cost.** A `freeze` fiber forked into a
-draining `observe` region runs until its parent's own exit interrupts it.
-DESIGN.md §4.3.
+**Why.** Delivering every `freeze` child born under any delivered parent
+would make behaviour depend on whether a handler was forked before or
+after the shutdown signal: a server in `observe` mode draining its
+connections would see handlers forked before the signal keep running and
+handlers forked after it freeze at once. The design is order-independent
+everywhere else (D10′), so the rule is phrased as the forwarding rule
+applied at birth, and because a parent forwards only to subscribers, an
+unsubscribed edge ends it. **Rejected:** that blanket rule; applying the
+rule to unsubscribed children (a pool made by a delivered body would be
+born delivered and refuse every fork, D15); a `restore` walk to any
+delivered ancestor (a `restore` fiber forked into an undelivered pool
+after the signal would freeze while one forked before it keeps running).
+**Cost.** A `freeze` fiber forked into a draining `observe` region runs
+until its parent's own exit interrupts it (D18). DESIGN.md §4.3.
 
-### D13. Freeze: only managed awaits freeze, and delivery is consumption
+### D13. Freeze: only managed awaits freeze, and a failure is consumed on resume
 
 Interruption stops work by making the body's next **managed await** (an
 await on a promise ramme produced) never settle; the body never resumes and
 is abandoned, and its node's stacks are released by the runtime. The
 decision is made for the awaiting body's node. A managed await already in
-flight is cut at delivery and the body counts as frozen at once; "in
-flight" means its `then` was called, which ramme's promise subclass
+flight is cut at delivery and the body counts as frozen at once, so its
+node settles and releases without waiting on work that may never settle;
+"in flight" means its `then` was called, which ramme's promise subclass
 observes, so a stored, un-awaited managed promise does not freeze the body
-at delivery and freezes it the moment it is awaited. (plan D-06)
+at delivery and freezes it the moment it is awaited.
 
 **Why.** Cooperative cancellation (the body unwinds and throws `AbortError`)
 requires every body to clean up correctly on a path it rarely runs, through
-`finally` blocks that also run on success; freeze removes cleanup as
-control flow entirely, because acquisition is ownership (law 1) and the node
+`finally` blocks that also run on success; freeze removes cleanup as control
+flow entirely, because acquisition is ownership (law 1) and the node
 releases what the body owned. Only promises ramme produced can freeze,
 because only they can be decided at `then` time; everything else is a bare
 await and completes normally, and `signal()` and `managed(p)` bring foreign
@@ -354,24 +739,43 @@ freeze, so `app.abort()` from a signal handler rejects a top-level
 **Rejected:** cooperative cancellation; freezing at delivery regardless of
 what the body awaits (a body in plain code between delivery and its next
 managed await is legitimately running, I8); deciding for the node a method
-was called on (it would freeze the top-level await forever). **Cost.** A
-`freeze` body that never reaches a managed await never freezes; the
-mitigation is diagnostic (`node:stalled`). Combinators that resume a body
-while one of its managed promises is pending (`Promise.race`,
-`Promise.allSettled`, a `.then` attached without awaiting) are unsupported
-in `freeze` bodies and warned about in development. DESIGN.md §4.2.
+was called on (it would freeze the top-level await forever). **Cost.** The
+most visible one: on interruption no `finally` block and no `using` or
+`await using` disposal runs, in the body or in any plain async function it
+called that is suspended on one of the body's managed awaits (a helper that
+takes a lock and releases it in `finally`), because none of them resumes.
+Cleanup that must happen is an entry, `own(...)`, which the node releases;
+A7 assumes it, and the `ramme/no-finally-in-async` and
+`ramme/no-using-in-async` lint rules flag the rest. A `freeze` body that
+never reaches a managed await never freezes; the mitigation is diagnostic
+(`node:stalled`). Combinators that can resume a body while one of its
+managed promises is pending are unsupported in `freeze` bodies (DESIGN.md
+§4.2 lists every unsupported shape), and development mode reports them when
+they misfire. DESIGN.md §4.2, §4.4.
 
-*Delivery is consumption, and sources never reject* (plan D-38). Every
-managed promise wraps a source that never rejects (a node's `completion`,
-an entry's `done`, the delivery promise) plus a `deliver` step that runs
-only when an awaiting continuation is actually resumed, in `then`; that step
-is where an awaited value is produced, an error thrown to the awaiter, and
-a failure consumed. A frozen awaiter therefore consumes nothing, and the
-failure surfaces from its parent (I11); a stored, never-awaited `join`,
-`result` or `call` consumes nothing; and no ramme-internal promise can be an
-unhandled rejection whether or not it is ever awaited (I10). The one
-wrapper over a user promise, `managed(p)`, has no `deliver` step and leaves
-`p`'s handled-ness to its owner.
+*A failure is consumed on resume, and sources never reject.* Every managed
+promise wraps a source that never rejects (a node's completion, the end of
+an entry's release, a node's delivery, which `interrupted()` waits on) plus
+a resume step (`deliver` in the code; unrelated to a node's delivery of its
+signal) that runs only when an awaiting continuation is actually resumed, in
+`then`; that step is where an awaited value is produced, an error thrown to
+the awaiter, and a failure consumed. A frozen awaiter therefore consumes
+nothing, and the failure surfaces from its parent (I11); a stored,
+never-awaited `join`, `result` or `call` consumes nothing; and no
+ramme-internal promise can be an unhandled rejection whether or not it is
+ever awaited (I10). The one wrapper over a user promise, `managed(p)`, has
+no resume step and leaves `p`'s handled-ness to its owner until it is
+awaited; an awaited `managed(p)` marks `p` handled even when its awaiter
+freezes, or `await managed(fetch(url, { signal: signal() }))` in a delivered
+body would leave the fetch's `AbortError` unhandled. **Rejected:** consuming
+a failure when its source settles, through promises that reject: an owner
+frozen on `join(f)` consumed `f`'s failure without ever resuming, so it
+reached no one, and `const p = call(x); await timer; await p` was an
+unhandled rejection while the timer ran. **Cost.** Consumption is final once
+the resume step runs: a combinator that takes one member's failure and keeps
+waiting on a sibling that is then cut loses it, which is why
+`Promise.allSettled` is unsupported in `freeze` bodies; multi-member waits
+belong in ramme's `all`/`race`, which join their members themselves.
 
 ### D14. A `'join'` fork onto a bodiless node is refused
 
@@ -380,7 +784,7 @@ is not a pool (`root.fork(t)`, `child().fork(t)`) throws `TypeError` at the
 call. In a constructor the fork is recorded and checked when the factory
 returns, so `own(fork(...))` and a fork with `onFailure` are accepted, and
 an unowned `'join'` fork fails the resolution synchronously with the
-pending node released. (plan D-15)
+pending node released.
 
 **Why.** A `'join'` failure is held until something joins it or the parent
 completes; on a bodiless node nothing joins it until shutdown, so a failure
@@ -393,88 +797,220 @@ constructor forks at the call, which would refuse the reaper idiom.
 **Cost.** One more error on the first `root.fork(t)`; the message names the
 alternatives. DESIGN.md §4.7.
 
+### D23. Failure destinations, and an owned fiber's failure aborts its owner
+
+A fiber's failure goes to one destination, set at the definition or per use
+(`onFailure`): `'join'` (the default: held for `join`, `result` or
+`asyncDispose`, and surfaced from the parent's completion if nothing
+consumed it), `'link'` (aborts the parent at once, and surfaces from its
+completion), or a handler (called once, at the fiber's completion, with the
+parent current; a promise it returns holds the parent open). An owned fiber
+whose failure arrives while its owner is open also aborts the owner (C5).
+
+**Why.** `'join'` is the default because a fork is most often a value the
+body will read: the failure belongs to whoever reads the value, and the
+parent is the reader of last resort, so no failure is lost and none is
+reported twice (I11). `'link'` is for a helper the parent cannot continue
+without, where a failure held for a later `join` would let the parent go on
+with a broken assumption. A handler is for supervised work whose failure is
+handled where it happens. It runs at completion, not at settling, so it
+sees the final failure, release failures included (D24), and with the
+parent current, so a restart (`fork` in the handler) lands where the failed
+fiber was. It holds the parent through its returned promise because a
+handler that does asynchronous work (report, then restart) would otherwise
+be cut off by the parent's completion. Two refinements keep the hold from
+deadlocking: a handler awaiting the completion of its parent or an ancestor
+holds nothing from then on (it would wait for itself:
+`onFailure: () => app.close()`), and while a hold lasts on a parent whose
+stacks are otherwise empty, each node entry the handler attaches is
+released as soon as it is attached (a handler awaiting its own restart
+would otherwise wait for a fiber that only the parent's release
+interrupts). An owned fiber is infrastructure its owner relies on (D19), so
+its failure means the owner is broken: aborting the owner fails fast where
+a held failure would wait for a `join` no body makes. **Rejected:** `'link'`
+as the default, which turns every background failure into its parent's
+death; a handler called at settling, before the fiber's releases have run;
+a handler that cannot hold its parent; holding an owned fiber's failure
+like a subscriber's. **Cost.** An unjoined `'join'` failure is reported
+only when the parent completes, which may be much later. While a handler's
+hold lasts, a node entry can be released before a passive entry attached
+above it, the one exception to C4's order. DESIGN.md §2.6, §4.7.
+
+### D28. `all` and `race` follow nodes, not promises
+
+`all` and `race` run their tasks as subscribers of a fresh group fiber,
+which the caller `call`s. `all` resolves with every value in order and
+rejects with an `AggregateError` of every real failure, excluding aborted
+members (`FiberAbortedError` when members were aborted and none failed).
+`race` resolves with the first `success`, aborts and awaits the rest, and
+rejects only when no member succeeded. Members always run as `'join'`
+fibers of the group, whatever their own destination.
+
+**Why.** Each departs from the `Promise` combinator of the same name because
+its members are nodes: a member is done when its node has released, not
+when its value is known, and its failure must be consumed exactly once
+(I11). `all` therefore waits for every member before it reports, and then
+reports every failure; rejecting with the first, as `Promise.all` does,
+would leave the others to be dropped or reported separately. `race` takes
+the first success, `Promise.any`'s rule, because its use is redundancy: in
+`race([primary, replica])` a replica that fails fast must not beat one
+that answers. Members run as `'join'` because the group is their reader: a
+member's own `'link'` would abort the group before it aggregated, and a
+handler would take the failure away from the result. The group is one
+fiber so that the caller makes one managed await and freezes as a whole
+(D13). **Rejected:** `Promise.all` and `Promise.race` semantics (first
+rejection, first settlement); honouring each member's own destination.
+**Cost.** `all` does not stop at the first failure: the other members run
+to their end before it rejects, and fail-fast is a body that forks with
+`'link'`. The names match the `Promise` combinators while the rules
+differ. DESIGN.md §4.8.
+
 ### D15. Pool intake stops at the signal
 
 `pool.fork` throws `PoolClosedError` once the pool is delivered or `close()`
-was requested, and `NodeCompletedError` after completion. (plan D-16)
+was requested, and `NodeCompletedError` after completion.
 
 **Why.** A deliberate exception to I8 (operations work between delivery and
 completion) for intake infrastructure: a fiber forked into a delivered
 `freeze` pool would be born delivered and freeze at its first managed await,
-which is work accepted only to be thrown away. A pool that is closing is
-closing its intake; the caller learns it at once. **Cost.** A producer that
-races shutdown must handle `PoolClosedError`. DESIGN.md §4.10.
+which is work accepted only to be thrown away. `close()` fires no signal, so
+a fork into a closing pool would run normally; it is refused for another
+reason: a graceful close waits for the pool's work, its queue included, so
+open intake would let a producer that keeps forking hold the pool, and its
+owner's shutdown, open indefinitely. Either way the caller learns it at
+once. **Rejected:** accepting forks into a closing pool until its queue
+drains. **Cost.** A producer that races shutdown must handle
+`PoolClosedError`. DESIGN.md §4.10.
 
 *Accounting counts only the pool's own fibers; abort stops the queue, close
-drains it* (plan D-47). `running` and `pending` move only for fibers the
-pool admitted, never for release fibers, DI values placed on the pool or
-passive `pool.own(x)` entries. Once the pool is delivered no waiter starts
-and the queued ones settle `aborted` without running; under `close()`
-waiters still start as slots free, because a graceful close waits for the
-pool's work, and the queue is that work.
+drains it.* `running` and `pending` move only for fibers the pool admitted,
+never for release fibers, DI values placed on the pool or passive
+`pool.own(x)` entries: those hold no slot, and counting their completion
+would let one more fork run than `concurrency` allows. A fiber frees its
+slot at completion, before its failure reaches `onFailure`, and the same
+step admits waiters in order. A handler can therefore restart the failed
+fiber (supervised background work) even at `concurrency: 1` under
+`'reject'`, where freeing the slot after the handler would make the
+restart throw `PoolFullError` and fail the pool; under `'wait'` the
+restart queues behind forks already waiting. Once the pool is delivered,
+including by an `abort()` that forces an earlier `close()`, no waiter
+starts and the queued ones settle `aborted` without running, as any fiber
+aborted before its body started does. Under `close()` waiters still start
+as slots free, because a graceful close waits for the pool's work, and the
+queue is that work. A closing pool therefore lasts as long as its queue,
+and `abort()` cuts it short.
 
 ### D16. What the release order guarantees
 
-A node releases its explicit stack, then its provided stack, each in
-reverse order. **G1** anything read from a node's provided values stays
-alive until every explicit entry on that node has completed; **G2** explicit
-entries release in reverse attachment order, which is dependency order iff
-a fiber uses only what was attached before it was forked; **G3** provided
-values release in reverse creation order, which is dependency order because
-`inject` runs during creation; **G4** interruption reaches the whole
-subscribed subtree at once. Not guaranteed: order among subscribers during
-the signal; anything about a reference that escaped to a longer-lived
-scope, except that use fails loudly.
+A node releases its explicit stack, then its provided stack, each in reverse
+order. **G1** anything read from a node's provided values stays alive until
+every explicit entry on that node has completed (unless that value's own
+node is aborted first, DESIGN.md §2.5); **G2** explicit entries release in
+reverse attachment order, which is dependency order iff a fiber uses only
+what was attached before it was forked; **G3** provided values release in
+reverse creation order, which is dependency order because `inject` runs
+during creation; **G4** interruption reaches the whole subscribed subtree at
+once (below a running `observe` body, only its `restore` descendants; D20).
+Not guaranteed: order among subscribers during the signal; anything about a
+reference that escaped to a longer-lived scope, except that use fails
+loudly.
 
 **Why.** Provided values are registered lazily, at a time the body author
 does not control: a handler forked before the pool existed may be the one
-whose `lookup` creates it. Only "explicit before provided" makes G1
-unconditional; LIFO within each stack gives dependency order wherever
-dependencies were acquired first (A6), by construction for DI values and by
-discipline for fibers. The previous three tree-wide phases gave weaker,
-global ordering at the cost of every node waiting for the slowest drain.
-**Rejected:** one merged stack in attachment order (a lazily created service
-would be released before the handlers that read it); phases (D3′).
-**Cost.** Two disciplines the type system cannot check: acquire before you
-fork what uses it (G2), and a value's release uses only what it injected
-(G3). Providing a body-owned resource on the same node points a dependency
-from the provided stack into the explicit stack; a lint rule flags it.
-DESIGN.md §2.4, §2.5.
+whose `lookup` creates it. Only "explicit before provided" makes G1 hold
+whatever the order of registration; LIFO within each stack gives dependency
+order wherever dependencies were acquired first (A6), by construction for DI
+values and by discipline for fibers. The previous three tree-wide phases
+gave weaker, global ordering at the cost of every node waiting for the
+slowest drain. **Rejected:** one merged stack in attachment order (a lazily
+created service would be released before the handlers that read it); phases
+(D3′). **Cost.** Three disciplines the type system cannot check: acquire
+before you fork what uses it (G2); a value's release, and a value's owned
+fibers, use only what the value injected or reads through its own node (G3);
+and the sibling rule: a subscriber does not depend on a sibling subscriber's
+liveness during its cleanup, since subscribers are interrupted together and
+in no order (G4), so what it needs then is unsubscribed and attached earlier
+(D19), or a provided value. Providing a body-owned resource on the same node
+points a dependency from the provided stack into the explicit stack;
+`ramme/no-owned-provider` flags it. DESIGN.md §2.4–§2.6.
 
 Settled while implementing it:
 
-- *The outcome is fixed at settling and amended once at completion* (plan
-  D-08). Classification by state runs when the body settles or freezes;
-  release and unconsumed errors are folded in once, when the node completes.
-  This is what makes `owner.outcome` readable in every release, so a
-  transaction entry can commit or roll back on its owner's outcome.
+- *One delivery reaches the subtree at once, and marks it before any
+  listener runs.* `abort()` marks every node it reaches delivered, then
+  fires their signals, then cuts their managed awaits (I9). A listener on
+  any of them, often foreign code reacting to an `AbortSignal`, therefore
+  sees the whole delivery: every node it can reach in the subtree already
+  reads as delivered, with the delivery's reason, so it cannot fork into a
+  node about to be interrupted as if it were not (the birth rule, D12,
+  applies), and an `abort(reason)` it makes on a child cannot replace the
+  child's reason with its own. **Rejected:** level-by-level propagation,
+  each parent forwarding as it handles its own signal, where what a
+  listener sees, and which reason a child records, depend on listener
+  order. The cost: delivery is two synchronous passes over the subtree, and
+  no listener runs until the whole subtree is marked.
+- *The outcome is fixed at settling and amended once at completion.*
+  Classification by state runs when the body settles or freezes; release
+  and unconsumed errors are folded in once, when the node completes. This
+  is what makes `owner.outcome` readable in every release, so a transaction
+  entry can commit or roll back on its owner's outcome; an outcome computed
+  only at completion would not exist until every release had run. The
+  price: a release reads the outcome from the body alone. A failure that an
+  earlier release or an unconsumed child adds is folded in after it, so a
+  transaction can commit on a node that then completes `failure`.
 - *A release is idempotent by its entry's state, and its promise exists
-  before any dispose code runs* (plan D-36). A second release of an entry
+  before any dispose code runs.* The entry is marked releasing, with a
+  fresh promise, before its release fiber starts; any release that finds it
+  releasing shares that promise, and `releaseAll()` re-checks each entry as
+  it reaches it instead of trusting its snapshot. A second release
   (`releaseAll()` racing `release(x)`, an `abort()` arriving mid-
-  `releaseAll()`, a dispose that synchronously re-enters its owner) finds
-  one release in flight and one promise to share (I2, C4, C7).
-- *`own(x)` with one argument is a no-op on an object this node already
-  owns; C8 is about a second release* (plan D-37). One argument asks "make
-  sure this node owns `x`", which is already true when a producer attached
-  it on the body's behalf, so `own(await pool.acquire())` reads as written;
-  `own(x, release)` asks to register a release, and a second one for one
-  object is `AlreadyOwnedError`. Cross-node duplicates of a passive object
-  are not policed: each owner runs its dispose once.
-- *Every node routes its final failure to its parent* (plan D-40). A child
-  context, a pool or a DI value's node whose release fails completes with
-  `failure`, and that failure is held by its parent exactly as a `'join'`
-  fiber's is, so "every unconsumed subscriber failure" surfaces and nothing
-  is lost; a delivered `close()`/`[Symbol.asyncDispose]()` on it consumes
-  it.
-- *An early release's error is unconsumed until `release(x)` delivers it*
-  (plan D-41). The error rejects that call only when the call's awaiter is
-  actually resumed; if it froze or never awaited, the error surfaces from
-  the owner's completion instead of nowhere. An owner whose release loop
-  ends while such an awaiter is still waiting completes only after the
-  awaiter is resumed or frozen, so the error is reported once (plan
-  D-123). The call counts as awaited from its creation, so an `await` or
-  combinator applied to it at once is waited for too, even when the
-  release has already failed synchronously (plan D-127).
+  `releaseAll()`, a dispose that synchronously re-enters its owner)
+  therefore finds one release in flight and one promise to share (I2, C4,
+  C7). Taking the promise from the release fiber's completion would fail
+  the last case: a synchronous dispose re-enters before the fiber's start
+  has returned, and would find the entry releasing with nothing to wait on.
+- *`own(x)` with one argument is a no-op on a passive object this node
+  already owns; C8 is about a second release.* One argument asks "make sure
+  this node owns `x`", which is already true when a producer attached it on
+  the body's behalf, so `own(await connections.acquire())` (a producer's
+  resource, DESIGN.md §2.6) reads as written and returns `x`; making every
+  second `own` throw would break that idiom for each producer that attaches
+  before it returns. `own(x, release)` asks to register a release, and a
+  second one for one object is `AlreadyOwnedError`. Cross-node duplicates of
+  a passive object are not policed: `A.own(x); B.own(x)` registers two
+  entries, each owner runs its dispose once, and `A.release(x)` leaves `B`'s
+  entry live. Refusing them would cost every `own()` a write to a
+  process-wide map from object to entry, to catch a mistake an idempotent
+  dispose makes harmless; nodes themselves stay single-owner (`own(node)` of
+  another node's entry is `NotOwnedError`, I1).
+- *Every node except a release fiber routes its final failure to its
+  parent.* A child context, a pool or a DI value's node whose release fails
+  completes with `failure`, and its parent holds that failure exactly as it
+  holds a `'join'` fiber's, so "every unconsumed subscriber failure"
+  includes it; a `close()` or `[Symbol.asyncDispose]()` on the node whose
+  awaiter resumes consumes it. Routing only fibers would lose the failure of
+  any such node nobody closed directly: its owner's release loop only waits
+  on its completion, which never rejects. A release fiber is excluded
+  because its failure is that of the entry it released, which the owner
+  already collects as a release failure (or, for an early release, holds for
+  `release(x)`); routing it too would report it twice.
+- *An early release's error is unconsumed until the awaiter of `release(x)`
+  or `releaseAll()` receives it.* The error rejects that call only when the
+  call's awaiter is actually resumed; if it froze or never awaited, the
+  error surfaces from the owner's completion instead of nowhere. An owner
+  whose release loop ends while such an awaiter is still waiting completes
+  only after the awaiter is resumed or frozen, so the error is reported
+  once, not by both the call and the owner. The wait is short, since every
+  entry in the call is released by then, and a call whose releases succeeded
+  is never waited for. Leaving the error out of the owner's outcome while
+  its awaiter waits would lose it if that awaiter froze after the owner
+  completed; waiting for every `releaseAll()` would hold owners that owe
+  nothing. The call counts as awaited from its creation: `await` and the
+  `Promise` combinators call `then` a microtask after they are evaluated,
+  and the loop could end in that gap and fold in the error the caller is
+  about to receive. Every call is counted, not only one that has already
+  failed, since an async release can fail inside the gap; a failing call
+  nobody awaits holds its owner for at most two microtasks.
 
 ### D17. Three error types beyond the core set
 
@@ -486,7 +1022,7 @@ exports `PoolFullError` (for `whenFull: 'reject'`), `OwnerInterrupt` (the
 abort reason ramme itself produces when a parent's body exits or an entry
 is released at its turn, so `signal.reason` is inspectable) and
 `FactoryReturnedUndefinedError extends CreationViolationError` (a factory
-returned `undefined`). (plan D-01)
+returned `undefined`).
 
 **Why.** `PoolClosedError` would be wrong for a pool that is open but full;
 a reason a listener can test with `instanceof` is better than a generic
@@ -495,33 +1031,114 @@ caller; and a subclass gives the undefined-factory rule a class without
 changing `instanceof CreationViolationError` checks. **Cost.** Three more
 names in the surface. DESIGN.md §4.12.
 
+### D24. Outcomes are decided by state
+
+A node's outcome is fixed when its body settles or freezes, by its state,
+never by inspecting what the body produced: a `freeze` or `restore` node
+delivered before that point is `aborted`; an `observe` node's outcome is
+its body's result; a bodiless node is `success` on `close()` and `aborted`
+on `abort()`. The release phase amends it once: a body `failure` plus
+release failures becomes `SuppressedError(releaseError, bodyError)`; a
+`success`, bodiless or `aborted` outcome plus release failures becomes
+`failure`.
+
+**Why.** An error cannot tell whether its body was interrupted. A body
+stopped mid-`fetch` may surface the fetch's `AbortError`, a `TimeoutError`,
+a library's wrapper of either, or nothing at all; a real failure may be an
+`AbortError` from an unrelated signal. The node's state knows whether it
+was interrupted before the body finished, so the outcome follows state, and
+an `aborted` outcome fires no failure destination (I12): what an
+interrupted body leaves behind is not a failure. The release amendment
+follows `await using`, where an error from disposal suppresses the body's:
+the release failure is primary because it is the newer problem and the one
+the owner would not otherwise see, and the body's failure stays reachable
+as `.suppressed`. **Rejected:** classifying by error type (an `AbortError`
+means aborted); keeping the body's failure primary, which hides a failing
+release behind the failure that led to it; ignoring release failures after
+an `aborted` body. **Cost.** A real failure that a `freeze` body's plain
+code produces after its delivery is classified `aborted` and reaches no
+one; work that must report failures during shutdown runs in `observe`
+mode. DESIGN.md §4.12.
+
 ## Integration
 
-### D5. The lookup-api bridge (retired)
+### D5. Library keys carry default factories; the lookup-api bridge is retired
 
-ramme no longer serves lookup-api contracts: there is no bridge, no
-`contractKey`/`contractProvider`, no `installContractResolver`, and
-`createRootContext()` installs nothing process-global. ramme has no runtime
-dependencies. What survives is lookup-api's one discipline, as a convention:
-**a key a library defines for its own consumption carries a default
+**A key a library defines for its own consumption carries a default
 factory**, so the library works when the application wires nothing, and
-the application overrides by providing the key.
+the application overrides by providing the key. ramme no longer serves
+lookup-api, a separate, dependency-free package through which a library
+could read ambient services without depending on any container: the
+library declared a *contract* (a named key with a fallback), and
+lookup-api answered it through a resolver that a container installed
+process-wide, or with the fallback when none was installed. ramme's side,
+the bridge from contracts to ramme keys (`contractKey`, `contractProvider`,
+and `installContractResolver`, which `createRootContext()` called), is
+removed: `createRootContext()` installs nothing process-global, and ramme
+has no runtime dependencies. The fallback survives as the convention
+above.
 
 **Why.** lookup-api existed so that a library could read ambient services
-without committing to ramme, through a neutral seam ramme would serve.
-There is no such library: every library in this ecosystem depends on ramme
-(D6′), and a neutral seam with one implementation is only an indirection,
-one that also cost ramme a hard dependency (and a `link:` publish blocker)
-and a process-global resolver installed from `createRootContext`.
-Everything lookup-api offered beyond the default-factory discipline is
-already a ramme feature, done better: a default is placed per tree instead
-of memoized per process; a test overrides with a child's providers instead
-of a frame; placement by view (D10′) keeps an override from being baked into
-a hoisted value, which is what lookup-api's frame masking was for; and
-attribution (answering only calls ramme can claim) is moot when there is
-one container. **Rejected:** keeping the bridge for hypothetical
-ramme-neutral libraries; unifying contract fallbacks with default factories
-(the bridge's deferred step), which would have kept the seam alive for no
-consumer. **Cost.** A library cannot be ramme-neutral and still resolve
-ambient services; if such a library appears, the seam can be rebuilt as a
-separate package over `registerContextStorage` and keys. DESIGN.md §8.
+without committing to ramme. There is no such library: every library in
+this ecosystem depends on ramme (D6′), and a neutral seam with one
+implementation is only an indirection, one that also cost ramme a runtime
+dependency and a process-global resolver. What lookup-api offered beyond
+the fallback, ramme does per tree: a default is placed per tree, not
+memoized once per process; a test overrides with a child's providers or its
+own root, not through a process-wide override; and placement by view
+(D10′) keeps an override from being baked into a hoisted default.
+**Rejected:** keeping the bridge for hypothetical ramme-neutral libraries;
+serving lookup-api's fallbacks as ramme default factories, which would have
+kept the seam alive for no consumer. **Cost.** A library cannot be
+ramme-neutral and still resolve ambient services; if such a library
+appears, the seam can be rebuilt as a separate package over
+`registerContextStorage` and keys. DESIGN.md §8.
+
+## Diagnostics
+
+### D29. Lifecycle events are a topic
+
+Observability goes through DI: `createTopic(name)` makes an injection key
+for a receiver function, and providing a receiver turns emission on. The
+node tree's events go to `NodeTopic`, whose receiver must be a
+construction-time provider on the root and is resolved once per root. A
+receiver is a synchronous sink; one that throws is reported with
+`console.error`, and its event is dropped.
+
+**Why.** A key makes emission cost nothing when nobody listens: without a
+receiver no event object is built and no stall timer armed, so the
+instrumentation can live in the core. It is also scoped like everything
+else (a test's root has its own receiver; two roots in one process share
+nothing) without a process-global registry. Resolving once per root keeps
+each emission to one field read, which is correct only if the answer
+cannot change, hence a construction-time provider on the root: a later
+`addProvider` would change an answer already given (D10′). A throwing
+receiver is reported and its event dropped because emission runs inside
+delivery and release steps that must not stop halfway (I2, I10); a bug in
+tracing must not break the lifecycle it traces. **Rejected:** a
+process-global event emitter; resolving the receiver per event; letting a
+receiver's error propagate. **Cost.** A receiver cannot be added to a
+running root: tracing a live process means providing, at startup, a
+receiver that can be switched on later. A receiver must not use ambient
+operations, since it runs in the emitting frame. DESIGN.md §5.
+
+### D30. Development mode is on unless production is declared
+
+Development mode is on unless `process.env.NODE_ENV === 'production'`, and
+always on where `process` does not exist. It adds the checks and warnings
+of DESIGN.md §4.4, `AsyncRunError` among them.
+
+**Why.** The checks catch misuse that is otherwise silent (an unsupported
+await shape, a promise returned to `run`, a late read that creates a value)
+and cost little, so the safe side is on, and `NODE_ENV` is the production
+switch servers and bundlers already set. `AsyncRunError` is one of them,
+not an error in every mode, because the misuse is one of shape, caught by
+the first development run of the code, and production keeps `run` a plain
+call that returns what `fn` returned. **Rejected:** off by default, which
+lets the misuse reach production in every project that did not opt in; a
+ramme-specific switch every application would have to learn and set;
+`AsyncRunError` thrown in every mode. **Cost.** Browser and worker bundles
+run every check and warning unless the bundler defines
+`process.env.NODE_ENV`, and so does a production server that does not set
+it; code never run in development can pass a promise through `run`
+unreported. DESIGN.md §4.4, §4.11.

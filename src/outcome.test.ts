@@ -1,6 +1,6 @@
-// outcome.test.ts — IMPLEMENTATION.md §6.1: outcome classification (§7.6),
-// release and body errors (§9.2), destinations (§7.4, §9.3, §9.4), the
-// frozen-awaiter group (D-38, D-40, D-41) and the I13 converse.
+// outcome.test.ts — outcome classification, release and body errors
+// (DESIGN.md §4.12), destinations (DESIGN.md §4.7, §4.12), the
+// frozen-awaiter group (D13, D16) and the I13 converse.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import type { Context, Fiber, Pool } from './context.js';
@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-describe('classification by state (§7.6, I13)', () => {
+describe('classification by state (DESIGN.md §4.12, I13)', () => {
   it('a delivered freeze body that returns is aborted', async () => {
     const app = createRootContext();
     const gate = deferred();
@@ -112,7 +112,7 @@ describe('classification by state (§7.6, I13)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('body and release errors (§9.2, Q2)', () => {
+describe('body and release errors (DESIGN.md §4.12)', () => {
   it('body failure + release failure → SuppressedError(releaseError, bodyError)', async () => {
     const app = createRootContext();
     const releaseError = new Error('release');
@@ -178,7 +178,7 @@ describe('body and release errors (§9.2, Q2)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('failure destinations (§7.4, §9.3, §9.4)', () => {
+describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
   it("an unconsumed 'join' failure surfaces once, from the parent's completion", async () => {
     const app = createRootContext();
     const err = new Error('unjoined');
@@ -236,7 +236,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     expect(app.outcome).toEqual({ status: 'failure', error: err });
   });
 
-  it("'link' interrupts a parent that is closing: its siblings are delivered and close() settles (D-79)", async () => {
+  it("'link' interrupts a parent that is closing: its siblings are delivered and close() settles (DESIGN.md §4.7)", async () => {
     const app = createRootContext();
     const c = app.child();
     const err = new Error('linked during close');
@@ -264,7 +264,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     await app.close();
   });
 
-  it("an owned fiber that fails after its owner's body exited under childrenOnExit 'await' interrupts the owner's other children (C5, D-79)", async () => {
+  it("an owned fiber that fails after its owner's body exited under childrenOnExit 'await' interrupts the owner's other children (C5, DESIGN.md §4.7)", async () => {
     const app = createRootContext();
     const err = new Error('owned, after the body');
     const gate = deferred();
@@ -297,7 +297,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     await expect(app.close()).rejects.toBe(err); // 'link': O's failure surfaces from its parent too
   });
 
-  it("'link' escalation into an observe parent whose body exited under childrenOnExit 'await' interrupts its freeze children too (D-79, D-90)", async () => {
+  it("'link' escalation into an observe parent whose body exited under childrenOnExit 'await' interrupts its freeze children too (DESIGN.md §4.7)", async () => {
     const app = createRootContext();
     const err = new Error('linked after an observe body exited');
     const gate = deferred();
@@ -328,7 +328,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     await expect(app.close()).rejects.toBe(err);
   });
 
-  it("a 'link' fiber whose body succeeds and whose release fails surfaces from a bodiless parent that completes inside the escalation (D-80)", async () => {
+  it("a 'link' fiber whose body succeeds and whose release fails surfaces from a bodiless parent that completes inside the escalation (I11)", async () => {
     const ev = events();
     const app = ev.root;
     const boom = new Error('release after success');
@@ -347,7 +347,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     expect(fEvents).not.toContain('node:delivered');
   });
 
-  it('an owned fiber whose release fails after a successful body surfaces from a child() owner that completes inside the escalation (C5, D-80)', async () => {
+  it('an owned fiber whose release fails after a successful body surfaces from a child() owner that completes inside the escalation (C5, I11)', async () => {
     const app = createRootContext();
     const boom = new Error('owned release');
     const owner = app.child();
@@ -363,10 +363,10 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     await tick();
     expect(owner.state).toBe('complete');
     expect(owner.outcome).toEqual({ status: 'failure', error: boom });
-    await expect(app.close()).rejects.toBe(boom); // the owner's failure is routed to app (D-40)
+    await expect(app.close()).rejects.toBe(boom); // the owner's failure is routed to app (D16)
   });
 
-  it('a handler that aborts its pool and then throws: the exception surfaces from the pool, which waits for the handler (D-80)', async () => {
+  it('a handler that aborts its pool and then throws: the exception surfaces from the pool, which waits for the handler (I11)', async () => {
     const app = createRootContext();
     const handlerError = new Error('handler threw after aborting its pool');
     const pool: Pool = app.pool({
@@ -386,7 +386,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
     await expect(app.close()).rejects.toBe(handlerError);
   });
 
-  it('a handler is called once with the final failure — a release failure after a successful body included — with the parent current (D-45)', async () => {
+  it('a handler is called once with the final failure — a release failure after a successful body included — with the parent current (DESIGN.md §4.7)', async () => {
     const app = createRootContext();
     const releaseError = new Error('release after success');
     const calls: { error: unknown; fiber: unknown; current: NodeImpl }[] = [];
@@ -472,7 +472,7 @@ describe('failure destinations (§7.4, §9.3, §9.4)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
+describe('frozen awaiters consume nothing (D13, D16)', () => {
   it("an owner frozen on join(f) while its owned f fails: the owner's outcome is failure, it surfaces exactly once, and f's record is consumed", async () => {
     const app = createRootContext();
     const err = new Error('owned f failed');
@@ -544,7 +544,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
     await tick();
     expect(Y.state).toBe('complete'); // frozen; work is the app's child, not Y's
     expect(Y.outcome?.status).toBe('aborted');
-    expect(work.lender).toBeUndefined(); // D-53: the lender completed first
+    expect(work.lender).toBeUndefined(); // the lender completed first and cleared the lending pair (A2)
     gate.resolve();
     await tick();
     await expect(app.close()).rejects.toBe(err);
@@ -634,7 +634,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
     await app.close();
   });
 
-  it("an early-release awaiter still waiting when its owner's loop finds both stacks empty is delivered the error, and the owner does not surface it (D-123)", async () => {
+  it("an early-release awaiter still waiting when its owner's loop finds both stacks empty is delivered the error, and the owner does not surface it (D16)", async () => {
     // release(x) on a bodiless owner whose loop registered on x's release before the caller awaited it
     const app = createRootContext();
     const M = app.child({ name: 'M' });
@@ -676,7 +676,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
     await expect(app.close()).resolves.toBeUndefined();
   });
 
-  it("an early release(x) made, and awaited at once, after its owner's loop was woken and before it re-reads is the caller's alone (D-127)", async () => {
+  it("an early release(x) made, and awaited at once, after its owner's loop was woken and before it re-reads is the caller's alone (D16)", async () => {
     const app = createRootContext();
     const M = app.child({ name: 'M' });
     const E1 = new Error('x1 failed');
@@ -686,7 +686,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
       throw E1;
     });
     const p1 = M.release(x1);
-    M.abort(); // the loop waits on x1, then for p1's awaiter (D-123)
+    M.abort(); // the loop waits on x1, then for p1's awaiter (D16)
     let c1: unknown;
     try {
       await p1;
@@ -723,7 +723,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
     await expect(app.close()).resolves.toBeUndefined();
   });
 
-  it("an early-release awaiter cut while its owner's loop waits for it leaves the error to the owner's completion (D-123)", async () => {
+  it("an early-release awaiter cut while its owner's loop waits for it leaves the error to the owner's completion (D16)", async () => {
     const app = createRootContext();
     const M = app.child({ name: 'M' });
     const err = new Error('a failed');
@@ -794,7 +794,7 @@ describe('frozen awaiters consume nothing (D-38, D-40, D-41)', () => {
     await expect(app2.close()).resolves.toBeUndefined();
   });
 
-  it('a second join(f) and a second [Symbol.asyncDispose]() on a failed fiber reject again with the same error (D-50)', async () => {
+  it('a second join(f) and a second [Symbol.asyncDispose]() on a failed fiber reject again with the same error (DESIGN.md §4.12)', async () => {
     const app = createRootContext();
     const err = new Error('failed fiber');
     let f!: Fiber<unknown>;
@@ -868,8 +868,8 @@ describe('I13 converse: the error is never inspected', () => {
 });
 
 // ---------------------------------------------------------------------------
-// NodeImpl.all/race are S1 code; S3's fiber.test.ts covers their full surface.
-describe('all and race outcomes (§7.5, D-14, D-51, D-73)', () => {
+// fiber.test.ts covers all/race's full surface.
+describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
   it('all: the tuple in order; every real failure in one AggregateError; FiberAbortedError for an aborted member and no failure', async () => {
     const app = createRootContext();
     const e1 = new Error('one');
@@ -881,7 +881,7 @@ describe('all and race outcomes (§7.5, D-14, D-51, D-73)', () => {
         .all([
           task(async () => {
             throw e1;
-          }, { onFailure: 'link' }), // forced to 'join' inside the group (D-51)
+          }, { onFailure: 'link' }), // forced to 'join' inside the group (DESIGN.md §4.8)
           task(async () => 'fine'),
           task(async () => {
             throw e2;
@@ -954,7 +954,7 @@ describe('all and race outcomes (§7.5, D-14, D-51, D-73)', () => {
     await app.close();
   });
 
-  it("a frozen all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (D-73)", async () => {
+  it("a frozen all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (DESIGN.md §4.8, D13)", async () => {
     const app = createRootContext();
     const err = new Error('early member failure');
     let P!: NodeImpl;

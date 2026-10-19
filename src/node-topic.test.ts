@@ -1,8 +1,14 @@
-// node-topic.test.ts — IMPLEMENTATION.md §6.1: the NodeTopic event stream
-// (PROPOSAL.md §10; §1.14, §4.14, D-32, D-42, D-52, D-54, D-55, D-74, D-76).
-// Also the ported lifecycle-events suite (§6.2): fiber events, entry naming,
-// release fibers, and FLIP 5 (§6.3): release fibers exist whether or not a
-// receiver is provided (§5.2); events exist only with a receiver (§10).
+// node-topic.test.ts — the NodeTopic event stream (DESIGN.md §5, D10′): the
+// receiver is a construction-time provider on the root, resolved once per root;
+// node:created is always a node's first event, and a pending value node emits
+// events before placement; node:stalled is armed for every delivered body that
+// has neither settled nor frozen (DESIGN.md §4.4); a throwing receiver is
+// reported with console.error and the event dropped; with no receiver, no stall
+// timer is armed.
+// Also ported from the pre-redesign lifecycle-events suite: fiber events, entry
+// naming, release fibers, and one FLIP (DESIGN.md §2.4, §5): release fibers
+// exist whether or not a receiver is provided; events exist only with a
+// receiver. FLIP marks a port whose expectation the redesign reversed.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { call, current, fork, interrupted, join, never, own, release, result, signal } from './ambient.js';
@@ -134,7 +140,7 @@ describe('event sequences per operation', () => {
     expect(ev.typesOf(frozenId)).not.toContain('node:settled');
   });
 
-  it("a DI value: node:created (kind 'value', stack 'none') → entry:registered for what its constructor owned → node:placed → node:started of its constructor's forks (D-42, D-52)", async () => {
+  it("a DI value: node:created (kind 'value', stack 'none') → entry:registered for what its constructor owned → node:placed → node:started of its constructor's forks (D10′)", async () => {
     const Name = createInjectionKey<string>('Name');
     class Service {
       name = inject(Name);
@@ -235,7 +241,7 @@ describe('delivery, freeze and stall events', () => {
     expect(Math.max(...deliveredSeqs)).toBeLessThan(frozenSeq); // every signal fires before any freeze (I9)
   });
 
-  it('node:stalled for a delivered freeze body that never reaches a managed await, and for a delivered observe body that never settles (D-55)', async () => {
+  it('node:stalled for a delivered freeze body that never reaches a managed await, and for a delivered observe body that never settles', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const ev = events({ stallWarningMs: 100 });
     const gate = deferred();
@@ -262,7 +268,7 @@ describe('delivery, freeze and stall events', () => {
   });
 });
 
-describe('order pins (D-54)', () => {
+describe('order pins (DESIGN.md §5)', () => {
   it('a born-delivered child emits node:created → node:delivered', async () => {
     const ev = events();
     const ids: number[] = [];
@@ -356,7 +362,7 @@ describe('fields', () => {
   });
 });
 
-describe('no receiver, no cost (§10, D-76)', () => {
+describe('no receiver, no cost (DESIGN.md §5)', () => {
   it('without a receiver nothing is emitted, the receiver is resolved once per root, and no stall timer is armed', async () => {
     const received: NodeEvent[] = [];
     const other = createRootContext({ providers: [valueProvider(NodeTopic, (e: NodeEvent) => void received.push(e))] });
@@ -397,7 +403,7 @@ describe('no receiver, no cost (§10, D-76)', () => {
     expect(log.length).toBeGreaterThan(20);
   });
 
-  it('FLIP 5 (§6.3): release fibers exist whether or not a receiver is provided; events exist only with one', async () => {
+  it('release fibers exist whether or not a receiver is provided; events exist only with one (DESIGN.md §5)', async () => {
     for (const withReceiver of [false, true]) {
       const log: NodeEvent[] = [];
       const root = createRootContext(
@@ -418,7 +424,7 @@ describe('no receiver, no cost (§10, D-76)', () => {
     }
   });
 
-  it('a throwing receiver is reported and the event dropped; the tree completes (D-74)', async () => {
+  it('a throwing receiver is reported and the event dropped; the tree completes', async () => {
     const errors: unknown[] = [];
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => void errors.push(args));
     const root = createRootContext({
@@ -438,7 +444,7 @@ describe('no receiver, no cost (§10, D-76)', () => {
   });
 });
 
-describe('ported lifecycle-events cases (§6.2)', () => {
+describe('ported lifecycle-events cases', () => {
   it('fork, call and join events of one tree, in order', async () => {
     const ev = events();
     let main: Context | undefined;
@@ -514,7 +520,7 @@ describe('ported lifecycle-events cases (§6.2)', () => {
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'failure']]);
   });
 
-  it('result(f) emits join:enter and join:leave on the awaiter, and a frozen awaiter no join:leave (ported "join:enter and join:leave for Fiber.result", D-124)', async () => {
+  it('result(f) emits join:enter and join:leave on the awaiter, and a frozen awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
     const ev = events();
     let awaiterId = -1;
     const ids: number[] = [];
@@ -559,7 +565,7 @@ describe('ported lifecycle-events cases (§6.2)', () => {
     expect(ev.typesOf(waiter.id)).toContain('node:frozen');
   });
 
-  it('join/result in method form on another node emit on the awaiting body, not on the receiver; with no body, on the receiver (§4.3, D-126)', async () => {
+  it('join/result in method form on another node emit on the awaiting body, not on the receiver; with no body, on the receiver (DESIGN.md §4.2)', async () => {
     const ev = events();
     const other = ev.root.child({ name: 'other' });
     let bodyId = -1;
@@ -584,7 +590,7 @@ describe('ported lifecycle-events cases (§6.2)', () => {
       [bodyId, ids[0], 'success'],
       [bodyId, ids[1], 'success'],
     ]);
-    // the same node a call made there lends (§7.11)
+    // the same node a call made there lends (DESIGN.md §4.9)
     expect(ev.of('node:lent').map((e) => [e.id, e.childId])).toEqual([[bodyId, lentChild]]);
     expect(ev.typesOf(other.id).filter((t) => t.startsWith('join:'))).toEqual([]);
     // no body awaits at top level: the events name the receiver
@@ -621,7 +627,7 @@ describe('ported lifecycle-events cases (§6.2)', () => {
       body = impl(current());
       const x = own({
         [Symbol.dispose]() {
-          const n = impl(current()); // the release fiber, not the body that called release(x) (I14, §5.2)
+          const n = impl(current()); // the release fiber, not the body that called release(x) (I14, DESIGN.md §2.4)
           ran = { id: n.id, kind: n.kind, parent: n.parent };
         },
       });

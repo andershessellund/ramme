@@ -47,8 +47,10 @@ What the example shows:
 
 - **A task is a definition; each run is a node.** `task(body)` is not
   callable. `call` runs it in a new child node and awaits it; `fork` runs it
-  concurrently; `all` runs several and returns the tuple. Whatever a run
-  attached is released when it finishes, however it finishes.
+  concurrently; `all` runs several and returns the tuple, and `race` runs
+  several and returns the first success. `fetchUser.bind(id)` is the same
+  task with its arguments fixed, the form `all` and `race` take. Whatever a
+  run attached is released when it finishes, however it finishes.
 - **`lookup` borrows, `inject` depends.** Inside a running task,
   `lookup(Api)` resolves from the current node. In a constructor (or a
   factory), `inject(Config)` declares a dependency of the value being built.
@@ -61,7 +63,9 @@ What the example shows:
 - **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
   the *current node*, which the platform carries across `await`.
 - **Shutdown lives on the root.** `await using app` releases the whole tree:
-  running work first, then the services it used.
+  running work first, then the services it used. `app.abort()` interrupts
+  the tree without waiting, and `await app.close()` lets running work
+  finish before releasing.
 
 ## A request
 
@@ -71,8 +75,8 @@ import { createInjectionKey, valueProvider, task, call, lookup, own } from 'ramm
 const Conn = createInjectionKey<Connection>('Conn');
 
 const handle = task(async (req: Request, res: Response) => {
-  const pool = lookup(Pool);                        // a service, shared, outlives every request
-  const lease = own(await pool.acquire());          // returned to the pool when the handler ends
+  const db = lookup(Connections);                   // your connection pool: a service, shared, outlives every request
+  const lease = own(await db.acquire());            // returned to the pool when the handler ends
   return call(task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] }));
 });
 
@@ -80,14 +84,22 @@ server.on('request', (req, res) =>
   app.fork(handle.with({ name: req.url, signal: req.signal, onFailure: (e) => respond500(res, e) }), req, res));
 ```
 
+- `Connections` is the application's own class, a service like `Api`
+  above; its `acquire()` returns a lease that can be released.
 - `work(req)` is a plain function. It runs in the call's node and reads the
   connection with `lookup(Conn)`.
 - The server's callback runs outside any node, so it names one:
   `app.fork(...)` attaches the handler to the root. This is the only place a
-  node is passed explicitly.
+  node is passed explicitly. `handle.with({...})` is the same task with
+  options for this use: a `name`, a `signal` that interrupts it, and
+  `onFailure`, where its failure goes.
 - When the client hangs up, `req.signal` interrupts the handler: it stops at
-  its next ramme await and never resumes, and the lease goes back to the
-  pool. An interruption is not a failure, so `onFailure` is not called.
+  its next *managed await* and never resumes, and the lease goes back to the
+  pool. A managed await is an `await` on a promise ramme returned (`call`,
+  `join`, `all`, `race`, `release`, …); `await fetch(...)` or a timer is
+  not one, which is why you pass `signal()` on ([DESIGN.md
+  §4.2](DESIGN.md#42-freeze-and-managed-awaits-d13)). An interruption is not
+  a failure, so `onFailure` is not called.
 - If `work` throws, `onFailure` gets the error once.
 
 ## Fork now, join later
@@ -142,7 +154,8 @@ ramme needs the platform's async context to carry the current node across
 Without one, every operation that needs the current node (the free
 functions, bodies, factories, releases) throws `NoCurrentNodeError`, and the
 message names the import. Code that only names nodes (`createRootContext()`,
-`root.child()`, `c.own(x)`) does not need it and runs, so a missing import
+`root.child()` to make a child node, `node.own(x)` to attach `x` to a named
+node) does not need it and runs, so a missing import
 can first show up when a body, a factory or a release runs, as late as
 shutdown. Import the adapter before anything else.
 

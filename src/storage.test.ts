@@ -1,8 +1,8 @@
-// The one test file that does not import './node.js' (D-57): it exercises the
+// The one test file that does not import './node.js': it exercises the
 // no-storage path first, then registers the adapter dynamically. `isolate:
 // true` and `pool: 'forks'` keep this file's module state its own.
 import { describe, it, expect, beforeAll } from 'vitest';
-// ambient.ts registers no adapter: its imports are context-storage and resource (§1.1).
+// ambient.ts registers no adapter: its imports are context-storage and resource.
 import { call, current, fork, lookup, own, signal } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import {
@@ -24,7 +24,7 @@ function fakeNode(id: number): NodeImpl {
   return { id } as unknown as NodeImpl;
 }
 
-/** The part of CreationState that the storage reads: `node()` materialises, `nodeIfCreated` peeks, `ended` hides the frame (D-107). */
+/** The part of CreationState that the storage reads: `node()` materialises, `nodeIfCreated` peeks, `ended` hides the frame (DESIGN.md §3.5). */
 function fakeCreation(valueNode: NodeImpl): CreationState & { made: number } {
   const cs = {
     made: 0,
@@ -67,7 +67,7 @@ describe('without a context storage adapter', () => {
     }
   });
 
-  it("current() and the other free functions throw NoCurrentNodeError naming 'ramme/node' (D-60(c))", () => {
+  it("current() and the other free functions throw NoCurrentNodeError naming 'ramme/node'", () => {
     const ops: Record<string, () => unknown> = {
       current: () => current(),
       signal: () => signal(),
@@ -162,7 +162,7 @@ describe("with 'ramme/node' registered", () => {
       queueMicrotask(() => inMicrotask.resolve(read()));
       void Promise.resolve().then(() => inReaction.resolve(read()));
       setTimeout(() => inTimer.resolve(read()), 0);
-      cs.ended = true; // ... and the creation ends when the factory returns (D-107)
+      cs.ended = true; // ... and the creation ends when the factory returns (DESIGN.md §3.5)
       expect(currentCreation()).toBeUndefined(); // from here on, even synchronously
     });
     expect(currentCreation()).toBeUndefined();
@@ -174,7 +174,7 @@ describe("with 'ramme/node' registered", () => {
     expect(cs.made).toBe(1);
   });
 
-  it('runInFrame(NO_NODE, fn) hides an outer frame inside fn, and a microtask queued there carries no frame (D-46)', async () => {
+  it('runInFrame(NO_NODE, fn) hides an outer frame inside fn, and a microtask queued there carries no frame (DESIGN.md §6)', async () => {
     expect(Object.isFrozen(NO_NODE)).toBe(true);
     const outer: Frame = { node: fakeNode(7), creation: undefined };
     const inMicrotask = deferred<Frame | undefined>();
@@ -196,7 +196,7 @@ describe("with 'ramme/node' registered", () => {
     expect(await inOuterMicrotask.promise).toBe(outer);
   });
 
-  it('a microtask queued under NO_NODE from a creation frame does not see the creation (I16, D-46)', async () => {
+  it('a microtask queued under NO_NODE from a creation frame does not see the creation (I16, DESIGN.md §6)', async () => {
     const cs = fakeCreation(fakeNode(8));
     const seen = deferred<CreationState | undefined>();
     runInFrame({ node: undefined, creation: cs }, () => {
