@@ -65,8 +65,17 @@
 // and rejects at once. A failure handler's await of such a sleep waits on a
 // timer of its own, to the same deadline, so the delivery that clears the
 // body's timer does not strand the handler.
+//
+// Every managed promise is also an op (DESIGN.md §4.14, D41): iterable, so a
+// generator body runs it with `yield*`. Its iterator yields a private
+// `InstructionImpl` once; the driver (driver.ts) subscribes to the op for the
+// body's node with `drive`, which is `thenFor`, so the predicates above decide
+// when a generator body is halted: what rejects an async body's await makes
+// the driver call the generator's `return()`. In this stage ops stay eager: a
+// verb starts its work when it is called, and `yield*` consumes it.
 // ---------------------------------------------------------------------------
 
+import type { Instruction, Op } from './context.js';
 import { NO_NODE, captureContext, currentFrame, hasStorage, peekCurrentNode, runDetached, runInFrame } from './context-storage.js';
 import type { ContextRunner, HandlerRun } from './context-storage.js';
 import { FiberAbortedError, InterruptedError } from './resource.js';
@@ -88,6 +97,14 @@ export interface FreezeTarget {
   /** Read only to name the node in the dev-mode foreign-awaiter warning (DESIGN.md §4.4) and in a rejection's message. */
   readonly id?: number;
   readonly name?: string | undefined;
+  /**
+   * An unwind fiber (U3, DESIGN.md §4.14): the awaiter of the ops a halted generator body's `finally` yields. Its
+   * resume steps consume nothing, as an applied awaiter's do, so what such a step hands the `finally` still folds into
+   * the node's outcome as a release failure.
+   */
+  readonly unwinding?: boolean;
+  /** The node an unwind fiber unwinds: its waits are that body's own, never a cross-body await. */
+  readonly unwindOf?: FreezeTarget | undefined;
 }
 
 /**
@@ -152,6 +169,12 @@ interface Cell {
   awaiter: FreezeTarget | undefined;
   /** The awaiter is a node other than the target: a rejection is `FiberAbortedError`, not `InterruptedError` (D39). */
   readonly foreign: boolean;
+  /**
+   * Set when the rejection that reaches the cell is the user source's own (a `wait(p)` whose `p` rejected), never
+   * one ramme made (an interruption, a resume step's failure); a driver's cell reads it, so a halted `finally` records
+   * only `p`'s failure as a release failure (DESIGN.md §4.14). Kept after the cell is emptied: a boolean holds nothing.
+   */
+  userFailed: boolean;
 }
 
 /** A cell's continuation, taken out of the cell before any user code runs. */
@@ -185,7 +208,7 @@ const reportedForeign = new WeakSet<FreezeTarget>();
  * for them. Top-level code (no awaiter) is not reported.
  */
 function checkAwaiter(t: FreezeTarget, cur: FreezeTarget | undefined): void {
-  if (cur === undefined || cur === t || !cur.hasBody || reportedForeign.has(t) || !devMode()) return;
+  if (cur === undefined || cur === t || cur.unwindOf === t || !cur.hasBody || reportedForeign.has(t) || !devMode()) return;
   reportedForeign.add(t);
   console.warn(
     `ramme: a managed promise created in the body of ${describeTarget(t)} is awaited by ${describeTarget(cur)}. ` +
@@ -197,6 +220,83 @@ function checkAwaiter(t: FreezeTarget, cur: FreezeTarget | undefined): void {
 /** An awaiter whose throw the classification discards (D24): a `freeze` or `restore` body delivered before it settled. */
 function discardsThrow(a: FreezeTarget | undefined): boolean {
   return a !== undefined && a.hasBody && a.applied;
+}
+
+/**
+ * The `applied` flag a resume step runs with (D39, A.3; DESIGN.md §4.14): an exempt await resumed in an applied body,
+ * or any await of an unwind fiber, a halted generator body's `finally` (U3): the step hands over the failure it would
+ * deliver and consumes nothing, so the holder's completion folds it in.
+ */
+function consumesNothing(exempt: boolean, a: FreezeTarget | undefined): boolean {
+  return a?.unwinding === true || (exempt && discardsThrow(a));
+}
+
+/** Dropping a driver's subscription (DESIGN.md §4.14): what an op's iterator `return()` calls. */
+export interface Subscription {
+  drop(): void;
+}
+
+/**
+ * @internal What an op's iterator yields to the driver (D41, decision 1): the op behind a brand no value outside ramme
+ * carries (`instanceof`, a class of this module), so `yield op` without the star, or any other yielded value, is told
+ * apart and answered with a `TypeError`. `sub` is the driver's subscription, which `return()` drops.
+ */
+export class InstructionImpl {
+  sub: Subscription | undefined = undefined;
+  constructor(readonly op: ManagedPromise<unknown, unknown>) {}
+}
+
+/** @internal The brand test the driver makes on every yielded value. */
+export function isInstruction(x: unknown): x is InstructionImpl {
+  return x instanceof InstructionImpl;
+}
+
+/**
+ * An op's iterator (DESIGN.md §4.14): `next()` yields the op's instruction once, then returns what the driver resumed
+ * it with; `throw(e)` rethrows `e`, so `yield*` hands the awaited work's failure to the body at the `yield*`; `return(v)`,
+ * which `yield*` forwards on a halt, drops the driver's subscription and returns `v`. One iterator per `yield*`; with
+ * eager ops each one subscribes to the same work.
+ */
+class OpIterator<T> implements Iterator<Instruction, T, unknown> {
+  #op: ManagedPromise<unknown, T> | undefined;
+  #ins: InstructionImpl | undefined = undefined;
+
+  constructor(op: ManagedPromise<unknown, T>) {
+    this.#op = op;
+  }
+
+  next(...[value]: [] | [unknown]): IteratorResult<Instruction, T> {
+    const op = this.#op;
+    if (op !== undefined) {
+      this.#op = undefined;
+      const ins = new InstructionImpl(op as ManagedPromise<unknown, unknown>);
+      this.#ins = ins;
+      return { done: false, value: ins as unknown as Instruction };
+    }
+    this.#ins = undefined;
+    return { done: true, value: value as T };
+  }
+
+  throw(error?: unknown): IteratorResult<Instruction, T> {
+    this.#drop();
+    throw error;
+  }
+
+  return(value?: unknown): IteratorResult<Instruction, T> {
+    this.#drop();
+    return { done: true, value: value as T };
+  }
+
+  [Symbol.iterator](): this {
+    return this;
+  }
+
+  #drop(): void {
+    this.#op = undefined;
+    const ins = this.#ins;
+    this.#ins = undefined;
+    ins?.sub?.drop();
+  }
 }
 
 /** What a rejected awaiter receives (D39): its own interruption, or, for an awaiter other than the creator, another node's abort. */
@@ -310,6 +410,11 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
   #sleep: { readonly end: number; readonly ms: number } | undefined = undefined;
   /** A `then` after the delivery has marked the source handled (I10). */
   #handled = false;
+  /**
+   * A wait for a user promise (`wait`, `managed`) whose source is no ramme op: the one wrapper whose source's own
+   * rejection is a foreign failure (DESIGN.md §4.14).
+   */
+  #overUserPromise = false;
   readonly #cells: Cell[] = [];
   readonly #onDeliveryFn = (): void => this.#onDelivery();
 
@@ -348,6 +453,73 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
     return mp;
   }
 
+  /**
+   * A wait for a user promise (`wait`, `wait(p, { abandon: true })`, `managed`): marked so the driver can tell its
+   * failure from ramme's (DESIGN.md §4.14). A ramme op as the source (`wait(db.close())`) is that op's own wait, not a
+   * foreign one: its failure is its resume step's, which its holder reports, so it is not marked, and the wrapper waits
+   * for what the op waits for (its `waitsFor`, for decision 12 and a failure handler's hold).
+   */
+  static overUserPromise<S>(target: FreezeTarget | undefined, source: Promise<S>): ManagedPromise<S, S> {
+    const op = source instanceof ManagedPromise ? (source as ManagedPromise<unknown, S>) : undefined;
+    const mp = new ManagedPromise<S, S>(target, source, undefined, op === undefined ? undefined : op.#waitsFor);
+    mp.#overUserPromise = op === undefined;
+    return mp;
+  }
+
+  /** @internal The node completions this op waits for; the driver tests it against a halted body's unwind fiber (D41, decision 12). */
+  get waitsFor(): WaitsFor | undefined {
+    return this.#waitsFor;
+  }
+
+  /** @internal The node whose delivery interrupts this op: the body that made it; `undefined` when nothing can. */
+  get target(): FreezeTarget | undefined {
+    return this.#target;
+  }
+
+  /**
+   * @internal This op, made by a body before its halt and yielded in its halted `finally`, as release work there (U3,
+   * DESIGN.md §4.14; transitional: ops are eager). The body's own interruption must never reach its `finally`, so the
+   * op is waited for as a failure handler's await of it is (`thenAsHandler`): untargeted, on the source a handler waits
+   * on (a sleep's own timer to the same deadline, since the halt cleared the body's; an `interrupted()`'s delivery),
+   * with the same resume step, `waitsFor` and watch. Release work is never interrupted, so it is this op itself.
+   * `undefined` when nothing can settle it any more (`never()`).
+   */
+  asReleaseWork(): ManagedPromise<S, T> | undefined {
+    if (this.#exempt) return this;
+    const sl = this.#sleep;
+    const src = sl !== undefined ? (timerUntil(sl.end, sl.ms) as Promise<unknown> as Promise<S>) : (this.#source ?? this.#signalSource);
+    if (src === undefined) return undefined;
+    const mp = new ManagedPromise<S, T>(undefined, src, this.#deliver, this.#waitsFor, this.#watch);
+    mp.#overUserPromise = this.#overUserPromise;
+    return mp;
+  }
+
+  /** An op (DESIGN.md §4.14): `yield* op` in a generator body yields its instruction to the driver and returns its value. */
+  [Symbol.iterator](): Iterator<Instruction, T, unknown> {
+    return new OpIterator<T>(this as unknown as ManagedPromise<unknown, T>);
+  }
+
+  /**
+   * @internal The driver's subscription for `awaiter` (DESIGN.md §4.14): `thenFor(awaiter, …)`, so the rejection's class,
+   * the halt shapes and the applied-awaiter rule follow that node as they would for its own await, with a handle whose
+   * `drop()` empties the cell unresumed. `onRejected` is told whether the rejection is a user source's own failure (a
+   * `wait(p)` whose `p` rejected), never one ramme made (an interruption, a resume step's throw). The callbacks must
+   * never throw. Call it outside every frame (A2).
+   */
+  drive(awaiter: FreezeTarget, onFulfilled: (value: T) => void, onRejected: (reason: unknown, userFailure: boolean) => void): Subscription {
+    let cell: Cell | undefined;
+    void this.#subscribe(awaiter, onFulfilled, (e: unknown) => onRejected(e, cell?.userFailed === true), (c) => (cell = c));
+    return { drop: () => this.#dropCell(cell) };
+  }
+
+  /** A driver's cell that is still live is emptied unresumed: nothing is delivered, and the failure stays with its holder (D16). */
+  #dropCell(cell: Cell | undefined): void {
+    if (cell === undefined || !cell.live) return;
+    this.#forget(cell);
+    empty(cell);
+    this.#watch?.settled();
+  }
+
   override then<R1 = T, R2 = never>(
     onFulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
     onRejected?: ((reason: any) => R2 | PromiseLike<R2>) | null,
@@ -375,6 +547,7 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
     cur: FreezeTarget | undefined,
     onFulfilled: ((value: T) => R1 | PromiseLike<R1>) | null | undefined,
     onRejected: ((reason: any) => R2 | PromiseLike<R2>) | null | undefined,
+    keep?: (cell: Cell) => void,
   ): Promise<R1 | R2> {
     const t = this.#target;
     if (t !== undefined) checkAwaiter(t, cur);
@@ -393,11 +566,13 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
       run: captureContext(),
       awaiter: cur,
       foreign: cur !== undefined && cur !== t,
+      userFailed: false,
     };
     const derived = new Promise<R1 | R2>((res, rej) => {
       cell.res = res as (value: unknown) => void;
       cell.rej = rej;
     });
+    keep?.(cell);
     const src = this.#source;
     const interruptible = this.#exempt ? undefined : t;
     if (interruptible?.applied === true) {
@@ -451,6 +626,7 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
       run: captureContext(),
       awaiter: undefined, // a handler is no body: never applied, and never rejected
       foreign: false,
+      userFailed: false,
     };
     const derived = new Promise<R1 | R2>((res, rej) => {
       cell.res = res as (value: unknown) => void;
@@ -492,9 +668,11 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
     this.#forget(cell);
     if (!cell.live) return; // rejected at the delivery: the reaction holds an empty cell and does nothing
     const foreign = cell.foreign;
-    // An exempt await resumed in an applied body consumes nothing (A.3). The awaiter is the one resumed, never the
-    // node the promise was made for: a cross-body awaiter decides by its own state, whatever the creator's.
-    const applied = this.#exempt && discardsThrow(cell.awaiter);
+    // An exempt await resumed in an applied body consumes nothing (A.3), nor does any await of an unwind fiber (U3,
+    // DESIGN.md §4.14). The awaiter is the one resumed, never the node the promise was made for: a cross-body awaiter
+    // decides by its own state, whatever the creator's.
+    const applied = consumesNothing(this.#exempt, cell.awaiter);
+    if (!fulfilled && this.#overUserPromise) cell.userFailed = true; // the user promise's own failure (DESIGN.md §4.14)
     const c = take(cell);
     const t = this.#target;
     const watch = this.#watch;
@@ -548,11 +726,12 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
 /**
  * DESIGN.md §4.2: the AWAITING body's node, never the receiver of a method call; `undefined` when nothing can be
  * interrupted. A failure handler's frame names the parent but is not its body (DESIGN.md §4.7): an await made there is
- * never rejected by the parent's delivery, so a handler the parent waits for resumes when its sources settle.
+ * never rejected by the parent's delivery, so a handler the parent waits for resumes when its sources settle. Nor is a
+ * halted generator body's `finally` (U3, DESIGN.md §4.14): its ops are release work, which its unwind fiber awaits.
  */
 function awaitTarget(): FreezeTarget | undefined {
   const f = currentFrame();
-  if (f === undefined || f.handler !== undefined) return undefined;
+  if (f === undefined || f.handler !== undefined || f.unwind !== undefined) return undefined;
   const cur: FreezeTarget | undefined = f.node ?? f.creation?.nodeIfCreated; // peekCurrentNode(), one frame read
   return cur !== undefined && cur.hasBody && cur.mode !== 'observe' && cur.kind !== 'release' ? cur : undefined;
 }
@@ -560,15 +739,34 @@ function awaitTarget(): FreezeTarget | undefined {
 /**
  * Every managed await ends here. The target is decided now, for `peekCurrentNode()` (top level, platform callbacks,
  * `ctx.run` frames, `observe` bodies, release fibers and failure handlers are never interrupted). `source` must never
- * reject, except for `managed(p)`, the one wrapper over a user promise.
+ * reject: a user promise goes through `managedUser` or `managedWait`.
  */
 export function managedFor<S, T = S>(
   source: Promise<S>,
   deliver?: Deliver<S, T>,
   waitsFor?: WaitsFor,
   watch?: AwaitWatch,
-): Promise<T> {
+): Op<T> {
   return new ManagedPromise<S, T>(awaitTarget(), source, deliver, waitsFor, watch);
+}
+
+/**
+ * `managed(p)` and `wait(p, { abandon: true })` (DESIGN.md §4.2, §4.14): the managed await over a user promise, whose
+ * rejection is delivered as it is. A delivered `freeze` or `restore` awaiter stops waiting at once: an async body is
+ * rejected, a generator body is halted; `p` runs on, and is marked handled once awaited (D13).
+ */
+export function managedUser<T>(source: Promise<T>): Op<T> {
+  return ManagedPromise.overUserPromise(awaitTarget(), source);
+}
+
+/**
+ * `wait(p)` (DESIGN.md §4.14, D41 decision 10): a wait for a user promise that no delivery stops. It has no target, as a
+ * release fiber's await has none, so a halted generator body is resumed when `p` settles and returned at its next
+ * `yield*`, and an async body's `await wait(p)` is a bare await of `p`. `p` is marked handled once awaited (D13). A ramme
+ * op as `p` is that op's own wait: its shape decides the halt, and its failure is not a foreign one (`overUserPromise`).
+ */
+export function managedWait<T>(source: Promise<T>): Op<T> {
+  return ManagedPromise.overUserPromise(undefined, source);
 }
 
 /**
@@ -581,7 +779,7 @@ export function managedCall<S, T>(
   deliver: Deliver<S, T>,
   onMark: (target: FreezeTarget) => boolean,
   waitsFor?: WaitsFor,
-): Promise<T> {
+): Op<T> {
   return new ManagedPromise<S, T>(awaitTarget(), source, deliver, waitsFor, undefined, { onMark });
 }
 
@@ -595,7 +793,7 @@ export function managedRelease<S, T = S>(
   deliver?: Deliver<S, T>,
   waitsFor?: WaitsFor,
   watch?: AwaitWatch,
-): Promise<T> {
+): Op<T> {
   const t = awaitTarget();
   return new ManagedPromise<S, T>(t, source, deliver, waitsFor, watch, { exempt: t !== undefined && exempt(t) });
 }
@@ -616,12 +814,11 @@ export function thenAsHandler(
 }
 
 /**
- * The `never()` shape (DESIGN.md §4.2): with a target, a wrapper with no source, which only the target's delivery
- * settles, by rejecting it; a fresh pending promise otherwise.
+ * The `never()` shape (DESIGN.md §4.2): a wrapper with no source, which only the target's delivery settles, by
+ * rejecting it; without a target nothing settles it, and it is still an op (DESIGN.md §4.14).
  */
-export function managedNever(): Promise<never> {
-  const t = awaitTarget();
-  return t !== undefined ? new ManagedPromise<never, never>(t, undefined) : neverPromise();
+export function managedNever(): Op<never> {
+  return new ManagedPromise<never, never>(awaitTarget(), undefined);
 }
 
 /** Run `fn` under `NO_NODE` (DESIGN.md §6): a timer ramme arms carries no node. */
@@ -640,7 +837,7 @@ function outsideFrames<R>(fn: () => R): R {
  * same deadline (`thenAsHandler`), which that delivery does not clear. Without a target (an `observe` body, a
  * release fiber, a failure handler, a `run` frame on a bodiless node, top level) the sleep runs its full duration.
  */
-export function managedSleep(ms: number): Promise<void> {
+export function managedSleep(ms: number): Op<void> {
   const t = awaitTarget();
   if (t !== undefined && t.applied) return ManagedPromise.sleep(t, undefined, ms);
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -678,7 +875,7 @@ function timerUntil(end: number, ms: number): Promise<void> {
  * reason, and a body awaiting another node's interrupt is resumed by that node's delivery and rejected only by its
  * own. `source` must never reject.
  */
-export function managedSignal<S>(source: Promise<S>, receiver: FreezeTarget): Promise<S> {
+export function managedSignal<S>(source: Promise<S>, receiver: FreezeTarget): Op<S> {
   const t = awaitTarget();
   return t !== undefined && t === receiver ? ManagedPromise.signalFor(t, source) : new ManagedPromise<S, S>(t, source);
 }

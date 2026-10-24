@@ -13,12 +13,18 @@
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
 //   `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`, `never`,
-//   `sleep`, `managed` and `runSync`, throw `CreationViolationError` first, before
-//   touching any node (DESIGN.md §3.2, §3.5, I16): a refused call never
-//   creates the value's node.
+//   `sleep`, `managed`, `wait` and `runSync`, throw `CreationViolationError`
+//   first, before touching any node (DESIGN.md §3.2, §3.5, I16): a refused call
+//   never creates the value's node. `promised` is in the first group: it runs
+//   nothing when it is made.
 //
 // Outside any node every one of them throws `NoCurrentNodeError`; when no
 // context storage is registered the message names `import 'ramme/node'`.
+//
+// Every waiting verb returns an `Op` (DESIGN.md §4.14): `yield*` it in a
+// generator body, or `await` it in async code. In a halted generator body's
+// `finally` the synchronous verbs still address the body's node (U3), while
+// the ops made there run on its unwind fiber.
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
@@ -29,6 +35,8 @@ import type {
   Fiber,
   LookupOptions,
   NodeOptions,
+  Op,
+  Operation,
   Outcome,
   Pool,
   PoolOptions,
@@ -104,19 +112,19 @@ export function lookup<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
  */
 export function own<T extends Disposable | AsyncDisposable>(resource: T): T;
 export function own<T extends object>(value: T, release: Release<T>): T;
-export function own<T extends object>(defer: T & (() => void | Promise<void>)): T;
+export function own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void>)): T;
 export function own(target: object, release?: Release<any>): object {
   const n = requireCurrent('own');
   return release === undefined ? n.own(target as Disposable) : n.own(target, release);
 }
 
-/** Release `value`, which the current node owns, now and exactly once (C7). A managed await. */
-export function release(value: object): Promise<void> {
+/** Release `value`, which the current node owns, now and exactly once (C7). A managed await; the release starts now. */
+export function release(value: object): Op<void> {
   return requireCurrent('release').release(value);
 }
 
-/** Release everything on the current node's explicit stack, top down. A managed await. */
-export function releaseAll(): Promise<void> {
+/** Release everything on the current node's explicit stack, top down. A managed await; the releases start now. */
+export function releaseAll(): Op<void> {
   return requireCurrent('releaseAll').releaseAll();
 }
 
@@ -128,7 +136,7 @@ export function fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
 }
 
 /** Run `t` in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
-export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
+export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T> {
   return requireBodyShaped('call').call(t, ...args);
 }
 
@@ -141,7 +149,7 @@ export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
  * caller sees its own in `signal().aborted`; the `freeze` caller's signal has not fired, so a deadline fallback
  * there tests the reason, the `TimeoutError` `DOMException` that `timeoutMs` delivers (DESIGN.md §4.5).
  */
-export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>> {
   return requireBodyShaped('attempt').attempt(t, ...args);
 }
 
@@ -150,12 +158,12 @@ export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...a
  * tuple of their values, or an `AggregateError` of every real failure (DESIGN.md §4.8).
  * `const T` keeps an array literal a tuple.
  */
-export function all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>> {
+export function all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>> {
   return requireBodyShaped('all').all(tasks, opts);
 }
 
 /** The first success among the tasks; the rest are aborted and awaited (DESIGN.md §4.8). */
-export function race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T> {
+export function race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Op<T> {
   return requireBodyShaped('race').race(tasks, opts);
 }
 
@@ -165,7 +173,7 @@ export function race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Prom
  * order. Failures and aborts are values; it never rejects on a member's account (DESIGN.md §4.8). `const T`
  * keeps an array literal a tuple.
  */
-export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<SettleResult<T>> {
+export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>> {
   return requireBodyShaped('settle').settle(tasks, opts);
 }
 
@@ -177,7 +185,7 @@ export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, o
  * settles (DESIGN.md §4.9). The current node completes after every shield it started, awaited or not; a shield's
  * failure is the awaiter's, or surfaces from the current node (I11).
  */
-export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
+export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T> {
   return requireBodyShaped('shield').shield(t, ...args);
 }
 
@@ -195,7 +203,7 @@ export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...ar
  *
  * @throws TypeError outside any shield, before anything runs: there is no owner to link to; use `attempt` there.
  */
-export function unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+export function unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>> {
   return requireBodyShaped('unshield').unshield(t, ...args);
 }
 
@@ -216,7 +224,7 @@ export function child(opts?: NodeOptions): Context {
  * rejected with `InterruptedError`, once the fiber has completed when it is subscribed below the body, at once for
  * any other fiber, such as an owned one (DESIGN.md §4.2).
  */
-export function join<T>(fiber: Fiber<T>): Promise<T> {
+export function join<T>(fiber: Fiber<T>): Op<T> {
   return requireBodyShaped('join').join(fiber);
 }
 
@@ -224,7 +232,7 @@ export function join<T>(fiber: Fiber<T>): Promise<T> {
  * The fiber's outcome, never its failure thrown. A managed await: an interrupted `freeze` or `restore` body awaiting
  * it is rejected with `InterruptedError` instead, when `join` would be (DESIGN.md §4.2).
  */
-export function result<T>(fiber: Fiber<T>): Promise<Outcome<T>> {
+export function result<T>(fiber: Fiber<T>): Op<Outcome<T>> {
   return requireBodyShaped('result').result(fiber);
 }
 
@@ -232,12 +240,12 @@ export function result<T>(fiber: Fiber<T>): Promise<Outcome<T>> {
  * Resolves with the reason when the current node is delivered, for `observe` bodies (DESIGN.md §4.3); in a
  * `freeze` or `restore` body that delivery rejects it with `InterruptedError` instead (DESIGN.md §4.2).
  */
-export function interrupted(): Promise<unknown> {
+export function interrupted(): Op<unknown> {
   return requireBodyShaped('interrupted').interrupted();
 }
 
 /** A managed await that never resolves: in a `freeze` or `restore` body, its node's delivery rejects it. */
-export function never(): Promise<never> {
+export function never(): Op<never> {
   return requireBodyShaped('never').never();
 }
 
@@ -246,13 +254,47 @@ export function never(): Promise<never> {
  * delivered `freeze` or `restore` body awaiting it is rejected with `InterruptedError`, and its timer is cleared
  * at that delivery; an `observe` body, a release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34).
  */
-export function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Op<void> {
   return requireBodyShaped('sleep').sleep(ms);
 }
 
-/** Make a bare promise a managed await: in a delivered `freeze` or `restore` body it rejects with `InterruptedError` (DESIGN.md §4.2). */
-export function managed<T>(promise: Promise<T>): Promise<T> {
+/**
+ * Make a bare promise a managed await: in a delivered `freeze` or `restore` body it rejects with `InterruptedError` (DESIGN.md §4.2).
+ *
+ * @deprecated `wait(promise, { abandon: true })` is the same wait (DESIGN.md §4.14); `managed` goes in a later stage of D41.
+ */
+export function managed<T>(promise: Promise<T>): Op<T> {
   return requireBodyShaped('managed').managed(promise);
+}
+
+/**
+ * Wait for a foreign promise in a body (DESIGN.md §4.14, D41): `yield* wait(p)` in a generator body, `await wait(p)`
+ * in an async one. A halted body's `wait(p)` lets `p` finish: the body is resumed with its value and returned at its
+ * next `yield*`, so `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of
+ * `p` then ends the body there and is discarded, as a halted body's throw is (in its halted `finally` it is a release
+ * failure). With `{ abandon: true }` it stops waiting at the halt instead, as `managed(p)` did, and `p` runs on, marked
+ * handled. `wait((signal) => fetch(url, { signal }))` hands the work the current node's `signal()`, so the halt aborts
+ * it; in a halted `finally` that is the unwind fiber's release deadline. A ramme op as `p` is that op's own wait. In an
+ * async body `wait(p)` is a bare await of `p`.
+ */
+export function wait<T>(promise: Promise<T> | ((signal: AbortSignal) => Promise<T>), opts?: { abandon?: boolean }): Op<T> {
+  return requireBodyShaped('wait').wait(promise, opts);
+}
+
+/**
+ * A library's async callback written as a body (DESIGN.md §4.14, D41): `db.transaction(promised(function* (tx) { … }))`.
+ * It captures the current node now; each call of the returned function runs `t` as a call-shaped child of that node,
+ * started synchronously and lending nothing, and returns a real promise: the value, the child's failure (consumed,
+ * unless the node is a halted body: then it surfaces at the node's completion), or `FiberAbortedError` when the child
+ * ended `aborted`. The node's interruption reaches the child as it reaches a callee: halted, its `finally` run, its
+ * promise rejected, before the library's own `finally`. Called during a creation, it rejects with
+ * `CreationViolationError` and runs nothing. `ctx.promised(t)` names the node, for a module-level entry point
+ * (`app.get('/x', root.promised(handle))`).
+ *
+ * @throws NoCurrentNodeError outside any node.
+ */
+export function promised<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>): (...args: A) => Promise<T> {
+  return requireCurrent('promised').promised(t);
 }
 
 // --- synchronous frames -------------------------------------------------------------

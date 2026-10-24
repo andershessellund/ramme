@@ -345,6 +345,61 @@ const save = task(async (order: Order) => {
 });
 ```
 
+## Generator bodies
+
+A body may also be a generator function, where every wait is a `yield*`.
+This is where ramme is heading (DECISIONS.md, D41): async bodies still work
+in this release, and both kinds need the platform setup below
+(`import 'ramme/node'`). In a generator body an interruption never arrives as
+an error. ramme *halts* the body by returning it at the `yield*` where it
+waits: no `catch` runs, every `finally` does, and a `finally` in the body
+itself may wait, as release work that runs to its end:
+
+```ts
+import { call, own, task, wait } from 'ramme';
+
+const transfer = task(function* (from: Id, to: Id, amount: number) {
+  const conn = own(yield* wait(pool.connect()), (c) => c.release()); // halted while connecting: still owned
+  yield* wait(conn.query('BEGIN'));
+  let done = false;
+  try {
+    yield* call(debit, conn, from, amount);        // halted here: debit stops and completes first
+    yield* call(credit, conn, to, amount);
+    yield* wait(conn.query('COMMIT'));
+    done = true;
+  } catch (e) {
+    throw translate(e);                            // a real failure of debit or credit, never the interruption
+  } finally {
+    if (!done) yield* wait(conn.query('ROLLBACK'));  // runs to its end; a failed ROLLBACK is reported
+  }
+});
+```
+
+Every ramme operation (`call`, `all`, `sleep`, `join`, …) is `yield*`ed in
+a generator body and `await`ed in async code. A foreign promise is
+`yield* wait(p)`: the halt lets `p` finish, so what it produced can still be
+owned, and `wait(p, { abandon: true })` stops waiting at once instead.
+`wait((signal) => fetch(url, { signal }))` hands the work the task's
+signal. A library that calls you back with an async function gets
+`promised(function* …)`, which runs your generator as a child of the current
+task and hands the library a real promise:
+
+```ts
+import { call, promised, task, wait } from 'ramme';
+
+const save = task(function* (order: Order) {
+  yield* wait(db.transaction(promised(function* (tx) {   // a child of this task per call
+    yield* call(insertOrder, tx, order);
+    yield* call(insertLines, tx, order.lines);
+  })));
+});
+```
+
+Interrupted mid-way, the callback is halted once `insertOrder` has stopped,
+its promise rejects, the database driver rolls back, and only then is `save`
+itself halted and its resources released. No `catch` in the callback can
+swallow the interruption, so nothing can let the database driver commit.
+
 ## The platform
 
 ramme needs the platform's async context to carry the current node across

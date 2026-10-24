@@ -472,7 +472,7 @@ describe('managed promises (DESIGN.md §4.2, D39)', () => {
     expect(mp).toBeInstanceOf(ManagedPromise); // the wrapper is alive, the callbacks are not
   });
 
-  it('(7) managedNever(): a sourceless wrapper for an awaiter that can be interrupted, a plain never-settling promise otherwise', async () => {
+  it('(7) managedNever(): a sourceless wrapper for an awaiter that can be interrupted, an untargeted never-settling one otherwise (an op either way, D41)', async () => {
     const t = new FakeTarget();
     const targeted = inFrame(t, () => managedNever());
     expect(targeted).toBeInstanceOf(ManagedPromise);
@@ -484,12 +484,14 @@ describe('managed promises (DESIGN.md §4.2, D39)', () => {
     t.apply();
     expect(await p).toBeInstanceOf(InterruptedError);
 
+    // Untargeted, it is still an op, so `yield* never()` runs in an observe body, a release fiber and a halted
+    // finally (DESIGN.md §4.14): nothing settles it, and it arms nothing on the node.
     const top = managedNever();
-    expect(top).not.toBeInstanceOf(ManagedPromise);
+    expect(typeof top[Symbol.iterator]).toBe('function');
     await neverSettles(top);
     const observe = new FakeTarget('observe');
     const obs = inFrame(observe, () => managedNever());
-    expect(obs).not.toBeInstanceOf(ManagedPromise);
+    expect(typeof obs[Symbol.iterator]).toBe('function');
     await neverSettles(obs);
     expect(observe.onApplied.size).toBe(0);
 

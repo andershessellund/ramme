@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import { attempt, call, fork } from './ambient.js';
-import type { Body, Fiber, Outcome, Task, TaskOptions } from './context.js';
+import type { Body, Fiber, Op, Outcome, Task, TaskOptions } from './context.js';
 import { TASK } from './internal-context.js';
 import type { TaskLike } from './internal-context.js';
 
@@ -30,12 +30,12 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
   }
 
   /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
-  call(...args: A): Promise<T> {
+  call(...args: A): Op<T> {
     return call<T, A>(this, ...args);
   }
 
   /** `call`, resolving with the outcome instead of throwing the failure (DESIGN.md §4.5). */
-  attempt(...args: A): Promise<Outcome<T>> {
+  attempt(...args: A): Op<Outcome<T>> {
     return attempt<T, A>(this, ...args);
   }
 
@@ -53,16 +53,18 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
 
 /**
  * Define a task: a body that can only be `fork`ed or `call`ed, never invoked
- * as a plain async function. Options live at the definition and are
- * overridden per use with `with`.
+ * as a plain function. Options live at the definition and are overridden per
+ * use with `with`. The body is a generator function, stepped by the driver
+ * (DESIGN.md §4.14), a synchronous function, or, until a later stage of D41,
+ * an async function.
  *
  * @example
- * const handle = task(async (req: Request) => {
+ * const handle = task(function* (req: Request) {
  *   const db = lookup(Db);
- *   return db.query(req);
+ *   return yield* wait(db.query(req));
  * });
- * await handle.call(req); // a new child node, joined
- * handle.fork(req);       // a new child node, concurrent
+ * yield* handle.call(req); // a new child node, joined
+ * handle.fork(req);        // a new child node, concurrent
  */
 export function task<A extends unknown[], T>(body: Body<T, A>, opts: TaskOptions = {}): Task<A, T> {
   if (typeof body !== 'function') throw new TypeError('task(body): body must be a function');

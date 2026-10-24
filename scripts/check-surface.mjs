@@ -25,6 +25,9 @@ const expected = new Map([
     'NodeState',
     'InterruptMode',
     'NodeOptions',
+    'Instruction',
+    'Operation',
+    'Op',
     'Body',
     'Release',
     'Provider',
@@ -70,6 +73,8 @@ const expected = new Map([
     'never',
     'sleep',
     'managed',
+    'wait',
+    'promised',
     'runSync',
   ].map((n) => [n, ['value', './ambient.js']]),
   ['inject', ['value', './inject.js']],
@@ -113,6 +118,8 @@ const coreNames = [
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
+  // generator bodies (DESIGN.md §4.14, D41): the ops, what they yield, and the two verbs for foreign async code
+  'Op', 'Operation', 'Instruction', 'wait', 'promised',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, results, outcomes

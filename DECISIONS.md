@@ -1373,6 +1373,9 @@ Settled while implementing it:
 
 ### D40. Why not generators (Effection)
 
+*Being reversed, in stages, by D41 (provisional); the async profile below is
+what this release still runs beside generator bodies.*
+
 Effection's operations are generators that its runtime drives (`yield*`
 where ramme has `await`): halting an operation makes the runtime call the
 generator's `return()`, so every `finally` runs, deterministically, and
@@ -1388,6 +1391,117 @@ rule (D39) do what the generator protocol does by construction. The trade:
 interop and plain JavaScript, against one hazard Effection does not have,
 the swallowed `catch`; generator-based operations would have made every
 library call an adapter and every `await` a `yield*`.
+
+### D41. Bodies are generators; the runtime is a driver *(provisional)*
+
+*Provisional: this entry records a decision that lands in stages, and is
+completed when the last stage lands, when D40 becomes its rejected
+alternative and D9′, D13 and D39 are superseded. The full record (the
+alternatives, the costs, the probes and the review) is PROPOSAL.md at the repository root while the stages land;
+the last stage deletes it and completes this entry.*
+
+A body is a generator function that the runtime steps, and every wait is a
+`yield*` of an op the driver sees, so an interruption no longer travels as
+a rejection: the driver halts the body by calling its generator's
+`return()`. A `finally` runs, and one in the body's own generator function
+may wait, as release work; a `catch` never sees the interruption; nothing is
+sticky. From stage 2 the current node is a synchronous slot the driver sets
+around each step, so bodies need no async context on any platform; until
+then the driver enters the node's frame through the registered storage.
+
+**Why.** Native `await` resumes a function in a job userland cannot wrap
+(D9′), so ramme learns of a body's waits only through the promises it hands
+out, and of the body's position only through the async context. Most of
+DESIGN.md §4.2's machinery compensates for that: bare and managed awaits,
+the supported-shapes list, sticky rejection and its exemptions,
+`InterruptedError` and the classification by awaiter, call-shaped deferral,
+lending, four async-only lint rules, and the storage adapters with their
+browser boundary. A generator body turns the halt into `return()`, the
+swallowed `catch` into an impossibility, and the adapters into a slot, while
+keeping D39's call-shaped halt (a `finally` around `yield* call(t)` runs
+after `t` has stopped) and D40's interop through one generic wrapper,
+`wait(p)`, and one for a library's async callback, `promised(body)`.
+
+**The stages.**
+
+1. *Ops and the driver* (this release): every waiting verb's result is an
+   `Op` (an `Operation`, iterable, and still the eager promise it was);
+   generator bodies, releases and failure handlers are accepted beside async
+   ones, and a returned op is driven; a generator body is halted by
+   `return()` where §4.2 rejects an async one, with its `finally` run as
+   release work on an unwind fiber (U3); `wait` and `promised`
+   (DESIGN.md §4.14). Each step runs in the node's frame through today's
+   `runInFrame`, so a generator body still needs `ramme/node` or
+   `ramme/async-context`, as an async one does.
+2. *Removal*: async bodies refused; `ramme/node`, `ramme/async-context`,
+   the storage registry, sticky rejection, `InterruptedError` and lending
+   deleted; work ops lazy, construction reading the slot; a codemod; the
+   lint rules replaced.
+3. *Expected failures*: `yield* fail(e)`, `E` inferred on tasks, a four-way
+   `Outcome`; `gen` retired.
+4. *`ramme/platform`*: `fetch`, `listen`, `nextFrame`, `each`; a browser
+   smoke test.
+5. *Documents and benchmark*: DESIGN.md and DECISIONS.md rewritten around
+   this entry, which is then completed.
+
+**Settled while implementing stage 1.**
+
+- *U3, not the two-node frame* (the proposal's open question 1): in a halted
+  `finally` every synchronous verb (`current()`, `signal()`, `lookup`,
+  `own`, `release`, `releaseAll`, `fork`) addresses the node, and only the
+  call-shaped ops made there (`call`, `attempt`, the groups, `promised`
+  callbacks) run on the unwind fiber. Re-run against U3, the review probes
+  that could have refuted it do not: a throw from the halted `finally` is
+  discarded (p6); `release(tx)` and `releaseAll()` there find the body's
+  entries (p7); a failure the `finally` catches from `release`, `call` or
+  `attempt` still folds in once (p8); a second `return()` while a helper's
+  `finally` is suspended skips the rest of that block, and the body's
+  `finally` still runs and waits (p9). U3's costs stand as stated: a `fork`
+  there is born delivered, and `signal()` there has fired, so cleanup that
+  needs a deadline writes `wait((signal) => p)`, which is handed the unwind
+  fiber's.
+- *A shield in a halted `finally` stays on the node*: a release fiber is
+  never born delivered nor cancelled whatever its parent, and on the node,
+  whose interruption has come, an `unshield` in it is skipped at once, as in
+  an interrupted async body's cleanup (D39). On the unwind fiber it would
+  have run, bounded only by the deadline.
+- *`Op<T>` extends `Promise<T>` in this stage*: every op is a `Promise`
+  subclass at run time, and existing code calls `.catch` on `join`, `all`,
+  `call` and `close()` results (a `PromiseLike`-only `Op` is 50 type errors
+  in the existing tests); stage 2 narrows it with laziness.
+- *`Body` keeps one function type with a union return*:
+  `Generator<Instruction, T, unknown> | Op<T> | Promise<T> | T`. Its members
+  are inferred before the bare `T`, so a generator that only throws is
+  `never` and a plain value is itself; a union of function types, or an
+  `Operation<T>` member, makes every iterable value (a string, an array, a
+  `Map`) infer as an operation, and refuses those plain bodies. The cost:
+  `Operation<T>` annotates only a helper that is `yield*`ed; a helper a body
+  returns (`task(() => helper(x))`), and a body that needs an annotation, is
+  typed `Generator<Instruction, T, unknown>`.
+- *`wait(op)` is the op's own wait*: a ramme op handed to `wait` (or
+  `managed`) keeps its shape, its `waitsFor` and its holder's report of its
+  failure, so `wait(db.close())` in a halted `finally` reports a failure once
+  and `wait(current().close())` is decision 12's return, as the op yielded
+  bare is. Only a user promise's own rejection is a foreign failure, and only
+  that is recorded on the unwind fiber; a rejection ramme makes (an
+  interruption) never is.
+- *An op made before the halt, yielded in the halted `finally`*
+  (transitional, eager ops): release work there, waited for as a failure
+  handler waits for it, never rejected with the body's own interruption; a
+  `never()` returns the generator with a warning. Lazy ops remove the case.
+- *Decision 12 covers a join of what only the unwound node's release ends*:
+  a `join` or `result`, in the halted `finally`, of an owned fork of the
+  node or an ancestor whose body has not ended waits for a release that waits
+  for that `finally`; PR #4's async profile rejected it at once, and the
+  generator profile returns there with the warning instead of deadlocking.
+- *`promised` follows A.3*: the callback's failure is consumed by its
+  promise unless the captured node is a halted body, so a failed ROLLBACK in
+  a halted callback surfaces from the node, as under `yield* call(body)`. A
+  call during a creation is refused (I16).
+- *The lost-halt detector* (decision 29): a lost halt gives the body the
+  halt's sentinel as the helper's `yield*` value, so dev mode's sentinel
+  reports any use of it, besides a finish with another value; a body that
+  only returns the sentinel unused goes unreported.
 
 ### D34. `sleep(ms)`: ramme's timer is a managed await
 

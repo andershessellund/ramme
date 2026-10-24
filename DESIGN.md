@@ -74,8 +74,9 @@ package.json names exactly those files). One of them is required (§6, D9′).
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
 | `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `InterruptedError`; `Result`, with its helpers in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| generator bodies (§4.14): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback | `Operation`, to type a helper that is only `yield*`ed, and `Instruction`, for `Generator<Instruction, T, unknown>`, the type of a helper a body returns and of an annotated body |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
-| `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
+| `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `managed` (deprecated: `wait(p, { abandon: true })`), `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
 ---
 
@@ -1197,6 +1198,21 @@ await call(async () => { … });      // inline task: block scope for temporarie
 fork(async () => { … });            // inline task: ad-hoc concurrency
 ```
 
+The same as generator bodies (§4.14), where every wait is a `yield*` and an
+interruption halts the body by `return()`:
+
+```ts
+function* parse(req: Request): Generator<Instruction, Order, unknown> { … }  // a helper: shares the caller's node
+const handle = task(function* (req: Request, res: Response) { … });           // a task: a new node per run
+
+yield* parse(req);                  // plain call, same node
+yield* handle.call(req, res);       // new child node, joined, lends the current node
+yield* handle.attempt(req, res);    // the same, resolving with the outcome instead of throwing
+handle.fork(req, res);              // new child node, concurrent
+yield* call(function* () { … });    // inline task: block scope for temporaries
+fork(function* () { … });           // inline task: ad-hoc concurrency
+```
+
 `task(body, opts)` returns a `Task`: `name`, `fork(...args)`,
 `call(...args)`, `attempt(...args)`, `with(opts)` (the same task with
 per-use option overrides) and `bind(...args)` (fixes the whole argument
@@ -1615,6 +1631,206 @@ Deliberately absent: a class or methods on the data, `match`, `tap`,
 combinator library; code that wants chaining wraps the plain object in
 neverthrow in one line.
 
+### 4.14 Generator bodies (D41, landing in stages)
+
+*Stage 1 of D41, which is provisional: generator bodies run beside async
+bodies. Later stages remove async bodies and the async-context adapters,
+make work ops lazy, and add typed expected failures; this section then
+replaces §4.2.*
+
+A body may be a **generator function**, which the runtime steps; every wait
+is a `yield*` of an **op**:
+
+```ts
+const transfer = task(function* (from: Id, to: Id, amount: number) {
+  const conn = own(yield* wait(pool.connect()), (c) => c.release());
+  yield* wait(conn.query('BEGIN'));
+  let done = false;
+  try {
+    yield* call(debit, conn, from, amount);        // halted here: debit is delivered, completes, then return()
+    yield* call(credit, conn, to, amount);
+    yield* wait(conn.query('COMMIT'));
+    done = true;
+  } finally {
+    if (!done) yield* wait(conn.query('ROLLBACK'));  // release work, run to its end; a failure is reported
+  }
+});
+```
+
+**Ops.** Every waiting verb returns an `Op<T>`: `call`, `attempt`, `all`,
+`race`, `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`,
+`never`, `sleep`, `wait`, `managed`, `release`, `releaseAll`, `close()` and
+`[Symbol.asyncDispose]()`, free and as methods. In a generator body
+`yield* op` is its `T`; in async code `await op` is what it was. An op is an
+`Operation<T>` (`[Symbol.iterator](): Iterator<Instruction, T, unknown>`),
+and so is a `Generator<Instruction, T, unknown>`, the type of a generator
+helper, which a body runs with `yield* helper(…)`. `Operation<T>` annotates a
+helper that is only `yield*`ed: `Body` has no `Operation<T>` arm (D41), so a
+helper a body returns, and a body that needs an annotation (a recursive
+one), is typed `Generator<Instruction, T, unknown>`. The iterator yields an
+opaque `Instruction` once, never the op itself, so `yield op` without the
+star is a type error in a body and a `TypeError` thrown back at that
+`yield`. In this stage every op is the eager promise it was: a verb starts
+its work when it is called, and `yield*` waits for it, so `Op<T>` also
+extends `Promise<T>`, calls still lend (§4.9), and an op made and never
+yielded runs anyway.
+
+**Bodies.** `task`, `fork`, `call`, `attempt`, `shield`, `unshield`, the
+members of `all`, `race` and `settle`, `pool.fork` and `promised` take a
+generator function as they take an async one. The runtime decides by what
+the body returned: an op is driven as the body's own `yield*` of it, in its
+frame, so `task(() => call(leaf))` and a body returning a helper's
+generator work (D41, decision 28); a generator object is driven; a thenable
+is waited for as an async body's promise; anything else is the value. A
+release may be a generator function or return an op (`own(tx, function*
+(tx) { … })`), driven in its release fiber, and so may a failure handler,
+driven in the handler's frame (§4.7), which it holds open until it ends,
+as a returned promise does; a handler is never halted. An `async function*`
+body is refused with a `TypeError`, and an `async function*` failure
+handler, which nothing could step, is a handler exception (§4.12) naming
+`function*`. A `Task` stays an object (I27).
+
+**The driver.** A step is one `next(v)`, `throw(e)` or `return()` on the
+body's iterator, run with the body's node current, so `current()`,
+`lookup`, `own` and `fork` in a step see the node, as do the ops it makes.
+The driver subscribes to a yielded op at that `yield*`, for the body's
+node, as an async body's `await` of the same managed promise would (§4.2),
+and resumes the body in the op's settle reaction: with its value, or with
+its failure thrown in at the `yield*`, consumed as that op's resume step
+consumes it. The body's own interruption is never thrown in.
+
+**The halt.** Where an async body's await would reject with its own
+`InterruptedError`, a generator body is **halted**: the driver calls its
+generator's `return()` at that `yield*`. Its `catch` never runs for it, its
+`finally` blocks do, innermost first, a helper's included, and nothing after
+the `yield*` runs. The shapes of §4.2 decide where:
+
+| The body waits on | Halted |
+| --- | --- |
+| `sleep`, `never`, its own `interrupted()`; a `join` or `result` of a fiber not subscribed below it; `wait(p, { abandon: true })`; a wait for its own completion or an ancestor's; a `close()` or `[Symbol.asyncDispose]()` of an unrelated node | at the delivery (a sleep's timer cleared) |
+| `call`, `attempt`, `unshield`, `all`, `race`, `settle`; a `join` or `result` of a fiber subscribed below it | once the awaited fiber has completed; the mark delivers a fiber the delivery missed |
+| release work (`release`, `releaseAll`, `close()` or `[Symbol.asyncDispose]()` of a node strictly below it, `shield`) | not at the delivery: on success it is resumed with the value and halted at its next `yield*`; on failure it is halted there, the failure unconsumed, surfacing at completion (§4.12) |
+| `wait(p)`, `wait((signal) => p)` | not at the delivery: on success, as release work is; on failure it is halted there and the failure is discarded, as a halted body's throw is (D24): the signalled work's `AbortError`, and any other failure of `p` |
+
+A body delivered inside its own step is halted at its next `yield*` as the
+table says for that op, and a body born delivered is stepped to its first
+`yield*` and halted there; in this stage the op it yields there has
+started, so a `call` made after the delivery starts a born-delivered child
+(§4.3), as in an async body. `observe` bodies are never halted; `restore`
+bodies are halted as `freeze` ones. A halted body's outcome is `aborted` by
+state, whatever its `finally` did (§4.12, D24).
+
+**The halted `finally`.** After the halt every `yield*` is in a `finally`,
+and one in the body's own generator function may wait: the driver runs it
+to its end as release work. At the halt it makes the body's **unwind
+fiber**, a release fiber of the node (kind `release`, `observe`, on no
+stack, its signal the node's `releaseTimeoutMs` deadline) that no delivery
+reaches, and goes on stepping the generator with the node current:
+
+- `current()`, `signal()`, `lookup`, `own`, `release`, `releaseAll`, `fork`,
+  `child` and `pool` address the node, so `finally { yield* release(tx) }`
+  finds the body's entry; a `fork` there is born delivered, and `signal()`
+  has fired.
+- `call`, `attempt`, `all`, `race`, `settle` and `promised` callbacks made
+  there run on the unwind fiber, so they are neither born delivered nor
+  cancelled. `wait((signal) => p)` there is handed the unwind fiber's
+  deadline. Nothing made there has a target to interrupt: `sleep` runs its
+  full duration. A `shield` stays a release fiber of the node, whose
+  interruption has come, so an `unshield` in it is skipped at once, as in
+  an interrupted async body's cleanup (§4.2).
+- The resume steps consume nothing: a failure is thrown into the `finally`,
+  which may catch it, and still folds into the outcome once, as a release
+  failure: from an entry's release (`release(tx)`), a child or group of the
+  unwind fiber, a shield, or a `wait(p)` whose `p` failed, which the driver
+  records on the unwind fiber. Only `p`'s own failure is recorded: a
+  rejection ramme makes (another body's interruption of an op it made) is
+  thrown in and recorded nowhere, and a ramme op waited for through `wait`
+  (`wait(db.close())`) is that op's own wait, whose failure its holder
+  reports. `aborted` plus a release failure is `failure` (§4.12). A plain
+  `throw` from the `finally` is discarded (D24). A `promised` callback made
+  before the halt and called there is born delivered, since its node has
+  been interrupted, so it rejects with `FiberAbortedError`; come back
+  through the library's promise, that is a failed `wait(p)`, a release
+  failure. Made in the `finally`, it captures the unwind fiber and runs as
+  release work.
+- The node holds its unwind fiber as it holds its shields: its release
+  (§2.4 step 2) and its completion wait for it, so the entries outlive the
+  cleanup that uses them, and `node:stalled` reports a slow one.
+- A finally-yield whose wait includes the node's own completion or an
+  ancestor's (`current()[Symbol.asyncDispose]()`, `root.release(current())`,
+  an owner's `close()`, a `join` of an ancestor fiber) would wait forever,
+  and so would a `join` or `result` of a fiber that no delivery reaches and
+  only such a completion's release ends (a fork the node or an ancestor owns,
+  `own(fork(t))`, whose body has not ended; `yield* release(f)` stops it
+  first): the generator is returned there instead, with a development-mode
+  warning (D41, decision 12).
+- Only the body's own generator function keeps the halt across a yield. A
+  `yield*` in a *helper's* `finally` loses it, by the `yield*` algorithm:
+  once the helper's `finally` ends, the body is resumed normally and runs
+  on, as release work, with its ops still on the unwind fiber, and the
+  helper's `yield*` gives it the halt's private sentinel as its value. In
+  development mode a generator that finishes with any value other than the
+  sentinel (a lost halt, or a `return` in a `finally`) is reported, naming
+  the body, and so is any use of the sentinel (reading a property,
+  converting, calling or iterating it: `rows.map(…)` after `const rows =
+  yield* query()`), once per halt (decision 29). A body that only passes the
+  sentinel on unused (`return rows`) is not reported, nor is anything in
+  production. Waiting cleanup in a helper belongs in an entry
+  (`own(value, function* (v) { … })`) or behind `yield* call(helper)`.
+
+**`wait`.** `wait(p)` waits for a foreign promise: the halt lets `p` finish,
+so a halted body is resumed with its value and halted at its next `yield*`,
+and `own(yield* wait(pool.connect()), …)` attaches a connection that was
+being acquired; code between that `yield*` and the next one runs, so guard
+it with `signal().aborted` where it must not. A failure of `p` after the
+halt ends the body there and is discarded, as a halted body's throw is
+(D24): the signalled fetch's `AbortError` is no failure, and neither is
+anything else `p` rejects with, so a library's own failed cleanup that
+rejects the promise the halted body waits for (a `db.transaction(…)` whose
+ROLLBACK fails) is reported nowhere; inside a `promised` callback the same
+ROLLBACK is the callback's release failure, which surfaces from the node.
+`wait(p, { abandon: true })` stops waiting at the halt, as `managed(p)`
+does, which it replaces; `p` runs on. `wait((signal) => p)` hands the work
+the current node's signal, so the halt aborts it. Either form marks `p`
+handled once waited for (I10), and a promise only ramme holds, the function
+form's or the `Promise.resolve` wrapper of a thenable that is not a
+promise, is marked handled when the wait is made, so a body halted before
+it yields that wait leaves no unhandled rejection. A ramme op as `p` is
+that op's own wait: its shape decides the halt and its failure is its
+holder's. In an async body `wait(p)` is a bare await of `p`.
+
+**`promised`.** `promised(t)` turns a body into a library's async callback:
+`db.transaction(promised(function* (tx) { … }))`. It captures the current
+node (`ctx.promised(t)` names one, for a module-level entry point). Each
+call of the returned function runs `t` as a call-shaped child of that node:
+a subscribed `'join'` fiber, started synchronously, lending nothing, since
+its caller is foreign code. It returns a real promise of the value, rejected
+with the child's failure, which it consumes unless the node is a halted body
+(whose throw is discarded, so the failure stays with the node and surfaces
+at its completion, as `call`'s resume step leaves it), with
+`FiberAbortedError` when the child ended `aborted`, or with
+`NodeCompletedError` once the node has completed. A call during a creation
+(a constructor calling its callback synchronously in a factory) rejects with
+`CreationViolationError` and runs nothing (I16). The node's interruption
+reaches the child as it reaches a callee: halted once its work has stopped,
+its `finally` run, its promise rejected, and only then the library's
+`finally` (a rollback), before the node releases what the library borrowed.
+
+**What this stage keeps.** Async bodies and §4.2 are unchanged, and a
+generator body may call an async task and the reverse. The node's frame is
+entered around each step through the registered context storage, so a
+generator body needs `ramme/node` or `ramme/async-context`, as an async one
+does (§6); the synchronous slot replaces the storage in a later stage.
+Lending (§4.9) applies to generator bodies as to async ones. An op made by
+a body before its halt and yielded in its halted `finally` was that body's
+own wait, which the halt interrupted: there it is release work, never
+rejected with the body's own interruption, waited for as a failure handler
+waits for it (§4.7): a sleep to its deadline, a `result(w)` for `w`'s
+outcome, a `wait(p, { abandon: true })` for `p`, an `interrupted()` with
+the reason; a `never()`, which nothing settles any more, returns the
+generator there with a development-mode warning. Lazy ops remove this case.
+`managed` is deprecated.
+
 ---
 
 ## 5. Observability (D29)
@@ -1699,14 +1915,15 @@ the two adapters (`ramme/node`, `ramme/async-context`) and `result.ts`
 | `scope.ts` | `Scope`, `createScope`, `SelfScope`, `RootScope`, `RequestScope` |
 | `topic.ts` | `createTopic`, `TopicReceiver` |
 | `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` (marked as a redirect through `inject.ts`) |
-| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, `Provider`, `Public`, … |
+| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, `Provider`, `Public`, `Op`, `Operation`, `Instruction`, … |
 | `result.ts` | the `ramme/result` subpath: free functions over plain `Result` objects, `gen`, `$` |
 | `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (the `own` overloads into one dispose) |
 | `context-storage.ts` | the `Frame`, the storage contract, `registerContextStorage`, current-frame reads |
 | `node.ts`, `async-context.ts` | the two storage adapters (side-effect entries) |
 | `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, the keys its factory injected itself, pin), resolve results (with the redirect an alias followed), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed) |
 | `stack.ts` | `Entry`, `Stack`: the two stacks, fixed positions, LIFO release order |
-| `managed.ts` | `ManagedPromise`: the target, sticky rejection (call-shaped deferral and its mark, the release-work exemption) and the resume step |
+| `managed.ts` | `ManagedPromise`: the target, sticky rejection (call-shaped deferral and its mark, the release-work exemption) and the resume step; every one is an op, whose iterator yields its `Instruction` (§4.14) |
+| `driver.ts` | the driver of generator bodies (§4.14): the step in the node's frame, the subscription at `yield*`, the halt by `return()`, the halted `finally` on the unwind fiber, the lost-halt report; a failure handler's generator |
 | `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, `shield` and `unshield`, lending, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, awaits, events |
 | `pool.ts` | the pool's concurrency queue and intake rules |
 | `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, alias redirects, decided markers, placement by view, the value node's creation and placement |
@@ -1727,7 +1944,9 @@ over `resource`, and the adapters register into `context-storage`;
 `context-storage`, `lifecycle-events`, `resource` and `scope`;
 `provider-util` over `inject`; `inject` and `pool` never import
 `node-impl` at runtime (nodes are created and placed through methods on the
-requester); `node-impl` sits over `context-key`, `context-storage`,
+requester); `driver` sits over `context-storage`, `inject` and `managed`,
+and never imports `node-impl` at runtime (it drives a node through its
+methods); `node-impl` sits over `context-key`, `context-storage`, `driver`,
 `inject`, `internal-context`, `managed`, `pool`, `resource` and `stack`;
 `ambient` over `context-storage` and `resource`; `fiber` over `ambient` and
 `internal-context`; `create-context` over `node-impl` and `scope`; `index`

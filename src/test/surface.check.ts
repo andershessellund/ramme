@@ -30,10 +30,28 @@ import {
   createTopic,
   current,
   factoryProvider,
+  promised,
   settle,
   valueProvider,
+  wait,
 } from 'ramme';
-import type { Context, Failure, Fiber, Outcome, Provider, Public, Result, SettleResult, Success, Task } from 'ramme';
+import type {
+  Body,
+  Context,
+  Failure,
+  Fiber,
+  Instruction,
+  Op,
+  Operation,
+  Outcome,
+  Provider,
+  Public,
+  Release,
+  Result,
+  SettleResult,
+  Success,
+  Task,
+} from 'ramme';
 import * as ramme from 'ramme';
 import {
   $,
@@ -62,9 +80,9 @@ export function d58(ctx: Context, a: Task<[number], number>, b: Task<[string], s
   const _viaFree = all([a.bind(1), b.bind('x')]);
   const _viaMethod = ctx.all([a.bind(1), b.bind('x')]);
   const _viaCurrent = current().all([b.bind('x'), a.bind(1)]);
-  type _Free = Expect<Equal<typeof _viaFree, Promise<[number, string]>>>;
-  type _Method = Expect<Equal<typeof _viaMethod, Promise<[number, string]>>>;
-  type _Current = Expect<Equal<typeof _viaCurrent, Promise<[string, number]>>>;
+  type _Free = Expect<Equal<typeof _viaFree, Op<[number, string]>>>;
+  type _Method = Expect<Equal<typeof _viaMethod, Op<[number, string]>>>;
+  type _Current = Expect<Equal<typeof _viaCurrent, Op<[string, number]>>>;
 }
 
 /** `attempt` resolves with the outcome, free, as a method and on a task (DESIGN.md §4.5). */
@@ -73,10 +91,10 @@ export function attemptTypes(ctx: Context, a: Task<[number], number>): void {
   const _viaMethod = ctx.attempt(a, 1);
   const _viaTask = a.attempt(1);
   const _inline = attempt(async (s: string) => s.length, 'x');
-  type _Free = Expect<Equal<typeof _viaFree, Promise<Outcome<number>>>>;
-  type _Method = Expect<Equal<typeof _viaMethod, Promise<Outcome<number>>>>;
-  type _Task = Expect<Equal<typeof _viaTask, Promise<Outcome<number>>>>;
-  type _Inline = Expect<Equal<typeof _inline, Promise<Outcome<number>>>>;
+  type _Free = Expect<Equal<typeof _viaFree, Op<Outcome<number>>>>;
+  type _Method = Expect<Equal<typeof _viaMethod, Op<Outcome<number>>>>;
+  type _Task = Expect<Equal<typeof _viaTask, Op<Outcome<number>>>>;
+  type _Inline = Expect<Equal<typeof _inline, Op<Outcome<number>>>>;
   // @ts-expect-error -- the arguments are the task's
   void attempt(a, 'not a number');
 }
@@ -86,9 +104,9 @@ export function settleTypes(ctx: Context, a: Task<[number], number>, b: Task<[st
   const _viaFree = settle([a.bind(1), b.bind('x')]);
   const _viaMethod = ctx.settle([b.bind('x'), a.bind(1)], { timeoutMs: 100 });
   const _empty = settle([]);
-  type _Free = Expect<Equal<typeof _viaFree, Promise<[Outcome<number>, Outcome<string>]>>>;
-  type _Method = Expect<Equal<typeof _viaMethod, Promise<[Outcome<string>, Outcome<number>]>>>;
-  type _Empty = Expect<Equal<typeof _empty, Promise<[]>>>;
+  type _Free = Expect<Equal<typeof _viaFree, Op<[Outcome<number>, Outcome<string>]>>>;
+  type _Method = Expect<Equal<typeof _viaMethod, Op<[Outcome<string>, Outcome<number>]>>>;
+  type _Empty = Expect<Equal<typeof _empty, Op<[]>>>;
   type _Named = Expect<Equal<SettleResult<[Task<[], number>]>, [Outcome<number>]>>;
 }
 
@@ -108,17 +126,17 @@ export const fiberNamespace = ramme.Fiber;
 type _RunSync = Expect<Equal<typeof ramme.runSync, <R, A extends unknown[]>(fn: (...args: A) => R, ...args: A) => R>>;
 
 /** `sleep` is a free function and a method, both a managed await over a timer (DESIGN.md §4.2, D34). */
-type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Promise<void>>>;
-type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Promise<void>>>;
+type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Op<void>>>;
+type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Op<void>>>;
 
 /** `shield` takes a task or a body as `call` does, free and as a method, and resolves with its value (D39, DESIGN.md §4.2). */
 export function shields(ctx: Context, t: Task<[number], string>): void {
   const _free = ramme.shield(t, 1);
   const _body = ramme.shield(async (n: number) => n * 2, 21);
   const _method = ctx.shield(async () => 'done');
-  type _Free = Expect<Equal<typeof _free, Promise<string>>>;
-  type _Body = Expect<Equal<typeof _body, Promise<number>>>;
-  type _Method = Expect<Equal<typeof _method, Promise<string>>>;
+  type _Free = Expect<Equal<typeof _free, Op<string>>>;
+  type _Body = Expect<Equal<typeof _body, Op<number>>>;
+  type _Method = Expect<Equal<typeof _method, Op<string>>>;
   // @ts-expect-error -- the arguments are the task's, as for call
   void ramme.shield(t, 'one');
 }
@@ -128,17 +146,89 @@ export function unshields(ctx: Context, t: Task<[number], string>): void {
   const _free = ramme.unshield(t, 1);
   const _body = ramme.unshield(async (n: number) => n * 2, 21);
   const _method = ctx.unshield(async () => 'done');
-  type _Free = Expect<Equal<typeof _free, Promise<Outcome<string>>>>;
-  type _Body = Expect<Equal<typeof _body, Promise<Outcome<number>>>>;
-  type _Method = Expect<Equal<typeof _method, Promise<Outcome<string>>>>;
+  type _Free = Expect<Equal<typeof _free, Op<Outcome<string>>>>;
+  type _Body = Expect<Equal<typeof _body, Op<Outcome<number>>>>;
+  type _Method = Expect<Equal<typeof _method, Op<Outcome<string>>>>;
   type _AsAttempt = Expect<Equal<typeof ramme.unshield, typeof ramme.attempt>>;
   // @ts-expect-error -- the arguments are the task's, as for attempt
   void ramme.unshield(t, 'one');
 }
 
+// --- Generator bodies (DESIGN.md §4.14, D41) ----------------------------------
+
+/** An op is an `Operation` and, in this stage, a promise; a generator helper is an `Operation`; `Awaited` reads the value. */
+type _OpIsOperation = Expect<Op<number> extends Operation<number> ? true : false>;
+type _OpIsPromise = Expect<Op<number> extends Promise<number> ? true : false>;
+type _HelperIsOperation = Expect<Generator<Instruction, number, unknown> extends Operation<number> ? true : false>;
+type _AwaitedOp = Expect<Equal<Awaited<Op<number>>, number>>;
+/** `Instruction` is opaque: no plain object is one. */
+type _Opaque = Expect<Not<{ readonly status: 'x' } extends Instruction ? true : false>>;
+
+/** `yield*` infers through verbs, helpers and tasks; a generator that only throws is `never`; a plain body is its value. */
+export function generatorBodies(t: Task<[string], number>): void {
+  function* helper(n: number) {
+    yield* ramme.sleep(n);
+    return String(n);
+  }
+  const _fromGenerator = ramme.task(function* (id: string) {
+    const n = yield* ramme.call(t, id);
+    return yield* helper(n);
+  });
+  const _throws = ramme.task(function* (): Generator<Instruction, never, unknown> {
+    throw new Error('x');
+  });
+  const _returnsOp = ramme.task(() => ramme.call(t, 'x'));
+  const _plain = ramme.task(() => [1, 2]);
+  const _text = ramme.task(() => 'x');
+  type _Helper = Expect<Equal<ReturnType<typeof helper>, Generator<Instruction, string, unknown>>>;
+  type _FromGenerator = Expect<Equal<typeof _fromGenerator, Task<[id: string], string>>>;
+  type _Throws = Expect<Equal<typeof _throws, Task<[], never>>>;
+  type _ReturnsOp = Expect<Equal<typeof _returnsOp, Task<[], number>>>;
+  type _Plain = Expect<Equal<typeof _plain, Task<[], number[]>>>;
+  type _Text = Expect<Equal<typeof _text, Task<[], string>>>;
+  type _BodyArm = Expect<(() => Generator<Instruction, string, unknown>) extends Body<string> ? true : false>;
+  // @ts-expect-error -- a yielded value that is not an op's instruction: `yield op` without the star
+  void ramme.task(function* () {
+    yield ramme.sleep(1);
+  });
+}
+
+/** `wait` takes a promise or a function of the signal; `promised` keeps the arguments and returns a real promise. */
+export function waitAndPromised(ctx: Context): void {
+  const _w = wait(Promise.resolve(1));
+  const _ws = wait((s: AbortSignal) => Promise.resolve(s.aborted), { abandon: true });
+  const _wm = ctx.wait(Promise.resolve('x'));
+  const _p = promised(function* (tx: string, n: number) {
+    yield* ramme.sleep(n);
+    return tx.length;
+  });
+  const _pm = ctx.promised(async () => true);
+  type _W = Expect<Equal<typeof _w, Op<number>>>;
+  type _Ws = Expect<Equal<typeof _ws, Op<boolean>>>;
+  type _Wm = Expect<Equal<typeof _wm, Op<string>>>;
+  type _P = Expect<Equal<typeof _p, (tx: string, n: number) => Promise<number>>>;
+  type _Pm = Expect<Equal<typeof _pm, () => Promise<boolean>>>;
+}
+
+/** A release may be a generator function or return an op; a failure handler may be a generator function. */
+export function generatorReleases(ctx: Context): void {
+  const _gen: Release<{ id: number }> = function* (v) {
+    yield* ramme.sleep(v.id);
+  };
+  const _op: Release<object> = () => ramme.sleep(1);
+  ctx.own({ id: 1 }, function* (v) {
+    yield* ramme.sleep(v.id);
+  });
+  void ramme.task(() => 1, {
+    onFailure: function* (e) {
+      yield* ramme.sleep(e instanceof Error ? 1 : 2);
+    },
+  });
+}
+
 /**
- * The core's values, exactly: 57 of the 86 names the surface check lists (scripts/check-surface.mjs), which also
- * checks the 29 types, which a namespace object does not carry.
+ * The core's values, exactly: 59 of the 91 names the surface check lists (scripts/check-surface.mjs), which also
+ * checks the 32 types, which a namespace object does not carry.
  */
 type _CoreValues = Expect<
   Equal<
@@ -146,7 +236,7 @@ type _CoreValues = Expect<
     | 'createRootContext' | 'task'
     | 'current' | 'signal' | 'lookup' | 'own' | 'release' | 'releaseAll' | 'fork' | 'call' | 'attempt' | 'all'
     | 'race' | 'settle' | 'shield' | 'unshield' | 'pool' | 'child' | 'join' | 'result' | 'interrupted' | 'never'
-    | 'sleep' | 'managed' | 'runSync'
+    | 'sleep' | 'managed' | 'wait' | 'promised' | 'runSync'
     | 'inject' | 'ContextKey'
     | 'NoCurrentNodeError' | 'NodeCompletedError' | 'PendingNodeError' | 'NotOwnedError' | 'AlreadyOwnedError'
     | 'UnawaitedCallError' | 'FiberNotAwaitableError' | 'FiberAbortedError' | 'InterruptedError' | 'PoolClosedError'
@@ -437,7 +527,7 @@ export function fromThrowingTypes(fiber: Fiber<number>): void {
 /** `attempt` on a task returning a `Result` is two layers read with one vocabulary (DESIGN.md §4.12). */
 export function attemptResult(t: Task<[string], Result<User, UserNotFound>>): void {
   const _o = attempt(t, 'id');
-  type _O = Expect<Equal<typeof _o, Promise<Outcome<Result<User, UserNotFound>>>>>;
+  type _O = Expect<Equal<typeof _o, Op<Outcome<Result<User, UserNotFound>>>>>;
 }
 
 // ---------------------------------------------------------------------------

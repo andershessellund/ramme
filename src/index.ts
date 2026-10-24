@@ -6,6 +6,9 @@ export type {
   NodeState,
   InterruptMode,
   NodeOptions,
+  Instruction,
+  Operation,
+  Op,
   Body,
   Release,
   Provider,
@@ -51,6 +54,8 @@ export {
   never,
   sleep,
   managed,
+  wait,
+  promised,
   runSync,
 } from './ambient.js';
 export { inject, ContextKey } from './inject.js';

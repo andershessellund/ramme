@@ -1,13 +1,45 @@
 // ---------------------------------------------------------------------------
-// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.8, §4.10), and
+// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.8, §4.10), the
+// operations a generator body runs with `yield*` (DESIGN.md §4.14, D41), and
 // `Result`, which `Outcome` extends with `aborted` (DESIGN.md §4.12, D38).
 //
 // Types only: the one implementation of every interface here is `NodeImpl`
-// (node-impl.ts); tasks are `TaskImpl` (fiber.ts).
+// (node-impl.ts); tasks are `TaskImpl` (fiber.ts); every `Op` is a
+// `ManagedPromise` (managed.ts).
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
 import type { Scope } from './scope.js';
+
+/** The brand of an `Instruction`. Declared only: no value outside ramme carries it. */
+declare const INSTRUCTION: unique symbol;
+
+/**
+ * What an op yields to the driver that steps a generator body (DESIGN.md §4.14, D41): an opaque record, never the op
+ * itself, so `yield op` without the star is a type error in a body and a `TypeError` thrown back at run time. Exported
+ * so that a library's generator helper can name its type (`Generator<Instruction, T, unknown>`).
+ */
+export interface Instruction {
+  readonly [INSTRUCTION]: true;
+}
+
+/**
+ * Anything a generator body runs with `yield*` to get a `T` (DESIGN.md §4.14): an op, or a generator helper, since a
+ * `Generator<Instruction, T, unknown>` is an `Operation<T>`. The type to annotate a helper that is only `yield*`ed
+ * with. `Body` has no `Operation<T>` arm (D41), so a helper a body returns (`task(() => helper(x))`), and a body that
+ * needs an annotation, is typed `Generator<Instruction, T, unknown>`.
+ */
+export interface Operation<T> {
+  [Symbol.iterator](): Iterator<Instruction, T, unknown>;
+}
+
+/**
+ * What every waiting verb returns (DESIGN.md §4.14): an `Operation<T>`, run by `yield* op` in a generator body, which
+ * is also awaitable from async code. Transitional (D41, stage 1): every op is still the eager promise it was, a
+ * `Promise` subclass that started its work when it was made, so `Op<T>` extends `Promise<T>`; a later stage makes work
+ * ops lazy and narrows this to `PromiseLike<T>`.
+ */
+export interface Op<T> extends Operation<T>, Promise<T> {}
 
 /** `pending` exists only for a DI value's node before placement (DESIGN.md §3.3). */
 export type NodeState = 'pending' | 'running' | 'settling' | 'releasing' | 'complete';
@@ -45,11 +77,19 @@ export interface NodeOptions {
   captureAutoScoped?: boolean;
 }
 
-/** An async function run in a node. Run in the current node by calling it, or in a new node through a task. */
-export type Body<T, A extends unknown[] = []> = (...args: A) => Promise<T> | T;
+/**
+ * What a node runs (DESIGN.md §4.5, §4.14): a generator function, stepped by the driver, every wait a `yield*` of an
+ * op; a synchronous function, whose returned generator or op is driven as the body (D41, decision 28); or, until a
+ * later stage of D41 removes it, an async function. One function type with a union return, as before: the generator
+ * and op members are matched first, so a generator that only throws infers `never` and a plain value infers itself.
+ */
+export type Body<T, A extends unknown[] = []> = (...args: A) => Generator<Instruction, T, unknown> | Op<T> | Promise<T> | T;
 
-/** The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). */
-export type Release<T> = (value: T) => void | Promise<void>;
+/**
+ * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). A generator
+ * function, or a function returning an op, is driven in the release fiber (DESIGN.md §4.14).
+ */
+export type Release<T> = (value: T) => void | Promise<void> | Operation<void>;
 
 /**
  * A binding of `key` on the node it is registered on (`providers`, `addProvider`). Its value is stored on that
@@ -107,7 +147,8 @@ export type Outcome<T> = Result<T, unknown> | { readonly status: 'aborted'; read
  * `pool` there, even while the parent's body awaits a call. If it returns a promise, the parent stays open
  * until that settles, and a rejection, like a throw, surfaces from the parent's completion. A
  * handler that awaits the parent's own completion or an ancestor's (`app.close()`, `join`) does not hold
- * the parent open, so `onFailure: () => app.close()` shuts the app down.
+ * the parent open, so `onFailure: () => app.close()` shuts the app down. A generator function handler is driven with
+ * the parent current at every step, and holds the parent until it ends, as a returned promise does (DESIGN.md §4.14).
  */
 export type FailureDestination = 'join' | 'link' | ((error: unknown, fiber: Fiber<unknown>) => void);
 
@@ -131,21 +172,21 @@ export interface Task<A extends unknown[], T> {
   /** Run in a new child of the current node, concurrently. */
   fork(...args: A): Fiber<T>;
   /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
-  call(...args: A): Promise<T>;
+  call(...args: A): Op<T>;
   /** `call`, resolving with the outcome: a failure is delivered as a value, never thrown (DESIGN.md §4.5). */
-  attempt(...args: A): Promise<Outcome<T>>;
+  attempt(...args: A): Op<Outcome<T>>;
   /** Per-use option overrides. */
   with(opts: TaskOptions): Task<A, T>;
   /** Partial application; what `all`, `race`, `settle` and pools take. */
   bind(...args: A): Task<[], T>;
 }
 
-/** The tuple of the tasks' values, in order; `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>`. */
+/** The tuple of the tasks' values, in order; `all([a.bind(1), b.bind('x')])` is `Op<[A, B]>`. */
 export type AllResult<T extends readonly Task<[], unknown>[]> = {
   -readonly [K in keyof T]: T[K] extends Task<[], infer U> ? Awaited<U> : never;
 };
 
-/** The tuple of the tasks' outcomes, in order; `settle([a.bind(1), b.bind('x')])` is `Promise<[Outcome<A>, Outcome<B>]>` (DESIGN.md §4.8). */
+/** The tuple of the tasks' outcomes, in order; `settle([a.bind(1), b.bind('x')])` is `Op<[Outcome<A>, Outcome<B>]>` (DESIGN.md §4.8). */
 export type SettleResult<T extends readonly Task<[], unknown>[]> = {
   -readonly [K in keyof T]: T[K] extends Task<[], infer U> ? Outcome<Awaited<U>> : never;
 };
@@ -196,28 +237,28 @@ export interface Context {
   own<T extends Disposable | AsyncDisposable>(resource: T): T;
   /** Sugar: attach `value` with a release function. */
   own<T extends object>(value: T, release: Release<T>): T;
-  /** Sugar: attach a deferred function, run at release. */
-  own<T extends object>(defer: T & (() => void | Promise<void>)): T;
+  /** Sugar: attach a deferred function, run at release; a generator function is driven there (DESIGN.md §4.14). */
+  own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void>)): T;
   /** Release `value` now, exactly once (C7). */
-  release(value: object): Promise<void>;
-  releaseAll(): Promise<void>;
+  release(value: object): Op<void>;
+  releaseAll(): Op<void>;
 
   // --- running bodies in a child of THIS node (DESIGN.md §4.5) ---
   fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Fiber<T>;
-  call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
+  call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T>;
   /**
    * `call` with the outcome delivered as a value: the child's failure is consumed, never thrown. An interrupted
    * `freeze` or `restore` caller is rejected here with `InterruptedError` as on `call`, so `aborted` describes the
    * child's own abort, unless the child is `restore`: it also hears an `observe` caller's interruption, and an
    * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted` (DESIGN.md §4.5).
    */
-  attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
+  attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>>;
   /**
    * Run `t` in a release fiber of this node and await it: release work, which no interruption rejects (D39,
    * DESIGN.md §4.2). It lends the current node as `call` does, until it completes or that node's body settles;
    * this node completes after it, awaited or not, and is the owner an `unshield` inside it follows.
    */
-  shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
+  shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T>;
   /**
    * A hole in the enclosing shield (D39, DESIGN.md §4.2): `attempt` on this node, whose child is also linked to the
    * signal of the shield's owner, the node the nearest `shield` at or above this node runs on (its release fiber's
@@ -225,27 +266,45 @@ export interface Context {
    * ends `aborted`; an `observe` hole hears it through `signal()`. One that already came skips the hole, and the
    * outcome is a value. `TypeError` outside any shield.
    */
-  unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
-  /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>` (DESIGN.md §4.8). */
-  all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>>;
-  race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T>;
+  unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>>;
+  /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Op<[A, B]>` (DESIGN.md §4.8). */
+  all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>>;
+  race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Op<T>;
   /** `all` resolving with every outcome instead of rejecting: waits for every task, as `all` does, and resolves with their outcomes in order; never rejects on a member's account (DESIGN.md §4.8). */
-  settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<SettleResult<T>>;
+  settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>>;
   pool(opts: PoolOptions): Pool;
   child(opts?: NodeOptions): Context;
 
   // --- awaiting; the target is the awaiting body's node, current(), if any (DESIGN.md §4.2) ---
-  join<T>(fiber: Fiber<T>): Promise<T>;
-  result<T>(fiber: Fiber<T>): Promise<Outcome<T>>;
-  interrupted(): Promise<unknown>;
-  never(): Promise<never>;
+  join<T>(fiber: Fiber<T>): Op<T>;
+  result<T>(fiber: Fiber<T>): Op<Outcome<T>>;
+  interrupted(): Op<unknown>;
+  never(): Op<never>;
   /**
    * Resolves after `ms` milliseconds, in [0, 2^31 − 1] (`RangeError` otherwise). A managed await: a delivered
    * `freeze` or `restore` body awaiting it is rejected with `InterruptedError` and its timer cleared; with no
    * current node it is a plain delay (DESIGN.md §4.2).
    */
-  sleep(ms: number): Promise<void>;
-  managed<T>(promise: Promise<T>): Promise<T>;
+  sleep(ms: number): Op<void>;
+  /** @deprecated `wait(promise, { abandon: true })` is the same wait (DESIGN.md §4.14); `managed` goes in a later stage of D41. */
+  managed<T>(promise: Promise<T>): Op<T>;
+  /**
+   * Wait for a foreign promise (DESIGN.md §4.14): `wait(p)` lets `p` finish when the waiting body is halted, so a
+   * halted generator body is resumed with its value and returned at its next `yield*` (a failure of `p` then is
+   * discarded, as a halted body's throw is; in its halted `finally` it is a release failure); with `{ abandon: true }`
+   * the wait stops at the halt, as `managed(p)` does. `wait((signal) => p)` hands the work this node's signal (the
+   * unwind fiber's deadline in a halted `finally`). A ramme op as `p` is that op's own wait. In an async body `wait(p)`
+   * is a bare await of `p`.
+   */
+  wait<T>(promise: Promise<T> | ((signal: AbortSignal) => Promise<T>), opts?: { abandon?: boolean }): Op<T>;
+  /**
+   * A library's async callback as a body (DESIGN.md §4.14): each call of the returned function runs `t` as a
+   * call-shaped child of this node, started synchronously and lending nothing, and returns a real promise of its
+   * value; it rejects with the child's failure, which it consumes unless this node is a halted body (the failure then
+   * surfaces at this node's completion), or with `FiberAbortedError` when the child ended `aborted`, with
+   * `NodeCompletedError` once this node has completed, and with `CreationViolationError` when called during a creation.
+   */
+  promised<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>): (...args: A) => Promise<T>;
 
   // --- synchronous frames ---
   /** Make this node current for a synchronous `fn`. */
@@ -255,7 +314,7 @@ export interface Context {
 
   // --- lifecycle (DESIGN.md §2.7) ---
   abort(reason?: unknown): void;
-  close(): Promise<void>;
+  close(): Op<void>;
   [Symbol.dispose](): void;
-  [Symbol.asyncDispose](): Promise<void>;
+  [Symbol.asyncDispose](): Op<void>;
 }

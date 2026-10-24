@@ -27,7 +27,7 @@ import {
   signal,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber, Outcome, Task } from './context.js';
+import type { Context, Fiber, Op, Outcome, Task } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { factoryProvider, valueProvider } from './provider-util.js';
@@ -718,7 +718,7 @@ describe('all and race (DESIGN.md §4.8)', () => {
         task(async (s: string) => s).bind('two'),
         task(() => true).bind(),
       ]);
-      expectTypeOf(p).toEqualTypeOf<Promise<[number, string, boolean]>>();
+      expectTypeOf(p).toEqualTypeOf<Op<[number, string, boolean]>>();
       return await p;
     });
     expect(values).toEqual([1, 'two', true]);
@@ -731,16 +731,16 @@ describe('all and race (DESIGN.md §4.8)', () => {
     const a = task(async (n: number) => n);
     const b = task((s: string) => s);
     const viaRoot = root.all([a.bind(1), b.bind('x')]);
-    expectTypeOf(viaRoot).toEqualTypeOf<Promise<[number, string]>>();
+    expectTypeOf(viaRoot).toEqualTypeOf<Op<[number, string]>>();
     expect(await viaRoot).toEqual([1, 'x']);
     const viaCurrent = await root.call(async () => {
       const p = current().all([b.bind('y'), a.bind(2)]);
-      expectTypeOf(p).toEqualTypeOf<Promise<[string, number]>>();
+      expectTypeOf(p).toEqualTypeOf<Op<[string, number]>>();
       return await p;
     });
     expect(viaCurrent).toEqual(['y', 2]);
     const ctx: Context = root;
-    expectTypeOf(ctx.all([a.bind(3)])).toEqualTypeOf<Promise<[number]>>();
+    expectTypeOf(ctx.all([a.bind(3)])).toEqualTypeOf<Op<[number]>>();
     await root.close();
   });
 

@@ -178,16 +178,19 @@ export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, mess
  * - `target[Symbol.asyncDispose]` is a function → `() => target[Symbol.asyncDispose]()`
  * - `target[Symbol.dispose]` is a function → `() => target[Symbol.dispose]()`
  * - `target` is a function → `target` (the defer overload)
+ *
+ * What the function returns is the release fiber's body result (DESIGN.md §2.4, §4.14): a promise is waited for, a
+ * generator object or an op is driven in the release fiber, anything else is done.
  */
-export function toDispose(target: object, release?: (value: any) => void | Promise<void>): () => void | Promise<void> {
+export function toDispose(target: object, release?: (value: any) => unknown): () => unknown {
   if (release !== undefined) {
     if (typeof release !== 'function') throw new TypeError('own(value, release): release must be a function');
     return () => release(target);
   }
   const t = target as Partial<AsyncDisposable & Disposable>;
   // The lib types asyncDispose as PromiseLike; the release loop treats any thenable as pending (isPromise is duck-typed).
-  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!() as Promise<void>;
+  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!();
   if (typeof t[Symbol.dispose] === 'function') return () => t[Symbol.dispose]!();
-  if (typeof target === 'function') return target as () => void | Promise<void>;
+  if (typeof target === 'function') return target as () => unknown;
   throw new TypeError('own(): value is neither Disposable nor AsyncDisposable; pass a release function');
 }

@@ -30,6 +30,12 @@ export interface Frame {
    * like any frame; the record is the run's hold on its parent (DESIGN.md §4.7).
    */
   readonly handler?: HandlerRun;
+  /**
+   * @internal Set only on the frame a halted generator body's `finally` is stepped in (U3, DESIGN.md §4.14): the
+   * body's unwind fiber, with the body's node as `node`. Every synchronous verb still addresses `node`; the ops the
+   * body makes there run on the unwind fiber, which no delivery reaches, and none of them has a target to interrupt.
+   */
+  readonly unwind?: NodeImpl;
 }
 
 /**
