@@ -1,96 +1,74 @@
-import type { InjectionKey } from './context-key.js';
-import type { Provider } from './context.js';
-import { inject, resolveDependencies } from './inject.js';
-import type { Scope } from './scope.js';
+// ---------------------------------------------------------------------------
+// The provider helpers (DESIGN.md §3.1).
+//
+// - A provider's value is stored on the node it is registered on, whatever the
+//   key or the implementation class declares as its scope: scope places only a
+//   key's own default (D36).
+// - `aliasProvider` is a redirect, not a factory: resolution reads its target
+//   from `markAlias`'s map and never calls its `provide` (D36).
+// - The value, factory result, class or alias target is checked against
+//   `Public<T>`, the members a consumer of `inject(T)` can reach, so a test fake
+//   of a class with `#private` members needs no cast. `NoInfer` keeps `T`
+//   inferred from the key alone (D37).
+// ---------------------------------------------------------------------------
 
-export interface ProviderOptions {
-  scope?: Scope;
-}
+import type { ExplicitInjectionKey, InjectionKey } from './context-key.js';
+import type { Provider, Public } from './context.js';
+import { inject, markAlias, resolveDependencies } from './inject.js';
 
 /**
- * Creates a provider for a class, using the class as both key and implementation.
+ * What `aliasProvider` redirects to: a class, a function, or a token whose value is `U`. The token branch refuses
+ * functions (`call?: never`), since every function has a `name` and would otherwise pass as a token of any type.
  */
-export function classProvider<T>(ClassConstructor: new (...args: any[]) => T): Provider<T>;
+type AliasTarget<U> =
+  | (new (...args: any[]) => U)
+  | ((...args: any[]) => U)
+  | (ExplicitInjectionKey<U> & { call?: never });
+
 /**
- * Creates a provider for a class with an explicit key.
+ * A provider for a class, the class as both key and implementation, constructed on the providing node.
  */
-export function classProvider<T>(
-  key: InjectionKey<T>,
-  ClassConstructor: new (...args: any[]) => T,
-): Provider<T>;
+export function classProvider<T>(Impl: new (...args: any[]) => T): Provider<T>;
 /**
- * Creates a provider for a class with options (including scope).
+ * A provider of `key` that constructs `Impl` on the providing node, whatever `Impl`'s own `static scope` says: to
+ * let `Impl`'s declaration govern placement, use `aliasProvider(key, Impl)` (D36). `Impl` need only have `key`'s
+ * public members (D37).
  */
-export function classProvider<T>(
-  key: InjectionKey<T>,
-  ClassConstructor: new (...args: any[]) => T,
-  options: ProviderOptions,
-): Provider<T>;
+export function classProvider<T, U extends Public<T>>(key: InjectionKey<T>, Impl: new (...args: any[]) => U): Provider<T>;
 export function classProvider<T>(
   keyOrClass: InjectionKey<T> | (new (...args: any[]) => T),
-  ClassConstructor?: new (...args: any[]) => T,
-  options?: ProviderOptions,
+  Impl?: new (...args: any[]) => unknown,
 ): Provider<T> {
   // Constructor arguments declared with `setDependencies(Class, ...keys)` are resolved with `inject`,
   // exactly as a class used as its own default factory resolves them.
-  if (ClassConstructor) {
-    // Two-parameter version: explicit key + class
-    return {
-      key: keyOrClass as InjectionKey<T>,
-      provide: () => new ClassConstructor(...(resolveDependencies(ClassConstructor) ?? [])),
-      scope: options?.scope,
-    };
-  } else {
-    // One-parameter version: class as both key and implementation
-    const Constructor = keyOrClass as new (...args: any[]) => T;
-    return {
-      key: Constructor as any,
-      provide: () => new Constructor(...(resolveDependencies(Constructor) ?? [])),
-    };
-  }
+  const C = (Impl ?? keyOrClass) as new (...args: any[]) => T;
+  return { key: keyOrClass as InjectionKey<T>, provide: () => new C(...(resolveDependencies(C) ?? [])) };
 }
 
 /**
- * Creates a provider using a factory function.
+ * A provider of `key` whose factory runs on the providing node, at the first resolution through it.
  */
-export function factoryProvider<T>(
-  key: InjectionKey<T>,
-  factory: () => T,
-  options?: ProviderOptions,
-): Provider<T> {
-  return {
-    key,
-    provide: factory,
-    scope: options?.scope,
-  };
+export function factoryProvider<T>(key: InjectionKey<T>, factory: () => NoInfer<Public<T>>): Provider<T> {
+  return { key, provide: factory as unknown as () => T };
 }
 
 /**
- * Creates a provider that returns a constant value.
+ * A provider of `key` that serves a constant value from the providing node.
  */
-export function valueProvider<T>(
-  key: InjectionKey<T>,
-  value: T,
-  options?: ProviderOptions,
-): Provider<T> {
-  return {
-    key,
-    provide: () => value,
-    scope: options?.scope,
-  };
+export function valueProvider<T>(key: InjectionKey<T>, value: NoInfer<Public<T>>): Provider<T> {
+  return { key, provide: () => value as unknown as T };
 }
 
 /**
- * Creates a provider that aliases one key to another (looks up the target key).
+ * A redirect (D36): from the providing node down, resolving `key` resolves `target` instead, from the base of the
+ * walk that found the alias (the requester; the storage node in a declared-placement creation; the parent for
+ * `skipSelf`), by `target`'s own rules (its providers, its declared scope, auto-hoisting), and caches nothing
+ * under `key`. So a root alias to a session-scoped implementation gives each session its own, and a fake bound
+ * this way keeps the lifetime it declares. `target` need only have `key`'s public members (D37).
  */
-export function aliasProvider<T>(
-  aliasKey: InjectionKey<T>,
-  targetKey: InjectionKey<T>,
-  options?: ProviderOptions,
-): Provider<T> {
-  return {
-    key: aliasKey,
-    provide: () => inject(targetKey),
-    scope: options?.scope,
-  };
+export function aliasProvider<T, U extends Public<T>>(key: InjectionKey<T>, target: AliasTarget<U>): Provider<T> {
+  const targetKey = target as InjectionKey<unknown>;
+  const p: Provider<T> = { key, provide: () => inject(targetKey) as T }; // only for a caller of p.provide(): resolution redirects
+  markAlias(p, targetKey);
+  return p;
 }

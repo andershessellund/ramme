@@ -20,8 +20,20 @@
 // lists name by name.
 // ---------------------------------------------------------------------------
 
-import { all, attempt, current, settle } from 'ramme';
-import type { Context, Failure, Fiber, Outcome, Result, SettleResult, Success, Task } from 'ramme';
+import {
+  aliasProvider,
+  all,
+  attempt,
+  classProvider,
+  createInjectionKey,
+  createScope,
+  createTopic,
+  current,
+  factoryProvider,
+  settle,
+  valueProvider,
+} from 'ramme';
+import type { Context, Failure, Fiber, Outcome, Provider, Public, Result, SettleResult, Success, Task } from 'ramme';
 import * as ramme from 'ramme';
 import {
   $,
@@ -376,6 +388,161 @@ export function attemptResult(t: Task<[string], Result<User, UserNotFound>>): vo
   type _O = Expect<Equal<typeof _o, Promise<Outcome<Result<User, UserNotFound>>>>>;
 }
 
+// ---------------------------------------------------------------------------
+// Providers are checked against the public surface (D37), and take no options (D36)
+// ---------------------------------------------------------------------------
+
+/** The class a test fakes: its `#entries` is private, so no other class can have it. */
+class SessionCache {
+  readonly #entries = new Map<string, string>();
+  get(k: string): string | undefined {
+    return this.#entries.get(k);
+  }
+  set(k: string, v: string): void {
+    this.#entries.set(k, v);
+  }
+}
+/** SessionCache's public members and a test-only extra: assignable to `Public<SessionCache>`, never to `SessionCache`. */
+class FakeSessionCache {
+  readonly calls: string[] = [];
+  get(k: string): string | undefined {
+    this.calls.push(k);
+    return undefined;
+  }
+  set(): void {}
+}
+/** No `set`: a supertype of SessionCache, from which `T` would be inferred without `NoInfer` (`Provider<MissingMethod>`). */
+class MissingMethod {
+  get(_k: string): string | undefined {
+    return undefined;
+  }
+}
+/** `get` returns a number. */
+class WrongReturn {
+  get(): number {
+    return 0;
+  }
+  set(): void {}
+}
+/** `set` takes an unrelated parameter type (method parameters are bivariant: a narrower one would compile). */
+class WrongParameter {
+  get(): string | undefined {
+    return undefined;
+  }
+  set(_k: { readonly unrelated: true }): void {}
+}
+
+/** `Public<T>` is the consumer's view: `#private` members are gone; functions, primitives, `any` and `unknown` pass through. */
+export function publicType(fake: FakeSessionCache): void {
+  const _view: Public<SessionCache> = fake;
+  // @ts-expect-error -- the class itself has #entries, which the fake cannot have
+  const _strict: SessionCache = fake;
+  type _Fn = Expect<Equal<Public<(e: { id: number }) => void>, (e: { id: number }) => void>>;
+  type _Class = Expect<Equal<Public<typeof SessionCache>, typeof SessionCache>>;
+  type _String = Expect<Equal<Public<string>, string>>;
+  type _Any = Expect<Equal<Public<any>, any>>;
+  type _Unknown = Expect<Equal<Public<unknown>, unknown>>;
+}
+
+/** A fake with an extra member compiles in each helper, and the provider is still the key's (D37). */
+export function providerFakes(): void {
+  const _value = valueProvider(SessionCache, new FakeSessionCache());
+  const _factory = factoryProvider(SessionCache, () => new FakeSessionCache());
+  const _class = classProvider(SessionCache, FakeSessionCache);
+  const _alias = aliasProvider(SessionCache, FakeSessionCache);
+  type _Value = Expect<Equal<typeof _value, Provider<SessionCache>>>;
+  type _Factory = Expect<Equal<typeof _factory, Provider<SessionCache>>>;
+  type _Class = Expect<Equal<typeof _class, Provider<SessionCache>>>;
+  type _Alias = Expect<Equal<typeof _alias, Provider<SessionCache>>>;
+}
+
+/** A fake missing a public method, or with a wrong signature, fails in each helper (D37). */
+export function providerMismatches(): void {
+  // @ts-expect-error -- missing set
+  valueProvider(SessionCache, new MissingMethod());
+  // @ts-expect-error -- missing set
+  factoryProvider(SessionCache, () => new MissingMethod());
+  // @ts-expect-error -- missing set
+  classProvider(SessionCache, MissingMethod);
+  // @ts-expect-error -- missing set
+  aliasProvider(SessionCache, MissingMethod);
+  // @ts-expect-error -- get returns a number
+  valueProvider(SessionCache, new WrongReturn());
+  // @ts-expect-error -- get returns a number
+  factoryProvider(SessionCache, () => new WrongReturn());
+  // @ts-expect-error -- get returns a number
+  classProvider(SessionCache, WrongReturn);
+  // @ts-expect-error -- get returns a number
+  aliasProvider(SessionCache, WrongReturn);
+  // @ts-expect-error -- set takes an unrelated type
+  valueProvider(SessionCache, new WrongParameter());
+  // @ts-expect-error -- set takes an unrelated type
+  factoryProvider(SessionCache, () => new WrongParameter());
+  // @ts-expect-error -- set takes an unrelated type
+  classProvider(SessionCache, WrongParameter);
+  // @ts-expect-error -- set takes an unrelated type
+  aliasProvider(SessionCache, WrongParameter);
+}
+
+/** An alias target is a class, a function or a token of the key's public type; nothing else (D37). */
+export function aliasTargets(): void {
+  const Token = createInjectionKey<FakeSessionCache>('Token');
+  const _token = aliasProvider(SessionCache, Token);
+  const _fn = aliasProvider(SessionCache, () => new FakeSessionCache());
+  type _Token = Expect<Equal<typeof _token, Provider<SessionCache>>>;
+  type _Fn = Expect<Equal<typeof _fn, Provider<SessionCache>>>;
+  // @ts-expect-error -- a token of the wrong type
+  aliasProvider(SessionCache, createInjectionKey<number>('n'));
+  // @ts-expect-error -- a plain function returning the wrong type
+  aliasProvider(SessionCache, () => 42);
+}
+
+/** An interface key bound to an implementation class (D37). */
+export function interfaceKey(): void {
+  interface Mailer {
+    send(to: string): Promise<void>;
+  }
+  const Mailer = createInjectionKey<Mailer>('Mailer');
+  class SmtpMailer {
+    readonly #host = 'smtp.example.com';
+    readonly sent: string[] = [];
+    async send(to: string): Promise<void> {
+      this.sent.push(`${this.#host}: ${to}`);
+    }
+  }
+  const _class = classProvider(Mailer, SmtpMailer);
+  const _alias = aliasProvider(Mailer, SmtpMailer);
+  type _Class = Expect<Equal<typeof _class, Provider<Mailer>>>;
+  type _Alias = Expect<Equal<typeof _alias, Provider<Mailer>>>;
+}
+
+/** A topic receiver keeps its contextual typing; a non-function is refused (D37). */
+export function topicProviders(): void {
+  const T = createTopic<{ readonly id: number }>('t');
+  const _value = valueProvider(T, (_e) => {
+    type _E = Expect<Equal<typeof _e, { readonly id: number }>>;
+  });
+  const _factory = factoryProvider(T, () => (e) => void e.id);
+  // @ts-expect-error -- a topic's value is a receiver
+  valueProvider(T, 42);
+}
+
+/** A provider takes no options: its value is stored where it is registered (D36). */
+export function noProviderScope(): void {
+  const S = createScope('s');
+  const K = createInjectionKey<string>('K');
+  // @ts-expect-error -- removed (D36)
+  valueProvider(K, 'x', { scope: S });
+  // @ts-expect-error -- removed (D36)
+  factoryProvider(K, () => 'x', { scope: S });
+  // @ts-expect-error -- removed (D36)
+  classProvider(SessionCache, SessionCache, { scope: S });
+  // @ts-expect-error -- removed (D36)
+  aliasProvider(K, K, { scope: S });
+  // @ts-expect-error -- removed (D36): a Provider has no scope member
+  const _p: Provider<string> = { key: K, provide: () => 'x', scope: S };
+}
+
 // Names removed by the redesign: one import per name, which fails if the
 // name comes back as a value or as a type. Then the internal names that
 // must never leak.
@@ -452,6 +619,8 @@ import type { ContextStatus as _ContextStatus } from 'ramme';
 import type { RunSyncOptions as _RunSyncOptions } from 'ramme';
 // @ts-expect-error -- removed
 import type { CreateContextOptions as _CreateContextOptions } from 'ramme';
+// @ts-expect-error -- removed (D36)
+import type { ProviderOptions as _ProviderOptions } from 'ramme';
 // @ts-expect-error -- internal: ambient.ts's current-node lookup
 import { requireCurrent as _requireCurrent } from 'ramme';
 // @ts-expect-error -- internal: NodeImpl is never public; nodes are Contexts

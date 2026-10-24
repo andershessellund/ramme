@@ -51,14 +51,7 @@ import type {
 } from './context.js';
 import { NO_NODE, currentCreation, currentFrame, hasStorage, runDetached, runInFrame } from './context-storage.js';
 import type { HandlerRun } from './context-storage.js';
-import {
-  ContextKey,
-  assertProviderPlacement,
-  describeNode,
-  misplacedScopedProviders,
-  resolveFrom,
-  resolveReceiver,
-} from './inject.js';
+import { ContextKey, assertProviderPlacement, describeNode, resolveFrom, resolveReceiver } from './inject.js';
 import { TASK, toTask } from './internal-context.js';
 import type { BodyInfo, CacheEntry, FailureRecord, NodeInit, NodeKind, TaskLike } from './internal-context.js';
 import type { NodeEvent, NodeEventInput } from './lifecycle-events.js';
@@ -1618,12 +1611,8 @@ export class NodeImpl implements Context {
     this.inCreation = false;
     if (this.state === 'pending') {
       const host = firstUp(requester, (c) => c.state !== 'complete' && c.state !== 'pending');
-      if (host !== undefined) {
-        // A provider built under this node that the scoped-provider rule (DESIGN.md §3.4) refuses at host is dropped, so the
-        // releases below never build its value at the scope owner.
-        for (const m of misplacedScopedProviders(this, host)) m.node.providers?.delete(m.provider.key);
-        this.placeAt(host);
-      } else this.state = 'running';
+      if (host !== undefined) this.placeAt(host);
+      else this.state = 'running';
     }
     if (this.state === 'running') this.abortInternal(error); // unlinked from its owner's stack by its completion
     if (queued.length > 0)

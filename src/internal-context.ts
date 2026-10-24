@@ -32,14 +32,20 @@ export interface CacheEntry {
   /** S, the storage context. */
   readonly node: NodeImpl;
   readonly autoHoisted: boolean;
-  /** deps(V); `undefined` for declared placement. */
+  /** deps(V), the closure the shadow checks and the decided markers read; `undefined` for declared placement. */
   readonly deps: ReadonlySet<InjectionKey<unknown>> | undefined;
+  /**
+   * The keys V's factory injected itself (its own reads, misses and `skipSelf` reads; not their deps, nor the reads
+   * of a per-creation SelfScope dependency, which run through V's creation): what a re-creation forced by placement
+   * by view must inject again (D7). `undefined` for declared placement.
+   */
+  readonly direct: ReadonlySet<InjectionKey<unknown>> | undefined;
   /** The value's node, if it attached anything. */
   readonly valueNode: NodeImpl | undefined;
   /**
-   * The effective scope a scoped value was stored under (`p.scope ?? getKeyScope(key)`); `undefined`
-   * for an unscoped provider and for auto-hoisted values. A hit is served only to a requester whose
-   * nearest owner of this scope is the storage context (DESIGN.md §3.1).
+   * The key's scope a default was stored under (`getKeyScope(key)`); `undefined` for every provider's value,
+   * which is stored where the provider is registered (D36), and for auto-hoisted values. A hit is served only to
+   * a requester whose nearest owner of this scope is the storage context (DESIGN.md §3.1).
    */
   readonly scope: Scope | undefined;
   /**
@@ -60,9 +66,22 @@ export type ResolvedResult<T> = {
   created: boolean;
   /** Requester-relative (DESIGN.md §3.4): a per-creation SelfScope result, or a pinned auto-hoisted value. Pins the tracking creation. */
   pinned: boolean;
+  /** Present iff the key was answered by an `aliasProvider` redirect (D36). */
+  via?: Redirected;
 };
 
-export type ResolveResult<T> = ResolvedResult<T> | { resolved: false };
+export type ResolveResult<T> = ResolvedResult<T> | { resolved: false; via?: Redirected };
+
+/**
+ * What an `aliasProvider` redirect followed, resolved or not (D36, DESIGN.md §3.4): a value that injects the
+ * key records `keys` in deps(V) and is never stored above `node`.
+ */
+export interface Redirected {
+  /** The alias keys on the redirect chain, in order, then the final target. */
+  readonly keys: readonly InjectionKey<unknown>[];
+  /** The deepest node on the chain that holds one of its aliases. */
+  readonly node: NodeImpl;
+}
 
 /** The brand of a task definition (fiber.ts `TaskImpl`, or an inline body made anonymous by `toTask`). */
 export const TASK: unique symbol = Symbol('ramme.task');

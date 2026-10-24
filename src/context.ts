@@ -51,16 +51,29 @@ export type Body<T, A extends unknown[] = []> = (...args: A) => Promise<T> | T;
 /** The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). */
 export type Release<T> = (value: T) => void | Promise<void>;
 
+/**
+ * A binding of `key` on the node it is registered on (`providers`, `addProvider`). Its value is stored on that
+ * node, whatever the key declares as its scope: a key's scope places only the key's own default. The exception is
+ * an `aliasProvider`, a redirect that stores nothing under `key`: its target is placed by the target's own rules
+ * (D36, DESIGN.md §3.1).
+ */
 export interface Provider<T> {
   key: InjectionKey<T>;
   provide(): T;
-  /**
-   * Optional scope override. When set, the value produced by this provider
-   * is stored on the context that owns this scope, regardless of where the
-   * provider was registered. Takes precedence over a scope set on the key.
-   */
-  scope?: Scope;
 }
+
+/**
+ * What a consumer of `inject(T)` can reach: `T`'s public members (`keyof` leaves out `private` and `#private`
+ * ones), the contract a provider's value is checked against (D37). Functions, topic receivers and classes pass
+ * through unchanged, and so do `any` and `unknown`, so a call signature keeps its contextual typing.
+ */
+export type Public<T> = 0 extends 1 & T
+  ? T // any
+  : unknown extends T
+    ? T // unknown
+    : T extends ((...args: any[]) => any) | (abstract new (...args: any[]) => any)
+      ? T // functions, topics, classes
+      : { [K in keyof T]: T[K] };
 
 export interface LookupOptions {
   /** Return `undefined` instead of throwing when nothing provides the key. */

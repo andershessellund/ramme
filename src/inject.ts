@@ -8,7 +8,10 @@
 //   marks every context on the walk *decided* (DESIGN.md §3.4), serves a cache hit only
 //   when the hit is the requester's own view (placement by view and scope
 //   shadows, D10′; scoped hits, DESIGN.md §3.1), and otherwise creates: at a provider's
-//   context, at a scope owner, or — auto-hoisted — at the deepest dependency.
+//   context whatever the key's scope (D36), at a scope owner for a key's own
+//   default, or — auto-hoisted — at the deepest dependency. An `aliasProvider`
+//   is a redirect: the walk resolves its target from the walk's base instead and
+//   caches nothing under the alias key (D36).
 // - Creation runs synchronously (A5) under a creation frame. The value's node
 //   is created on demand: pending until placement for an auto-hoisted value,
 //   live on the storage context's provided stack for a declared placement
@@ -35,7 +38,7 @@ import {
 import type { InjectionKey } from './context-key.js';
 import type { Context, LookupOptions, Provider } from './context.js';
 import { NO_NODE, currentCreation, runInFrame } from './context-storage.js';
-import type { CacheEntry, ResolveResult, ResolvedResult } from './internal-context.js';
+import type { CacheEntry, Redirected, ResolveResult, ResolvedResult } from './internal-context.js';
 import { NodeTopic } from './lifecycle-events.js';
 import type { NodeEvent } from './lifecycle-events.js';
 import type { NodeImpl } from './node-impl.js';
@@ -100,10 +103,16 @@ export function inject<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
 // DepTracker and CreationState
 // ---------------------------------------------------------------------------
 
-/** deps(V), the deepest dependency and the pin of an auto-hoisted value (DESIGN.md §3.4, D10′). */
+/** deps(V), the keys V injected itself, the deepest dependency and the pin of an auto-hoisted value (DESIGN.md §3.4, D10′). */
 export class DepTracker {
   deepest: NodeImpl;
   readonly deps = new Set<InjectionKey<unknown>>();
+  /**
+   * The keys V's factory injected itself, misses and `skipSelf` reads included: the D7 re-run check compares these.
+   * Not the reads of a per-creation SelfScope dependency's factory, which run through V's creation but are that
+   * dependency's (deps only).
+   */
+  readonly direct = new Set<InjectionKey<unknown>>();
   /** V read something requester-relative: it is served only at its storage context (DESIGN.md §3.4). */
   pinned = false;
 
@@ -112,12 +121,19 @@ export class DepTracker {
   }
 
   /**
-   * deps ∪= {key} always, a miss included (D10′); on a hit: deepest by depth, deps ∪= r.deps when r is
-   * auto-hoisted, and a pinned result pins V (DESIGN.md §3.4). A per-creation SelfScope result's node is the
-   * requester, so it also makes the requester the deepest dependency.
+   * deps ∪= {key} always, a miss included (D10′), and direct ∪= {key} when V's own factory read it (`direct`; false
+   * for a read forwarded from a SelfScope inner creation). Through an alias (D36), deps ∪= the redirect chain and its
+   * target, a miss included, and the deepest alias node bounds V's placement as a provider's node does. On a hit:
+   * deepest by depth, deps ∪= r.deps when r is auto-hoisted, and a pinned result pins V (DESIGN.md §3.4). A
+   * per-creation SelfScope result's node is the requester, so it also makes the requester the deepest dependency.
    */
-  track(key: InjectionKey<unknown>, r: ResolveResult<unknown>): void {
+  track(key: InjectionKey<unknown>, r: ResolveResult<unknown>, direct = true): void {
+    if (direct) this.direct.add(key);
     this.deps.add(key);
+    if (r.via !== undefined) {
+      for (const k of r.via.keys) this.deps.add(k);
+      if (r.via.node.depth > this.deepest.depth) this.deepest = r.via.node;
+    }
     if (!r.resolved) return;
     if (r.node.depth > this.deepest.depth) this.deepest = r.node;
     if (r.autoHoisted && r.deps) for (const d of r.deps) this.deps.add(d);
@@ -143,6 +159,8 @@ export interface CreationState {
   readonly tracker: DepTracker | undefined;
   /** The enclosing creation (cycle detection; SelfScope nesting). */
   readonly outer: CreationState | undefined;
+  /** The alias redirect that led to this creation, if any (D36): its keys name the hops in a cycle's message. */
+  readonly via: Hops | undefined;
   /** True while a skipSelf resolve of the same key runs. */
   cycleExempt: boolean;
   /**
@@ -159,7 +177,11 @@ export interface CreationState {
   /** Materialise: slot.node ??= requester.createValueNode(name, placement). */
   node(): NodeImpl;
   readonly nodeIfCreated: NodeImpl | undefined;
-  inject<T>(key: InjectionKey<T>, options: LookupOptions | undefined): T | undefined;
+  /**
+   * `direct` is false for a read forwarded from a SelfScope inner creation: tracked in deps(V), pin and placement
+   * like any read, but not among the keys V's factory injected itself (D7).
+   */
+  inject<T>(key: InjectionKey<T>, options: LookupOptions | undefined, direct?: boolean): T | undefined;
 }
 
 interface CreationInit {
@@ -169,6 +191,7 @@ interface CreationInit {
   placement: NodeImpl | undefined;
   tracker: DepTracker | undefined;
   outer: CreationState | undefined;
+  via: Hops | undefined;
   /** A SelfScope inner creation: everything it reads and attaches goes through the outer creation (resolveSelf; DESIGN.md §3.4). */
   delegate?: CreationState;
 }
@@ -180,6 +203,7 @@ class CreationStateImpl implements CreationState {
   readonly placement: NodeImpl | undefined;
   readonly tracker: DepTracker | undefined;
   readonly outer: CreationState | undefined;
+  readonly via: Hops | undefined;
   cycleExempt = false;
   ended = false;
   readonly selfCache: Map<InjectionKey<unknown>, unknown>;
@@ -194,6 +218,7 @@ class CreationStateImpl implements CreationState {
     this.placement = init.placement;
     this.tracker = init.tracker;
     this.outer = init.outer;
+    this.via = init.via;
     this.#delegate = init.delegate;
     // A SelfScope inner creation shares the outer value's node and per-creation cache.
     this.slot = init.delegate?.slot ?? { node: undefined };
@@ -210,16 +235,17 @@ class CreationStateImpl implements CreationState {
     return (this.slot.node ??= this.requester.createValueNode(keyName(this.key), this.placement));
   }
 
-  inject<T>(key: InjectionKey<T>, options: LookupOptions | undefined): T | undefined {
+  inject<T>(key: InjectionKey<T>, options: LookupOptions | undefined, direct = true): T | undefined {
     // Only a skipSelf read of the creation's OWN key (the decorator pattern, DESIGN.md §3.2) is exempt from the
     // frame-chain cycle check. A skipSelf read of another key that reaches this key again is a cycle.
     const own = (key as InjectionKey<unknown>) === this.key;
     const d = this.#delegate;
     if (d !== undefined) {
       // SelfScope inner: deps flow outward — the outer creation tracks them and `ContextKey` is its node (DESIGN.md §3.4).
+      // They are this dependency's reads, not the outer factory's own (D7): forwarded with direct = false.
       // The outer exempts its own key in its own skipSelf branch; this frame exempts the inner key.
-      if (!options?.skipSelf || !own) return d.inject(key, options);
-      return this.#exempt(() => d.inject(key, options));
+      if (!options?.skipSelf || !own) return d.inject(key, options, false);
+      return this.#exempt(() => d.inject(key, options, false));
     }
     if (key === (ContextKey as InjectionKey<unknown>)) return this.node() as unknown as T; // untracked (DESIGN.md §3.3)
     let r: ResolveResult<unknown>;
@@ -229,7 +255,7 @@ class CreationStateImpl implements CreationState {
       this.tracker?.pin(this.requester);
       const base = this.base.up;
       if (base === undefined) {
-        this.tracker?.track(key, { resolved: false });
+        this.tracker?.track(key, { resolved: false }, direct);
         return undefined; // the caller turns this into the optional/throw decision
       }
       r = own ? this.#exempt(() => resolveFrom(base, key)) : resolveFrom(base, key);
@@ -238,7 +264,7 @@ class CreationStateImpl implements CreationState {
       r = resolveFrom(this.placement ?? this.requester, key);
     }
     // Auto-hoisted only (DESIGN.md §3.3): deps(V) and the deepest dependency. A miss is tracked too (D10′).
-    this.tracker?.track(key, r);
+    this.tracker?.track(key, r, direct);
     return r.resolved ? (r.value as T) : undefined;
   }
 
@@ -258,10 +284,22 @@ class CreationStateImpl implements CreationState {
 // runCreation, the unowned 'join' fork check at the end of creation (D14), finishCreation (DESIGN.md §3.3, §4.6)
 // ---------------------------------------------------------------------------
 
-function chain(cs: CreationState): string {
-  const keys: InjectionKey<unknown>[] = [];
-  for (let c: CreationState | undefined = cs; c; c = c.outer) keys.unshift(c.key);
+/** The frame chain's keys, outermost first, each preceded by the alias hops that led to it (D36), then `tail`. */
+function chain(cs: CreationState | undefined, tail: readonly InjectionKey<unknown>[] = []): string {
+  const keys: InjectionKey<unknown>[] = [...tail];
+  for (let c: CreationState | undefined = cs; c; c = c.outer) keys.unshift(...(c.via?.keys ?? []), c.key);
   return keys.map(keyName).join(' → ');
+}
+
+/**
+ * The message chain of a cycle the frame check found: `cs` repeats the key of the enclosing frame `c`. When `cs` was
+ * reached through an alias hop that also led to `c`, the cycle closed at that hop, so the chain ends there, as the
+ * redirect's own check ends it (D36): an alias `A → B` whose declared-placement class `B` injects `A` again, which
+ * the redirect cannot see since `B`'s inject resolves from its storage node, reads `A → B → A`, not `A → B → A → B`.
+ */
+function cycleChain(cs: CreationState, c: CreationState): string {
+  const again = cs.via?.keys.findIndex((k) => c.via?.keys.includes(k) === true) ?? -1;
+  return again < 0 ? chain(cs) : chain(cs.outer, cs.via!.keys.slice(0, again + 1));
 }
 
 function runCreation<R>(cs: CreationState, produce: () => R): R {
@@ -270,7 +308,7 @@ function runCreation<R>(cs: CreationState, produce: () => R): R {
   let viaChain = false;
   for (let c = cs.outer; c; c = c.outer)
     if (c.key === cs.key) {
-      if (!c.cycleExempt) throw new Error(`Circular dependency detected: ${chain(cs)}`);
+      if (!c.cycleExempt) throw new Error(`Circular dependency detected: ${cycleChain(cs, c)}`);
       viaChain = true;
     }
   let marked: Set<InjectionKey<unknown>> | undefined;
@@ -407,11 +445,13 @@ function providerFrom<T>(C: NodeImpl, key: InjectionKey<T>): Provider<T> | undef
 }
 
 /**
- * The scope `d` resolves under for a requester whose walk finds no provider for `d` below `S`: the
- * first provider's scope from `S` upward, else the key's own (D10′).
+ * The scope `d` resolves under for a requester whose walk finds no provider for `d` below `S` (D10′): none when
+ * a provider for `d`, an alias included, sits at or above `S`, since a provider places where it is registered
+ * (D36; an alias's target is in deps(V) and checked on its own), else the key's own. No scoped default of `d`
+ * is cached below such a provider: creating one decides `d` up to the root (resolveScoped).
  */
 function effectiveScope(S: NodeImpl, d: InjectionKey<unknown>): Scope | undefined {
-  return providerFrom(S, d)?.scope ?? getKeyScope(d);
+  return providerFrom(S, d) !== undefined ? undefined : getKeyScope(d);
 }
 
 /**
@@ -458,11 +498,73 @@ function assertLive(hit: CacheEntry, key: InjectionKey<unknown>): void {
 }
 
 // ---------------------------------------------------------------------------
+// aliasProvider redirects (D36)
+// ---------------------------------------------------------------------------
+
+/**
+ * The alias keys a redirect chain has followed in one resolution, and the base `R` it resolves from (D36). A
+ * creation reached through a redirect keeps them (`CreationState.via`).
+ */
+interface Hops {
+  readonly keys: readonly InjectionKey<unknown>[];
+  readonly base: NodeImpl;
+}
+
+const NO_HOPS: readonly InjectionKey<unknown>[] = [];
+
+/** An alias provider → its target. Written by `aliasProvider` (provider-util.ts); read by resolveFrom's provider branch only. */
+const aliasTargets = new WeakMap<Provider<unknown>, InjectionKey<unknown>>();
+
+/** Mark `p` as a redirect to `target` (provider-util.ts `aliasProvider`). Its shape stays `{ key, provide }`. */
+export function markAlias(p: Provider<unknown>, target: InjectionKey<unknown>): void {
+  aliasTargets.set(p, target);
+}
+
+/**
+ * `key` provided at `N` by an alias (D36): resolve `target` from `R`, the base of the walk that found the alias,
+ * by `target`'s own rules, and cache nothing under `key`. The alias is `N`'s decision on `key` (D10′). The result
+ * carries the chain and the deepest alias node, resolved or not, for the tracking creation (DepTracker.track).
+ * A redirect runs no factory, so runCreation's frame check cannot see a cycle of aliases: following a key already
+ * followed in this resolution, or by a creation in progress reached through it from the same base, is a cycle. A
+ * repeat from another base is left to the frame check, which ends its message at the repeated hop (cycleChain): a
+ * declared-placement target resolves its injects from its storage node, from which the same key may legitimately
+ * reach another alias, or the same alias and then other providers, and a `skipSelf` read resolves from the parent.
+ */
+function redirect<T>(
+  R: NodeImpl,
+  N: NodeImpl,
+  key: InjectionKey<T>,
+  target: InjectionKey<unknown>,
+  hops: readonly InjectionKey<unknown>[],
+): ResolveResult<T> {
+  const cs = currentCreation();
+  let cycle = hops.includes(key);
+  for (let c = cs; c && !cycle; c = c.outer) cycle = c.via?.base === R && c.via.keys.includes(key);
+  if (cycle) throw new Error(`Circular dependency detected: ${chain(cs, [...hops, key])}`);
+  const r = resolveFrom(R, target, [...hops, key]) as ResolveResult<T>;
+  markDecided(R, N, [key]);
+  const inner = r.via;
+  const via: Redirected = {
+    keys: [key, ...(inner?.keys ?? [target])],
+    node: inner !== undefined && inner.node.depth > N.depth ? inner.node : N,
+  };
+  return { ...r, via };
+}
+
+// ---------------------------------------------------------------------------
 // resolveFrom — the walk (DESIGN.md §3.4)
 // ---------------------------------------------------------------------------
 
-/** Resolve `key` for requester `R`: the walk `NodeImpl.get` and `inject` share. */
-export function resolveFrom<T>(R: NodeImpl, key: InjectionKey<T>): ResolveResult<T> {
+/**
+ * Resolve `key` for requester `R`: the walk `NodeImpl.get` and `inject` share. `hops` are the alias keys a redirect
+ * chain followed to reach `key` (D36).
+ */
+export function resolveFrom<T>(
+  R: NodeImpl,
+  key: InjectionKey<T>,
+  hops: readonly InjectionKey<unknown>[] = NO_HOPS,
+): ResolveResult<T> {
+  const via: Hops | undefined = hops.length > 0 ? { keys: hops, base: R } : undefined;
   for (let C: NodeImpl | undefined = R; C; C = C.up) {
     if (C.state === 'pending')
       throw new PendingNodeError(
@@ -477,43 +579,54 @@ export function resolveFrom<T>(R: NodeImpl, key: InjectionKey<T>): ResolveResult
       // DESIGN.md §3.1: inside a creation a SelfScope key is per-creation, even where a [SelfScope] boundary has
       // stored one: the creation is a nearer SelfScope owner than C, as with the nested boundaries below.
       if (hit.scope === SelfScope && currentCreation() !== undefined)
-        return resolveScoped(R, key, SelfScope, providerFrom(C, key));
+        return resolveScoped(R, key, SelfScope, providerFrom(C, key), via);
       // DESIGN.md §3.1: a scoped value stored at an outer owner of its scope is not R's answer when R's own owner of
       // that scope (a nested σ-context, a SelfScope boundary) lies on [R, C): R's value is made there.
       if (hit.scope !== undefined && R.findScopedContext(hit.scope) !== C)
-        return resolveScoped(R, key, hit.scope, providerFrom(C, key));
+        return resolveScoped(R, key, hit.scope, providerFrom(C, key), via);
       // Placement by view (DESIGN.md §3.4, D10′): a dependency shadowed on [R, C), or a value pinned at another
       // requester, means this cache is not R's view: V's factory runs from R.
       if (
         hit.autoHoisted &&
         ((hit.pinned && R !== C) || (hit.deps !== undefined && hit.deps.size > 0 && shadowBetween(R, C, hit.deps)))
       )
-        return createAutoHoisted(R, key, hit.deps); // the re-run must inject the same keys (D7)
+        return createAutoHoisted(R, key, hit.direct, via); // the re-run must inject the same keys itself (D7)
       assertLive(hit, key); // I22: R's own answer was released (DESIGN.md §2.7)
       markDecided(R, C, hit.deps === undefined ? [key] : [key, ...hit.deps]);
       return hitResult(hit, C);
     }
     const p = C.providers?.get(key);
     if (p !== undefined) {
-      const scope = p.scope ?? getKeyScope(key);
-      if (scope !== undefined) return resolveScoped(R, key, scope, p as Provider<T>);
-      const r = createExplicit(C, p as Provider<T>, R, undefined);
+      const target = aliasTargets.get(p);
+      if (target !== undefined) return redirect(R, C, key, target, hops);
+      // A provider is a statement of placement: its value is stored here, whatever the key's scope (D36).
+      const r = createExplicit(C, p as Provider<T>, R, undefined, via);
       markDecided(R, C, [key]);
       return r;
     }
   }
   const scope = getKeyScope(key);
-  if (scope !== undefined) return resolveScoped(R, key, scope, undefined);
-  if (hasDefaultFactory(key)) return createAutoHoisted(R, key);
+  if (scope !== undefined) return resolveScoped(R, key, scope, undefined, via);
+  if (hasDefaultFactory(key)) return createAutoHoisted(R, key, undefined, via);
   markDecided(R, R.root, [key]); // "not provided here" is a decision on the whole walk
   return { resolved: false };
 }
 
-/** A scoped key: stored at R's nearest owner of `scope`; SelfScope during creation is per-creation and unstored. */
-function resolveScoped<T>(R: NodeImpl, key: InjectionKey<T>, scope: Scope, provider: Provider<T> | undefined): ResolveResult<T> {
+/**
+ * A key's scoped default: stored at R's nearest owner of `scope`; SelfScope during creation is per-creation and
+ * unstored. A provider never comes here (D36): `provider` is the one found from a scoped cache hit upward, which
+ * is always `undefined` since creating the default decided the key up to the root.
+ */
+function resolveScoped<T>(
+  R: NodeImpl,
+  key: InjectionKey<T>,
+  scope: Scope,
+  provider: Provider<T> | undefined,
+  via: Hops | undefined,
+): ResolveResult<T> {
   if (scope === SelfScope) {
     const cs = currentCreation();
-    if (cs !== undefined) return resolveSelf(cs, key, provider); // per-creation, unstored, unmarked
+    if (cs !== undefined) return resolveSelf(cs, key, provider, via); // per-creation, unstored, unmarked
     // Outside creation a context with scopes: [SelfScope] is the boundary: fall through.
   }
   const T = R.findScopedContext(scope);
@@ -536,27 +649,33 @@ function resolveScoped<T>(R: NodeImpl, key: InjectionKey<T>, scope: Scope, provi
     markDecided(R, R.root, [key]);
     return { resolved: false };
   }
-  const r = createExplicit(T, provider ?? defaultProvider(key), R, scope);
-  markDecided(R, T, [key]);
+  const r = createExplicit(T, provider ?? defaultProvider(key), R, scope, via);
+  // The provider search already walked to the root without finding one, so a default decides the key on the whole
+  // walk, as a miss does: no ancestor can provide it later, which would serve R's descendants a value built from
+  // another view (D10′, I19), and no provider ever sits above a scoped default (effectiveScope).
+  markDecided(R, provider === undefined ? R.root : T, [key]);
   return r;
 }
 
 /**
  * Auto-hoisting (D7): run the default factory from R, place the value at its deepest dependency (or the capture
- * boundary). `expected` is the recorded deps(V) of the instance a placement-by-view re-creation refused: the
- * re-run must inject exactly those keys, or the factory is non-deterministic and the resolution fails (D7).
+ * boundary). `expected` is the recorded set of keys the factory injected itself, for the instance a
+ * placement-by-view re-creation refused: the re-run must inject exactly those keys, or the factory is
+ * non-deterministic and the resolution fails (D7). The closure deps(V) may legitimately differ: a shadow can change
+ * a dependency's kind (a provided value in place of an auto-hoisted one, an override of an alias).
  */
 function createAutoHoisted<T>(
   R: NodeImpl,
   key: InjectionKey<T>,
-  expected?: ReadonlySet<InjectionKey<unknown>>,
+  expected: ReadonlySet<InjectionKey<unknown>> | undefined,
+  via: Hops | undefined,
 ): ResolvedResult<T> {
   const tracker = new DepTracker(R.autoScopeRoot);
-  const cs = new CreationStateImpl({ key, requester: R, base: R, placement: undefined, tracker, outer: currentCreation() });
+  const cs = new CreationStateImpl({ key, requester: R, base: R, placement: undefined, tracker, outer: currentCreation(), via });
   const value = runCreation(cs, () => invokeDefaultFactory(key, resolveDependencies(key)));
-  if (expected !== undefined && !sameKeys(tracker.deps, expected)) {
+  if (expected !== undefined && !sameKeys(tracker.direct, expected)) {
     const err = new PlacementError(
-      `${keyName(key)} injected {${names(tracker.deps)}} when re-created from ${describeNode(R)}, but ` +
+      `${keyName(key)} injected {${names(tracker.direct)}} when re-created from ${describeNode(R)}, but ` +
         `{${names(expected)}} when first created. An auto-hoisted factory must inject the same keys on every run; ` +
         'make the factory deterministic, or give the key an explicit scope or provider (D7).',
     );
@@ -572,14 +691,6 @@ function createAutoHoisted<T>(
     throw err;
   }
   const n = cs.nodeIfCreated;
-  const misplaced = n === undefined ? undefined : misplacedScopedProviders(n, S)[0];
-  if (misplaced !== undefined) {
-    // The scoped-provider rule (DESIGN.md §3.4), checked again for a provider built under the pending node,
-    // whose walk could not reach the scope owner before placement. Refused as a live node refuses it; nothing is cached.
-    const err = scopedPlacementError(misplaced.node, misplaced.provider, misplaced.owner);
-    abandonCreation(cs, err);
-    throw err;
-  }
   const existing = S.cache.get(key);
   if (existing !== undefined) {
     // Unreachable given the same-keys check above (D7: equal deps place the re-run at or below the shadow). Kept as the I19 guard:
@@ -591,8 +702,9 @@ function createAutoHoisted<T>(
     throw err;
   }
   const deps = new Set(tracker.deps);
+  const direct = new Set(tracker.direct);
   const pinned = tracker.pinned;
-  S.cache.set(key, { value, node: S, autoHoisted: true, deps, valueNode: n, scope: undefined, pinned });
+  S.cache.set(key, { value, node: S, autoHoisted: true, deps, direct, valueNode: n, scope: undefined, pinned });
   n?.placeAt(S); // pending → running; the tail of S.provided: if S is releasing, released next (DESIGN.md §2.4)
   finishCreation(cs);
   markDecided(R, S, [key, ...deps]);
@@ -600,14 +712,16 @@ function createAutoHoisted<T>(
 }
 
 /**
- * Declared placement (a provider's context, or a scope owner): the value's node is live on S from its first
- * touch, and moves after its dependencies on S.provided when the creation ends (DESIGN.md §3.3).
+ * Declared placement (a provider's context, or a key's scope owner for its default; `scope` is the key's scope for
+ * a default, `undefined` for a provider): the value's node is live on S from its first touch, and moves after its
+ * dependencies on S.provided when the creation ends (DESIGN.md §3.3).
  */
 function createExplicit<T>(
   S: NodeImpl,
   provider: Provider<T>,
   R: NodeImpl,
   scope: Scope | undefined,
+  via: Hops | undefined,
 ): ResolvedResult<T> {
   if (S.state === 'complete')
     throw new NodeCompletedError(`cannot place ${keyName(provider.key)} on completed ${describeNode(S)}`);
@@ -618,6 +732,7 @@ function createExplicit<T>(
     placement: S,
     tracker: undefined,
     outer: currentCreation(),
+    via,
   });
   const value = runCreation(cs, () => provider.provide());
   const n = cs.nodeIfCreated;
@@ -646,6 +761,7 @@ function createExplicit<T>(
     node: S,
     autoHoisted: false,
     deps: undefined,
+    direct: undefined,
     valueNode: n,
     scope,
     pinned: false,
@@ -661,7 +777,12 @@ function createExplicit<T>(
  * auto-hoisted outer value at its requester (DESIGN.md §3.4), and the result is pinned, so that value is never
  * served to another requester.
  */
-function resolveSelf<T>(outer: CreationState, key: InjectionKey<T>, provider: Provider<T> | undefined): ResolveResult<T> {
+function resolveSelf<T>(
+  outer: CreationState,
+  key: InjectionKey<T>,
+  provider: Provider<T> | undefined,
+  via: Hops | undefined,
+): ResolveResult<T> {
   if (outer.selfCache.has(key))
     return {
       resolved: true,
@@ -680,6 +801,7 @@ function resolveSelf<T>(outer: CreationState, key: InjectionKey<T>, provider: Pr
     placement: outer.placement,
     tracker: undefined,
     outer,
+    via,
     delegate: outer,
   });
   const value = runCreation(cs, () =>
@@ -694,9 +816,10 @@ function resolveSelf<T>(outer: CreationState, key: InjectionKey<T>, provider: Pr
 // ---------------------------------------------------------------------------
 
 /**
- * PlacementError iff the key is decided at `C` (not at construction), or a scoped provider sits below its scope's
- * owner. Under a pending value node the owner walk stops at that node; the scope rule is checked again when the
- * node is placed (DESIGN.md §3.4).
+ * PlacementError iff the key is decided at `C` (not at construction: a fresh node has no decisions; D10′). A
+ * provider is stored where it is registered, whatever the key's scope (D36), so its placement needs no other
+ * check; the key's scope is still read, and discarded, so that a malformed `static scope` is a TypeError at
+ * registration (D32).
  */
 export function assertProviderPlacement(C: NodeImpl, p: Provider<unknown>, atConstruction: boolean): void {
   if (!atConstruction && C.decided.has(p.key))
@@ -704,58 +827,7 @@ export function assertProviderPlacement(C: NodeImpl, p: Provider<unknown>, atCon
       `Cannot provide '${keyName(p.key)}' at ${describeNode(C)}: the key has already been decided here. ` +
         'Providers must be registered before any resolution of the key through this context.',
     );
-  const scope = providerScope(p);
-  if (scope !== undefined) {
-    const T = C.findScopedContext(scope);
-    if (T !== undefined && T !== C) throw scopedPlacementError(C, p, T);
-  }
-}
-
-/** The scope the scoped-provider rule (DESIGN.md §3.4) applies to: the provider's or the key's, SelfScope excluded. */
-function providerScope(p: Provider<unknown>): Scope | undefined {
-  const scope = p.scope ?? getKeyScope(p.key);
-  return scope === SelfScope ? undefined : scope;
-}
-
-function scopedPlacementError(C: NodeImpl, p: Provider<unknown>, T: NodeImpl): PlacementError {
-  return new PlacementError(
-    `Cannot provide scoped key '${keyName(p.key)}' at ${describeNode(C)}: it resolves to ${describeNode(T)} above this context`,
-  );
-}
-
-/** The nearest owner of `scope` from `c` upward, continuing at `S` from the pending node `n`, which has no parent yet. */
-function scopeOwnerVia(c: NodeImpl, scope: Scope, n: NodeImpl, S: NodeImpl): NodeImpl | undefined {
-  for (let x: NodeImpl | undefined = c; x !== undefined; x = x === n ? S : x.up) if (x.scopeSet?.has(scope)) return x;
-  return undefined;
-}
-
-export interface MisplacedProvider {
-  readonly node: NodeImpl;
-  readonly provider: Provider<unknown>;
-  /** The scope owner above `node` once the pending node is placed. */
-  readonly owner: NodeImpl;
-}
-
-/**
- * The providers on `n` and every node on its stacks, recursively, that the scoped-provider rule (DESIGN.md §3.4)
- * refuses once the pending value node `n` is placed at `S`. A node built under a pending node (`child({ providers })`,
- * `child().addProvider(…)`, `fork(task(…, { providers }))`, a pool) passed the rule at construction only
- * because its owner walk stopped at `n`.
- */
-export function misplacedScopedProviders(n: NodeImpl, S: NodeImpl): MisplacedProvider[] {
-  const out: MisplacedProvider[] = [];
-  const todo: NodeImpl[] = [n];
-  for (let c = todo.pop(); c !== undefined; c = todo.pop()) {
-    if (c.providers !== undefined)
-      for (const p of c.providers.values()) {
-        const scope = providerScope(p);
-        const T: NodeImpl | undefined = scope === undefined ? undefined : scopeOwnerVia(c, scope, n, S);
-        if (T !== undefined && T !== c) out.push({ node: c, provider: p, owner: T });
-      }
-    for (const e of c.explicit) if (e.node !== undefined) todo.push(e.node);
-    for (const e of c.provided) if (e.node !== undefined) todo.push(e.node);
-  }
-  return out;
+  getKeyScope(p.key); // validation only (D32)
 }
 
 // ---------------------------------------------------------------------------
