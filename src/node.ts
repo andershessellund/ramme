@@ -18,7 +18,7 @@ const als = new AsyncLocalStorage<Frame>();
 
 /**
  * The context at import, where no variable is set. Source reactions are registered under it,
- * outside the awaiting body's async context, so a frozen node is collectable (A2).
+ * outside the awaiting body's async context, so an abandoned body's node is collectable (A2).
  */
 const detached = AsyncLocalStorage.snapshot();
 

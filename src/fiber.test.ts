@@ -37,7 +37,7 @@ import { deferred, impl, tick, trace, within } from './test/util.js';
 
 const link = { onFailure: 'link' } as const;
 
-/** The rejection of `p`; throws if `p` fulfils. Awaits `p` directly, so a managed `p` is awaited by its own body, a supported await shape in a freeze body (DESIGN.md §4.2). */
+/** The rejection of `p`; throws if `p` fulfils. Awaits `p` directly, so a managed `p` is awaited by its own body, a direct await (DESIGN.md §4.2). */
 async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
   try {
     await p;
@@ -378,7 +378,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
       expect(p.outcome).toEqual({ status: 'failure', error: err });
     });
 
-    it("its managed awaits never freeze the parent: interrupted() there resumes with the parent's abort reason, and the parent completes", async () => {
+    it("its managed awaits are never rejected by the parent's delivery: interrupted() there resumes with the parent's abort reason, and the parent completes", async () => {
       const t = trace();
       const root = createRootContext();
       const Y = root.fork(
@@ -402,7 +402,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
       expect(Y.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     });
 
-    it("a managed promise its parent's body made is the handler's own await: the parent's delivery does not cut it, the handler resumes and the parent completes (DESIGN.md §4.7)", async () => {
+    it("a managed promise its parent's body made is the handler's own await: the parent's delivery does not reject it, the handler resumes and the parent completes (DESIGN.md §4.7)", async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         const t = trace();
@@ -411,7 +411,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
         const Y = root.fork(
           task(async () => {
             const conn = managed(connect.promise); // targeted at Y: made in Y's body
-            const stop = interrupted(); // cut-only: Y awaits its own interrupt below
+            const stop = interrupted(); // sourceless for Y, which awaits its own interrupt below and is rejected by it
             fork(
               task(
                 async () => {
@@ -429,9 +429,9 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
           }, link),
         );
         await tick(); // the handler waits on `stop`
-        Y.abort('stop'); // cuts Y's own await of `stop`, not the handler's
+        Y.abort('stop'); // rejects Y's own await of `stop`, not the handler's
         await tick();
-        expect(Y.state).toBe('releasing'); // frozen, held by the handler, which now waits on `conn`
+        expect(Y.state).toBe('releasing'); // Y's body unwound; Y is held by the handler, which now waits on `conn`
         connect.resolve('conn');
         await within(root.close());
         expect(t.log).toEqual(['stop: stop', 'reported fatal on conn']);
@@ -625,7 +625,7 @@ describe('join and result (DESIGN.md §4.5, §4.7)', () => {
     await root.close();
   });
 
-  it('join of an aborted fiber throws FiberAbortedError to an awaiter that is not frozen: an observe body draining after its interrupt', async () => {
+  it('join of an aborted fiber throws FiberAbortedError to an awaiter that is not itself interrupted: an observe body draining after its interrupt', async () => {
     let seen: unknown;
     const root = createRootContext();
     const shutdown = root.fork(
@@ -889,7 +889,7 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
     expect(f.outcome).toEqual({ status: 'success', value: 'saw why' });
   });
 
-  it("never() freezes a freeze body: cut at delivery, its node released in the same tick, and it never resumes nor runs its finally", async () => {
+  it('never() in a freeze body is rejected at delivery: the body runs its finally, and its node releases after the body has unwound (D39)', async () => {
     const t = trace();
     const root = createRootContext();
     const f = root.fork(
@@ -899,6 +899,9 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
         try {
           await never();
           t.push('resumed');
+        } catch (e) {
+          t.push(`caught ${(e as Error).name}`);
+          throw e;
         } finally {
           t.push('finally');
         }
@@ -907,15 +910,14 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
     await tick();
     expect(t.log).toEqual(['before']);
     f.abort('x');
-    expect(t.log).toEqual(['before', 'released']);
-    expect(f.state).toBe('complete');
-    expect(f.outcome).toEqual({ status: 'aborted', reason: 'x' });
-    await tick(2);
-    expect(t.log).toEqual(['before', 'released']);
+    expect(t.log).toEqual(['before']); // nothing inside abort(): the rejection is a queued job
+    expect(f.state).toBe('running');
+    expect(await root.result(f)).toEqual({ status: 'aborted', reason: 'x' });
+    expect(t.log).toEqual(['before', 'caught InterruptedError', 'finally', 'released']);
     await root.close();
   });
 
-  it('managed(p) passes a value or a rejection through, freezes a delivered body, and plain code between delivery and the next managed await still runs (DESIGN.md §4.2)', async () => {
+  it('managed(p) passes a value or a rejection through, rejects in a delivered body, and plain code between delivery and the next managed await still runs (DESIGN.md §4.2)', async () => {
     const t = trace();
     const err = new Error('p failed');
     const root = createRootContext();
@@ -925,9 +927,14 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
     });
 
     const late = deferred<string>();
-    const cut = root.fork(
+    const inFlight = root.fork(
       task(async () => {
-        t.push(`cut got ${await managed(late.promise)}`);
+        try {
+          t.push(`in flight got ${await managed(late.promise)}`);
+        } catch (e) {
+          t.push(`in flight rejected: ${(e as Error).name}`);
+          throw e;
+        }
       }, link),
     );
     const bare = deferred();
@@ -941,15 +948,13 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
       }, link),
     );
     await tick();
-    cut.abort();
+    inFlight.abort();
     after.abort();
-    expect(cut.state).toBe('complete');
-    expect(cut.outcome?.status).toBe('aborted');
-    late.resolve('late');
+    expect((await root.result(inFlight)).status).toBe('aborted');
+    late.resolve('late'); // too late: the await was rejected at the delivery
     bare.resolve();
-    await tick(2);
-    expect(t.log).toEqual(['plain code after delivery', 'owned after delivery released']);
-    expect(after.outcome?.status).toBe('aborted');
+    expect((await root.result(after)).status).toBe('aborted');
+    expect(t.log).toEqual(['in flight rejected: InterruptedError', 'plain code after delivery', 'owned after delivery released']);
     await root.close();
   });
 
@@ -1320,7 +1325,7 @@ describe('ported: spawn (fork with a destination, or inside a call)', () => {
     await ctx.close();
   });
 
-  it('abort() on the fiber fires its signal() and freezes it at its managed await', async () => {
+  it('abort() on the fiber fires its signal() and rejects its managed await', async () => {
     const ctx = createRootContext();
     const t = trace();
     let signalAborted = false;
@@ -1330,7 +1335,7 @@ describe('ported: spawn (fork with a destination, or inside a call)', () => {
         s.addEventListener('abort', () => {
           signalAborted = true;
         });
-        await managed(sleep(1000, s)); // the sleep resolves on abort: only the freeze keeps the body from resuming
+        await managed(sleep(1000, s)); // the sleep resolves on abort: only the rejection keeps the body from going on
         t.push('resumed');
       }, link),
     );

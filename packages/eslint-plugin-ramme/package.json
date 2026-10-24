@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "license": "Apache-2.0",
   "author": "Anders Hessellund Jensen",
-  "description": "ESLint rules for ramme: the hazards that look like plain JavaScript inside ramme bodies (finally, using, timers, Promise combinators) and the wiring errors syntax can see.",
+  "description": "ESLint rules for ramme: a catch that swallows a body's own interruption, the constructs that look like plain JavaScript inside ramme bodies and are not what they seem (finally, using, timers, Promise combinators), and the wiring errors syntax can see.",
   "keywords": [
     "eslint",
     "eslintplugin",

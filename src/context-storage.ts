@@ -25,8 +25,8 @@ export interface Frame {
   /**
    * @internal Set only on the frame a failure handler runs in, with the failed fiber's parent as `node`
    * (DESIGN.md §4.7). The handler is not the parent's body: it may resolve, fork and attach on the parent
-   * while the parent's body is lent (DESIGN.md §4.9), its managed awaits never freeze anything and never count
-   * as the parent's (DESIGN.md §4.2, §4.7), and its calls lend nothing. Carried across the handler's own awaits
+   * while the parent's body is lent (DESIGN.md §4.9), its managed awaits are never rejected by a delivery and never
+   * count as the parent's (DESIGN.md §4.2, §4.7), and its calls lend nothing. Carried across the handler's own awaits
    * like any frame; the record is the run's hold on its parent (DESIGN.md §4.7).
    */
   readonly handler?: HandlerRun;
@@ -125,8 +125,8 @@ export function currentNode(): NodeImpl | undefined {
 /**
  * @internal Run `fn` outside the caller's async context (A2): in the adapter's load-time context,
  * or under `NO_NODE` when the adapter offers none. ramme registers reactions on promises it does not
- * control (a foreign fiber's completion, a user promise) here, so a frozen body's node and context are
- * not retained until that promise settles. Runs `fn` directly when no storage is registered.
+ * control (a foreign fiber's completion, a user promise) here, so an abandoned body's node and context
+ * are not retained until that promise settles. Runs `fn` directly when no storage is registered.
  */
 export function runDetached<R>(fn: () => R): R {
   if (storage === undefined) return fn();

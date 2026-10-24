@@ -111,6 +111,22 @@ type _RunSync = Expect<Equal<typeof ramme.runSync, <R, A extends unknown[]>(fn: 
 type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Promise<void>>>;
 type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Promise<void>>>;
 
+/** `shield` takes a task or a body as `call` does, free and as a method, and resolves with its value (D39, DESIGN.md §4.2). */
+export function shields(ctx: Context, t: Task<[number], string>): void {
+  const _free = ramme.shield(t, 1);
+  const _body = ramme.shield(async (n: number) => n * 2, 21);
+  const _method = ctx.shield(async () => 'done');
+  type _Free = Expect<Equal<typeof _free, Promise<string>>>;
+  type _Body = Expect<Equal<typeof _body, Promise<number>>>;
+  type _Method = Expect<Equal<typeof _method, Promise<string>>>;
+  // @ts-expect-error -- the arguments are the task's, as for call
+  void ramme.shield(t, 'one');
+}
+
+/** `InterruptedError` is the awaiting body's own interruption: an `Error` with the delivery's `reason` (D39). */
+type _Interrupted = Expect<Equal<InstanceType<typeof ramme.InterruptedError>['reason'], unknown>>;
+type _InterruptedIsError = Expect<InstanceType<typeof ramme.InterruptedError> extends Error ? true : false>;
+
 /** `parent` is the resolution parent, a node or `undefined` (DESIGN.md §2.1, D33). */
 type _Parent = Expect<Equal<Context['parent'], Context | undefined>>;
 

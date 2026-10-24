@@ -93,14 +93,15 @@ server.on('request', (req, res) =>
   node is passed explicitly. `handle.with({...})` is the same task with
   options for this use: a `name`, a `signal` that interrupts it, and
   `onFailure`, where its failure goes.
-- When the client hangs up, `req.signal` interrupts the handler: it stops at
-  its next *managed await* and never resumes, and the lease goes back to the
-  pool. A managed await is an `await` on a promise ramme returned (`call`,
-  `join`, `all`, `race`, `release`, `sleep`, …); `await fetch(...)` is not
-  one, which is why you pass `signal()` on, and a timer is one only as
+- When the client hangs up, `req.signal` interrupts the handler: its next
+  *managed await* rejects with `InterruptedError`, and so does every one
+  after it, so the handler unwinds; then the lease goes back to the pool. A
+  managed await is an `await` on a promise ramme returned (`call`, `join`,
+  `all`, `race`, `release`, `sleep`, …); `await fetch(...)` is not one,
+  which is why you pass `signal()` on, and a timer is one only as
   `await sleep(ms)` ([DESIGN.md
-  §4.2](DESIGN.md#42-freeze-and-managed-awaits-d13)). An interruption is not
-  a failure, so `onFailure` is not called.
+  §4.2](DESIGN.md#42-sticky-rejection-and-managed-awaits-d13-d39)). An
+  interruption is not a failure, so `onFailure` is not called.
 - If `work` throws, `onFailure` gets the error once.
 
 ## Services that hold state
@@ -241,7 +242,7 @@ Something that repeats is a fork that loops on `sleep`:
 const session = task(async (user: User) => {
   fork(async () => {
     for (;;) {
-      await sleep(30_000);                  // an interrupted loop stops here, and its timer is cleared
+      await sleep(30_000);                  // an interrupted loop stops here: its timer is cleared, the sleep rejects
       await call(sendHeartbeat, user);
     }
   });
@@ -256,25 +257,87 @@ and everything attached to it, until the timer fires. Outside any node,
 
 ## The rules
 
-- **Own it before the work; don't clean up in `finally`.** An interrupted
-  body never resumes, so its `finally` never runs. Anything that must be
-  undone is attached with `own(...)` and released by its node. The same goes
-  for `using` / `await using` inside async bodies. `await using` for the
-  root at the top level is fine.
-- **Release early whenever you like.** `await release(x)` runs `x`'s release
-  now, exactly once.
-- **`try/catch` is fine.** A `catch` sees real errors, never its own
-  body's interruption. Awaiting other work that was interrupted does throw
-  (`FiberAbortedError`, below).
+- **Own it before the work.** Anything that must be undone is attached with
+  `own(...)` and released by its node, however the body ends. An interrupted
+  body is unwound, so its `finally` does run, but ramme cannot see what a
+  `finally` (or a `using` / `await using` inside an async body) cleans up,
+  and inside one every managed await other than release work rejects again.
+  Keep invariants in `own`. `await using` for the root at the top level is
+  fine.
+- **A `catch` can see your own interruption: rethrow it.** After an
+  interruption, every managed await of the body rejects with
+  `InterruptedError`. Swallowing it gets you nowhere: the next managed await
+  rejects again, and the task's outcome is `aborted` whatever it returns.
+  Write `if (e instanceof InterruptedError) throw e`, or branch on outcomes
+  with `attempt` and `settle` and keep `catch` for translating errors.
+  Awaiting other work that was interrupted throws `FiberAbortedError`
+  (below), which is a real error of yours to handle. One exception: a promise
+  another task's code made and shares with yours (a memoized loader's cached
+  promise, a batched load) carries *that* task's `InterruptedError` when it
+  is interrupted. `signal().aborted` tells your own, so where tasks share
+  such promises write `if (e instanceof InterruptedError && signal().aborted)
+  throw e`, and handle the other as a failed load.
+- **Cleanup that must await goes in `shield`.** After an interruption only
+  release work still completes: `release(x)`, `releaseAll()`, `close()` or
+  `[Symbol.asyncDispose]()` of a node below your task, and
+  `shield(async () => …)`, which runs its body to the end (its `signal()` is
+  the release deadline) and hands you its result.
 - **Await every `call`.** A forgotten await is detected: the next
   body-shaped operation in that body (`lookup`, `fork`, `call`, `join`, …)
   throws `UnawaitedCallError`. `own`, `release`, `abort` and `close` stay
   allowed, so they do not reveal it. Use `all([...])` for concurrent calls.
+- **Await derived promises at once.** An async helper, a `Promise`
+  combinator, a `.then` chain or a `gen(…)` over a managed await rejects
+  when the task is interrupted. Stored and awaited later, it is an unhandled
+  rejection in the meantime. Await it where you make it, or combine with
+  `all()`.
+- **Release early whenever you like.** `await release(x)` runs `x`'s release
+  now, exactly once.
 - **Pass `signal()` on to `fetch` and drivers; use `sleep` for timers**, so
   work stops promptly when interrupted.
 - **`inject` in constructors, `lookup` in bodies.** `lookup` throws during
   creation and `inject` throws outside it. Don't store a `lookup` result on
   anything that outlives the current task.
+
+**Foreign code.** A library's code runs inside your task, in its async
+context, so ramme cannot tell it from yours. A driver's transaction callback
+(Prisma's `$transaction`, Knex's or Drizzle's `transaction`; with
+node-postgres, which has no callback API, your own `withTx(client, fn)`
+helper) around a `call` that is interrupted sees the rejection, so its
+`finally` commits or rolls back as it would on any error, after the call
+has completed. The same holds around a `join` of a task you forked, and a
+connection your task got from a `child()` scope is still open then: the
+scope is released after your task has unwound. Around a `join` of an owned
+fork (`own(fork(t))`), or a `managed(p)`, the `finally` runs at once while
+that work goes on, so hand a driver call inside a transaction or a mutex
+`signal()`.
+
+Three more things to know about libraries:
+
+- A retry wrapper that retries on any error retries the interruption too.
+  Every attempt's managed awaits are rejected again, but the retried task's
+  plain work, such as a driver write not handed `signal()`, still runs to its
+  end each time: a non-idempotent write is repeated once per attempt. Give
+  such helpers, and the writes inside them, `signal()`, and watch for
+  `node:stalled`.
+- A helper that swallows errors inside a transaction callback (a
+  `safe(() => …)` returning a fallback) lets the rest of the callback run, and
+  the driver then commits half a transaction. End every transaction callback
+  with `signal().throwIfAborted()`, or any managed await, so an interrupted
+  callback always rejects into the rollback.
+- Cleanup that awaits a driver with no timeout of its own (a `ROLLBACK` on a
+  dead connection) holds your task, and `await using app` shutdown with it,
+  for as long as it hangs: `releaseTimeoutMs` does not reach a task's own
+  code. Give such cleanup a driver-level timeout.
+
+```ts
+const save = task(async (order: Order) => {
+  await withTx(db, async (tx) => {               // its finally runs on interruption, after the call completed
+    await call(insertOrder, tx, order);
+    signal().throwIfAborted();                   // if anything above swallowed an interruption, still no COMMIT
+  });
+});
+```
 
 ## The platform
 
@@ -304,6 +367,7 @@ shutdown. Import the adapter before anything else.
 | `NodeCompletedError` | A node, or a service, was used after it was released. |
 | `FiberNotAwaitableError` | `await fiber`: use `join(fiber)` or `result(fiber)`. |
 | `FiberAbortedError` | `join` / `call` / `all` / `race` of work that was interrupted, by code that is not itself interrupted (top level, a platform callback, or a body whose own node was not aborted). |
+| `InterruptedError` | Your own task was interrupted: every managed await it makes now rejects with this. Rethrow it. Through a promise another task made and shared with yours (a cached load), it is that task's interruption: then your `signal().aborted` is not set, unless your task was interrupted too. |
 
 To branch on how work ended instead of catching, `attempt` is `call` that
 resolves with the outcome, and `settle` is `all` that resolves with every
@@ -320,7 +384,7 @@ if (orders.status === 'failure') log(orders.error);                    // all wo
 
 let quote = await attempt(fetchQuote, sku);
 for (let i = 0; quote.status === 'failure' && i < 3; i++) {
-  await sleep(100 * 2 ** i);                                           // back off; an interrupted caller stops here
+  await sleep(100 * 2 ** i);                                           // back off; an interrupted caller is rejected here
   quote = await attempt(fetchQuote, sku);
 }
 ```
@@ -328,7 +392,9 @@ for (let i = 0; quote.status === 'failure' && i < 3; i++) {
 `aborted` means the task's own abort (its `timeoutMs` or `signal`, or an
 explicit abort), the abort of the context it runs in (`ctx.attempt(…)`), or,
 for a `settle` member, `settle`'s own `timeoutMs` or `signal`: a body that
-is itself interrupted stops at `attempt` or `settle` as at `call`. The
+is itself interrupted is rejected at `attempt` or `settle` with
+`InterruptedError`, as at `call`, once the task has stopped; its own
+interruption never comes back as an outcome. The
 exception is a task declared `interrupt: 'restore'` inside a shutdown-aware
 body (`interrupt: 'observe'`, DESIGN.md §4.3), whether that body is the
 caller or encloses it: the body's shutdown reaches the task without stopping
@@ -371,7 +437,9 @@ distinguishing member, like the literal `name` above, to stay separate in
 the inferred union. `unwrap(r)` is the named conversion to a defect: the
 value, or the error thrown. Await or return `gen(…)` at once: it is an
 ordinary async function, so a dropped `gen(…)` whose body throws is an
-unhandled rejection. `@typescript-eslint/no-floating-promises`, which needs
+unhandled rejection, and so is a stored one when the task is interrupted,
+since the `InterruptedError` propagates out of `gen` (it never becomes a
+`Result`). `@typescript-eslint/no-floating-promises`, which needs
 type-aware linting (`recommendedTypeChecked`, or
 `parserOptions.projectService`), flags a bare `gen(…)` statement, but not
 `void gen(…)` or an awaited `gen` whose `Result` is discarded. The other
@@ -396,13 +464,15 @@ import tseslint from 'typescript-eslint';
 export default [...tseslint.configs.recommended, ramme.configs.recommended];
 ```
 
-`ramme.configs.recommended` turns on, as errors: `finally` and `using` in
-async functions, `setTimeout` and its siblings, `Promise` combinators, a
+`ramme.configs.recommended` reports a `catch` in an async function that can
+swallow the task's own `InterruptedError`, `setTimeout` and its siblings, a
 `lookup` result stored on an object or in a module variable, a value
-provided on the node that owns it, and a discarded `attempt` or `settle`.
-Some rules are stricter than ramme itself: a top-level `Promise.all` is
-flagged too. The [plugin's README](packages/eslint-plugin-ramme/README.md)
-says what each rule flags, why, and where it is approximate.
+provided on the node that owns it, and a discarded `attempt` or `settle`;
+and it warns on `finally` and `using` in async functions and on `Promise`
+combinators, which work but which ramme cannot see or structure. Some rules
+are stricter than ramme itself: a top-level `Promise.all` is flagged too.
+The [plugin's README](packages/eslint-plugin-ramme/README.md) says what each
+rule flags, why, and where it is approximate.
 
 ## Documentation
 

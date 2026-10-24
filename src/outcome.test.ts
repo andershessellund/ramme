@@ -1,13 +1,13 @@
 // outcome.test.ts — outcome classification, release and body errors
 // (DESIGN.md §4.12), destinations (DESIGN.md §4.7, §4.12), the
-// frozen-awaiter group (D13, D16) and the I13 converse.
+// interrupted-awaiter group (D13, D16, D39) and the I13 converse.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import type { Context, Fiber, Pool } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import type { NodeImpl } from './node-impl.js';
-import { FiberAbortedError } from './resource.js';
+import { FiberAbortedError, InterruptedError } from './resource.js';
 import { deferred, events, here, impl, tick, trace, within } from './test/util.js';
 
 const linked = { onFailure: 'link' } as const;
@@ -324,7 +324,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     expect(S.state).toBe('releasing'); // the body returned; S waits for both children
     gate.resolve();
     await expect(app.result(S)).resolves.toEqual({ status: 'failure', error: err });
-    expect(worker.outcome).toEqual({ status: 'aborted', reason: err }); // delivered, frozen at never()
+    expect(worker.outcome).toEqual({ status: 'aborted', reason: err }); // delivered, rejected at never()
     await expect(app.close()).rejects.toBe(err);
   });
 
@@ -472,12 +472,13 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('frozen awaiters consume nothing (D13, D16)', () => {
-  it("an owner frozen on join(f) while its owned f fails: the owner's outcome is failure, it surfaces exactly once, and f's record is consumed", async () => {
+describe('interrupted awaiters consume nothing (D13, D16, D39)', () => {
+  it("an owner interrupted on join(f) by its owned f's failure: the join rejects with InterruptedError, the owner's outcome is failure, it surfaces exactly once, and f's record is consumed", async () => {
     const app = createRootContext();
     const err = new Error('owned f failed');
     let O!: NodeImpl;
     let f!: NodeImpl;
+    let caught: unknown;
     const p = app.call(async () => {
       O = here();
       f = impl(
@@ -488,41 +489,56 @@ describe('frozen awaiters consume nothing (D13, D16)', () => {
           }),
         ),
       );
-      await here().join(f as unknown as Fiber<unknown>); // frozen by f's C5 abort; this join never delivers
+      try {
+        await here().join(f as unknown as Fiber<unknown>); // rejected by f's C5 abort; this join never delivers
+      } catch (e) {
+        caught = e;
+        throw e;
+      }
     });
     await expect(p).rejects.toBe(err);
-    expect(O.frozen).toBe(true);
+    expect(caught).toBeInstanceOf(InterruptedError);
+    expect((caught as InterruptedError).reason).toBe(err); // C5 aborts the owner with the owned fiber's failure
     expect(O.outcome).toEqual({ status: 'failure', error: err });
     expect(f.failure?.consumed).toBe(true);
     await expect(app.close()).resolves.toBeUndefined(); // exactly once
   });
 
-  it('a parent frozen on call(observeChild) whose child fails after the parent was delivered: it surfaces from the parent', async () => {
+  it('a parent interrupted on call(observeChild) whose child fails after the parent was delivered: the call rejects once the child completed, consumes nothing, and the failure surfaces from the parent', async () => {
     const app = createRootContext();
     const err = new Error('late observe failure');
     let P!: NodeImpl;
+    let C!: NodeImpl;
+    let atCatch: string | undefined;
     const p = app.call(async () => {
       P = here();
-      await here().call(
-        task(
-          async () => {
-            await here().interrupted();
-            await tick();
-            throw err;
-          },
-          { interrupt: 'observe' },
-        ),
-      );
+      try {
+        await here().call(
+          task(
+            async () => {
+              C = here();
+              await here().interrupted();
+              await tick();
+              throw err;
+            },
+            { interrupt: 'observe' },
+          ),
+        );
+      } catch (e) {
+        atCatch = `${(e as Error).name}, child ${C.state}`;
+        throw e;
+      }
     });
     await tick();
     P.abort();
-    expect(P.frozen).toBe(true);
+    expect(P.bodyDone).toBe(false); // lent to the child, which has not stopped
     await expect(p).rejects.toBe(err);
+    expect(atCatch).toBe('InterruptedError, child complete');
     expect(P.outcome).toEqual({ status: 'failure', error: err });
     await app.close();
   });
 
-  it('a request fiber aborted while awaiting app.call(work), where work later fails: it surfaces from app.close()', async () => {
+  it('a request fiber aborted while awaiting app.call(work), where work later fails: the mark delivers work, the fiber waits for it, and the failure surfaces from app.close()', async () => {
     const app = createRootContext();
     const err = new Error('work failed late');
     const gate = deferred();
@@ -542,11 +558,13 @@ describe('frozen awaiters consume nothing (D13, D16)', () => {
     await tick();
     Y.abort();
     await tick();
-    expect(Y.state).toBe('complete'); // frozen; work is the app's child, not Y's
-    expect(Y.outcome?.status).toBe('aborted');
-    expect(work.lender).toBeUndefined(); // the lender completed first and cleared the lending pair (A2)
+    expect(work.delivered).toBe(true); // the app's child, not Y's: delivered by the call's mark (D39, A.2)
+    expect(Y.state).toBe('running'); // still lent to work (D11)
+    expect(work.lender).toBe(impl(Y));
     gate.resolve();
-    await tick();
+    await within(app.result(Y));
+    expect(Y.outcome?.status).toBe('aborted');
+    expect(work.lender).toBeUndefined(); // work completed first and cleared the lending pair (A2)
     await expect(app.close()).rejects.toBe(err);
   });
 
@@ -589,24 +607,32 @@ describe('frozen awaiters consume nothing (D13, D16)', () => {
     await app.close();
   });
 
-  it("release(x) whose release throws while the caller is frozen surfaces from the owner's completion", async () => {
+  it("release(x) whose release throws after the caller was interrupted: the exempt await is delivered the error but consumes nothing, and it surfaces from the owner's completion (D39, A.3)", async () => {
     const app = createRootContext();
     const err = new Error('early release failed');
     const gate = deferred();
     let P!: NodeImpl;
+    let caught: unknown;
     const p = app.call(async () => {
       P = here();
       const x = here().own({}, async () => {
         await gate.promise;
         throw err;
       });
-      await here().release(x);
+      try {
+        await here().release(x);
+      } catch (e) {
+        caught = e;
+      }
+      return 'swallowed';
     });
     await tick();
     P.abort();
-    expect(P.frozen).toBe(true);
+    expect(P.bodyDone).toBe(false); // release work: not rejected by the delivery
     gate.resolve();
     await expect(p).rejects.toBe(err);
+    expect(caught).toBe(err); // delivered to the awaiter, not consumed by it
+    expect(P.outcome).toEqual({ status: 'failure', error: err }); // aborted + the unconsumed release failure (D24)
     await app.close();
   });
 
@@ -723,7 +749,7 @@ describe('frozen awaiters consume nothing (D13, D16)', () => {
     await expect(app.close()).resolves.toBeUndefined();
   });
 
-  it("an early-release awaiter cut while its owner's loop waits for it leaves the error to the owner's completion (D16)", async () => {
+  it("an early-release awaiter interrupted while its owner's loop waits for it is delivered the error without consuming it, which leaves it to the owner's completion (D16, D39)", async () => {
     const app = createRootContext();
     const M = app.child({ name: 'M' });
     const err = new Error('a failed');
@@ -954,7 +980,7 @@ describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
     await app.close();
   });
 
-  it("a frozen all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (DESIGN.md §4.8, D13)", async () => {
+  it("an interrupted all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (DESIGN.md §4.8, D13)", async () => {
     const app = createRootContext();
     const err = new Error('early member failure');
     let P!: NodeImpl;
@@ -975,8 +1001,7 @@ describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
     expect(group.unconsumed.size).toBe(1); // the failed member waits for the whole group
     P.abort();
     await expect(p).rejects.toBe(err);
-    expect(group.frozen).toBe(true);
-    expect(group.outcome).toEqual({ status: 'failure', error: err });
+    expect(group.outcome).toEqual({ status: 'failure', error: err }); // aborted by state + the member's unconsumed failure
     await expect(app.close()).resolves.toBeUndefined();
   });
 });

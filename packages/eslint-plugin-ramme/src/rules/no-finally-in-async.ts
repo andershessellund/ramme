@@ -1,6 +1,8 @@
-// A `try` with a `finally` lexically inside an async function. ramme
-// interrupts a body by freezing it at its next managed await: it never
-// resumes, so a `finally` around that await never runs (DESIGN.md §2.6, §4.2).
+// A `try` with a `finally` lexically inside an async function, a warning in
+// `recommended`. An interrupted ramme body unwinds, so its `finally` runs, but
+// every managed await in it other than release work rejects again (sticky
+// rejection, D39), and ramme cannot see the resource it guards: no event, no
+// `node:stalled`, no early `release(x)` (DESIGN.md §2.6, §4.2).
 
 import type { Rule } from 'eslint';
 import { isInAsyncFunction } from '../ast.js';
@@ -10,14 +12,15 @@ export const noFinallyInAsync: Rule.RuleModule = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Disallow `finally` in async functions, which a frozen ramme body never runs',
+      description:
+        'Warn on `finally` in async functions: it runs on interruption but can await only release work, and ramme cannot see what it cleans up',
       recommended: true,
       url: docsUrl('no-finally-in-async'),
     },
     messages: {
       finally:
-        'A frozen body never runs `finally`: an interrupted async body stops at its next managed await and never resumes. ' +
-        'Attach the invariant with `own(() => …)` instead (ramme DESIGN.md §2.6).',
+        'A `finally` runs on interruption but cannot await ramme work other than release; attach the invariant with own(), or shield() the cleanup ' +
+        '(ramme DESIGN.md §2.6).',
     },
     schema: [],
   },

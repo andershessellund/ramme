@@ -12,9 +12,10 @@
 // - `own`, `release`, `releaseAll`, `fork`, `pool`, `child`, `current` and
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
-//   `settle`, `join`, `result`, `interrupted`, `never`, `sleep`, `managed` and
-//   `runSync`, throw `CreationViolationError` first, before touching any node
-//   (DESIGN.md §3.2, §3.5, I16): a refused call never creates the value's node.
+//   `settle`, `shield`, `join`, `result`, `interrupted`, `never`, `sleep`,
+//   `managed` and `runSync`, throw `CreationViolationError` first, before
+//   touching any node (DESIGN.md §3.2, §3.5, I16): a refused call never
+//   creates the value's node.
 //
 // Outside any node every one of them throws `NoCurrentNodeError`; when no
 // context storage is registered the message names `import 'ramme/node'`.
@@ -133,12 +134,12 @@ export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
 
 /**
  * `call`, resolving with the child's outcome: its failure is delivered as a value and consumed, never
- * thrown. A `freeze` or `restore` caller that is itself interrupted freezes here as on `call`, so `aborted` is
- * the child's own abort (its `timeoutMs`, its `signal`, an explicit abort). A `restore` child is the exception:
- * it also hears an `observe` caller's interruption, and an `observe` ancestor's that a `freeze` caller below it
- * does not, and reports either as `aborted`. The `observe` caller sees its own in `signal().aborted`; the
- * `freeze` caller's signal has not fired, so a deadline fallback there tests the reason, the `TimeoutError`
- * `DOMException` that `timeoutMs` delivers (DESIGN.md §4.5).
+ * thrown. A `freeze` or `restore` caller that is itself interrupted is rejected here with `InterruptedError`, as
+ * on `call`, once the child has completed, so `aborted` is the child's own abort (its `timeoutMs`, its `signal`,
+ * an explicit abort). A `restore` child is the exception: it also hears an `observe` caller's interruption, and an
+ * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted`. The `observe`
+ * caller sees its own in `signal().aborted`; the `freeze` caller's signal has not fired, so a deadline fallback
+ * there tests the reason, the `TimeoutError` `DOMException` that `timeoutMs` delivers (DESIGN.md §4.5).
  */
 export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
   return requireBodyShaped('attempt').attempt(t, ...args);
@@ -168,6 +169,18 @@ export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, o
   return requireBodyShaped('settle').settle(tasks, opts);
 }
 
+/**
+ * Release work on demand (D39, DESIGN.md §4.2): run `t` in a release fiber of the current node and await it. Its
+ * `signal()` is the release deadline (`releaseTimeoutMs`), `own` attaches to it and `lookup` resolves through the
+ * current node, and no interruption rejects the await, so it is the way to await cleanup after the body was
+ * interrupted (a rollback in a `catch`). It lends the current node as `call` does, until it completes or the body
+ * settles (DESIGN.md §4.9). The current node completes after every shield it started, awaited or not; a shield's
+ * failure is the awaiter's, or surfaces from the current node (I11).
+ */
+export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
+  return requireBodyShaped('shield').shield(t, ...args);
+}
+
 /** An unsubscribed pool on the current node; its forks report to `onFailure` (DESIGN.md §4.10). */
 export function pool(opts: PoolOptions): Pool {
   return requireCurrent('pool').pool(opts);
@@ -178,38 +191,48 @@ export function child(opts?: NodeOptions): Context {
   return requireCurrent('child').child(opts);
 }
 
-// --- awaiting; the freeze decision is the current node's (DESIGN.md §4.2) ------------
+// --- awaiting; the target is the current node (DESIGN.md §4.2) -------------------------
 
-/** The fiber's value, or its failure thrown. A managed await. */
+/**
+ * The fiber's value, or its failure thrown. A managed await: an interrupted `freeze` or `restore` body awaiting it is
+ * rejected with `InterruptedError`, once the fiber has completed when it is subscribed below the body, at once for
+ * any other fiber, such as an owned one (DESIGN.md §4.2).
+ */
 export function join<T>(fiber: Fiber<T>): Promise<T> {
   return requireBodyShaped('join').join(fiber);
 }
 
-/** The fiber's outcome; never rejects. A managed await. */
+/**
+ * The fiber's outcome, never its failure thrown. A managed await: an interrupted `freeze` or `restore` body awaiting
+ * it is rejected with `InterruptedError` instead, when `join` would be (DESIGN.md §4.2).
+ */
 export function result<T>(fiber: Fiber<T>): Promise<Outcome<T>> {
   return requireBodyShaped('result').result(fiber);
 }
 
-/** Resolves with the reason when the current node is delivered; in a `freeze` body it never resumes (DESIGN.md §4.3). */
+/**
+ * Resolves with the reason when the current node is delivered, for `observe` bodies (DESIGN.md §4.3); in a
+ * `freeze` or `restore` body that delivery rejects it with `InterruptedError` instead (DESIGN.md §4.2).
+ */
 export function interrupted(): Promise<unknown> {
   return requireBodyShaped('interrupted').interrupted();
 }
 
-/** A managed await that never settles. */
+/** A managed await that never resolves: in a `freeze` or `restore` body, its node's delivery rejects it. */
 export function never(): Promise<never> {
   return requireBodyShaped('never').never();
 }
 
 /**
  * A managed await that resolves after `ms` milliseconds, a number in [0, 2^31 − 1] (`RangeError` otherwise). A
- * delivered `freeze` or `restore` body awaiting it is frozen, and its timer is cleared at that delivery; an
- * `observe` body, a release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34).
+ * delivered `freeze` or `restore` body awaiting it is rejected with `InterruptedError`, and its timer is cleared
+ * at that delivery; an `observe` body, a release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34).
  */
 export function sleep(ms: number): Promise<void> {
   return requireBodyShaped('sleep').sleep(ms);
 }
 
-/** Make a bare promise a managed await: in a delivered `freeze` body it never settles (DESIGN.md §4.2). */
+/** Make a bare promise a managed await: in a delivered `freeze` or `restore` body it rejects with `InterruptedError` (DESIGN.md §4.2). */
 export function managed<T>(promise: Promise<T>): Promise<T> {
   return requireBodyShaped('managed').managed(promise);
 }

@@ -149,9 +149,9 @@ export function unwrapOr<R extends Result<unknown, unknown>, U>(r: R, fallback: 
  * not be a promise gives either, as its value turns out (`Fenced`). A returned fiber is a value: its `then` getter
  * throws (DESIGN.md §4.5), so it is not chained, and `fromThrowing(() => pool.fork(job))` is the fiber, or the
  * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps `aborted`: over a
- * `call` this reports an abort as `failure(FiberAbortedError)` (DESIGN.md §4.13). The promise forms await at
- * once, when `fromThrowing` is called: over a managed promise, await or return `fromThrowing(…)` at once
- * (DESIGN.md §4.2).
+ * `call` this reports another node's abort as `failure(FiberAbortedError)`, and the caller's own interruption as
+ * `failure(InterruptedError)`, a swallow no lint sees (DESIGN.md §4.13). The promise forms await at once, when
+ * `fromThrowing` is called: over a managed promise, await or return `fromThrowing(…)` at once (DESIGN.md §4.2).
  */
 export function fromThrowing<T>(f: () => PromiseLike<T>): Promise<Result<Awaited<T>, unknown>>;
 export function fromThrowing<T>(f: () => T): Fenced<T>;
@@ -170,9 +170,10 @@ export function fromThrowing(x: unknown): Result<unknown, unknown> | Promise<Res
 /**
  * The promise form of `fromThrowing`: a direct `await` in an async function, never `p.then(success, failure)`.
  * The `await` calls `then` on `p` as soon as `fromThrowing` is called, in the caller's async context. Over a
- * managed promise that is the supported shape of DESIGN.md §4.2 only when the caller awaits (or returns)
- * `fromThrowing(…)` at once. Stored, dropped or used as a combinator member, it is unsupported in a `freeze` body,
- * as a stored `gen(…)` is: the managed await is armed although the body is suspended elsewhere.
+ * managed promise that is the body's own direct await only when the caller awaits (or returns) `fromThrowing(…)`
+ * at once (DESIGN.md §4.2). Stored, dropped or used as a combinator member, its managed await is armed although
+ * the body is suspended elsewhere, and can consume a failure nothing reads. The `catch` takes every error, the
+ * caller's own `InterruptedError` included, so this promise never rejects.
  */
 async function settled<T>(p: PromiseLike<T>): Promise<Result<Awaited<T>, unknown>> {
   try {
@@ -240,10 +241,12 @@ async function unwrapStep(
  *
  * An async function, not a managed await: its promise rejects with whatever the body throws (a defect), so await
  * or return `gen(…)` at once. A dropped `gen(…)` whose body throws is an unhandled rejection, and a failure a
- * `call` inside `$` threw is consumed by that await, so the node does not surface it (DESIGN.md §4.13). On a
- * yielded failure the generator is left suspended, never resumed: `gen` does not call its `return()`, which would
- * run a `finally`, banned in a ramme body anyway (A7). `gen(thisArg, body)` runs the body with `this` bound, for
- * a generator in a method.
+ * `call` inside `$` threw is consumed by that await, so the node does not surface it (DESIGN.md §4.13). The
+ * caller's own `InterruptedError` propagates out of `$`, the generator and `gen` as a rejection, never as a
+ * `Result` (D39), so a stored `gen(…)` rejects unhandled on interruption. On a yielded failure the generator is
+ * left suspended, never resumed: `gen` does not call its `return()`, which would run the body's `finally`
+ * blocks, which are not where a body's cleanup belongs (A7: what must hold after the body ends is an entry).
+ * `gen(thisArg, body)` runs the body with `this` bound, for a generator in a method.
  */
 export function gen<Y extends Failure<unknown>, R extends Result<unknown, unknown>>(
   body: () => AsyncGenerator<Y, R, unknown>,

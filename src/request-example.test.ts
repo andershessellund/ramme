@@ -312,7 +312,7 @@ describe('a request, end to end', () => {
     expect(lease.conn).toBeDefined();
   });
 
-  it('(3) aborting req.signal freezes the handler at its managed await, releases the lease back to the pool, calls no onFailure, and app.close() surfaces nothing', async () => {
+  it('(3) aborting req.signal rejects the handler at its managed await, releases the lease back to the pool after the handler unwound, calls no onFailure, and app.close() surfaces nothing', async () => {
     const w = world();
     const { ev, server } = w.app();
     let handlerId = -1;
@@ -332,8 +332,7 @@ describe('a request, end to end', () => {
       });
       await expect(app.close()).resolves.toBeUndefined();
     }
-    expect(ev.typesOf(handlerId)).toContain('node:frozen');
-    expect(ev.typesOf(handlerId)).not.toContain('node:settled');
+    expect(ev.of('node:settled').filter((e) => e.id === handlerId).map((e) => e.outcome)).toEqual(['aborted']);
     expect(w.failures).toEqual([]); // I12: aborted is not failure
     expect(w.t.log).toEqual(['lease', 'reaper', 'pool']);
   });
@@ -408,7 +407,7 @@ describe('a request, end to end', () => {
         handler = server.request('/a').fiber;
         await w.inFlight('/a');
         server.later(() => app.abort('SIGTERM')); // no current node there
-        await result(handler); // managed: main freezes here
+        await result(handler); // managed: rejected here with InterruptedError, which ends main
         resumed = true; // recorded, not thrown: a delivered freeze body is aborted whatever it does (I13)
       });
       try {
@@ -420,9 +419,8 @@ describe('a request, end to end', () => {
     };
     await within(run());
     w.t.push('after using');
-    expect(resumed).toBe(false); // main froze at its managed await (DESIGN.md §4.2) and never resumed (I6)
-    expect(ev.typesOf(mainId)).toContain('node:frozen');
-    expect(ev.typesOf(mainId)).not.toContain('node:settled');
+    expect(resumed).toBe(false); // main's managed await rejected (DESIGN.md §4.2), and the rejection unwound it (I6)
+    expect(ev.of('node:settled').filter((e) => e.id === mainId).map((e) => e.outcome)).toEqual(['aborted']);
     expect(caught).toBeInstanceOf(FiberAbortedError);
     expect((caught as FiberAbortedError).reason).toBe('SIGTERM');
     expect(handler?.outcome).toEqual({ status: 'aborted', reason: 'SIGTERM' });

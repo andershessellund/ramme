@@ -1,10 +1,11 @@
-// `Promise.race`, `Promise.any`, `Promise.allSettled` and `Promise.all`.
-// A combinator calls `then` on every member and resumes on its own terms: it
-// can resume a body while one of its managed promises is still pending, or
-// consume a member's failure that a frozen body then never sees (DESIGN.md
-// §4.2, D13). Deliberately stricter than §4.2, which supports a `Promise.all`
-// that fulfils over managed members: syntax cannot tell that one from one
-// that rejects, nor managed members from bare ones.
+// `Promise.race`, `Promise.any`, `Promise.allSettled` and `Promise.all`, a
+// warning in `recommended`. A combinator calls `then` on every member and
+// settles on its own terms. Over managed promises it does not structure its
+// members: what it stops waiting for keeps running, where ramme's `race`
+// aborts it; and `race`, `any` and an `all` that rejects consume a member's
+// failure that arrives after they settled and lose it (DESIGN.md §4.2, D13,
+// D39). `Promise.allSettled` and an `all` that fulfils are flagged too: syntax
+// cannot tell them apart, nor managed members from bare ones.
 
 import type { Rule } from 'eslint';
 import { type EsNode, isGlobalName, propertyName, unwrap } from '../ast.js';
@@ -16,14 +17,16 @@ export const noPromiseCombinators: Rule.RuleModule = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Disallow `Promise.race`, `Promise.any`, `Promise.allSettled` and `Promise.all`; use ramme’s `all`, `race` and `settle`',
+      description:
+        'Warn on `Promise.race`, `Promise.any`, `Promise.allSettled` and `Promise.all`, which do not structure their members; use ramme’s `all`, `race` and `settle`',
       recommended: true,
       url: docsUrl('no-promise-combinators'),
     },
     messages: {
       combinator:
-        '`Promise.{{name}}` can resume a body while one of its managed promises is pending, or drop a member’s failure ' +
-        '(ramme DESIGN.md §4.2). Use ramme’s `all`, `race` or `settle` over tasks.',
+        '`Promise.{{name}}` does not structure its members: over managed promises, what it stops waiting for keeps running, and ' +
+        '`race`, `any` and an `all` that rejects consume and lose a member failure that arrives after they settled. ' +
+        'Use ramme’s `all`, `race` or `settle` over tasks (ramme DESIGN.md §4.2).',
     },
     schema: [],
   },
