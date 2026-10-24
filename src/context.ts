@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.8, §4.10).
+// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.8, §4.10), and
+// `Result`, which `Outcome` extends with `aborted` (DESIGN.md §4.12, D38).
 //
 // Types only: the one implementation of every interface here is `NodeImpl`
 // (node-impl.ts); tasks are `TaskImpl` (fiber.ts).
@@ -68,11 +69,23 @@ export interface LookupOptions {
   skipSelf?: boolean;
 }
 
-/** A node's outcome, fixed at settling (DESIGN.md §4.12). `aborted` is decided by state, never by inspecting an error. */
-export type Outcome<T> =
-  | { readonly status: 'success'; readonly value: T }
-  | { readonly status: 'failure'; readonly error: unknown }
-  | { readonly status: 'aborted'; readonly reason: unknown };
+/** The success member of a `Result` (DESIGN.md §4.12). */
+export type Success<T> = { readonly status: 'success'; readonly value: T };
+
+/** The failure member of a `Result` (DESIGN.md §4.12). */
+export type Failure<E = unknown> = { readonly status: 'failure'; readonly error: E };
+
+/**
+ * An expected failure as a return value: a plain object, never a class, so any `{ status, value | error }` of
+ * this shape is one (DESIGN.md §4.12, D38). The helpers are in `ramme/result`.
+ */
+export type Result<T, E = unknown> = Success<T> | Failure<E>;
+
+/**
+ * A node's outcome, fixed at settling (DESIGN.md §4.12): a `Result` plus `aborted`, which is decided by state, never
+ * by inspecting an error. An outcome whose `status` is not `'aborted'` is a `Result<T, unknown>`.
+ */
+export type Outcome<T> = Result<T, unknown> | { readonly status: 'aborted'; readonly reason: unknown };
 
 /**
  * Where a fiber's `failure` goes (DESIGN.md §4.7). An `aborted` outcome fires no destination.

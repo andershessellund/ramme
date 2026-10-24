@@ -287,6 +287,46 @@ deadline fallback there checks that the reason is a `TimeoutError`
 value is yours to look at; ignore `status` and the error is gone, which is
 why `call` stays the default.
 
+## Expected failures
+
+A failure the caller is meant to branch on (no such user, a declined card)
+is a return value, not a throw: a `Result`, `{ status: 'success', value }`
+or `{ status: 'failure', error }`, in the words an outcome uses. Anything
+thrown is a defect: let it fail the task, and translate it where the work
+is handed over (`attempt`, `onFailure`), not in the middle of the domain
+code. `ramme/result` is optional, and any `{ status, value | error }`
+object of the shape works with it. Its `gen` and `$` are the `?` operator:
+
+```ts
+import type { Result } from 'ramme';
+import { $, gen, success } from 'ramme/result';
+
+class UserNotFound extends Error { readonly name = 'UserNotFound' as const; }
+class OrderNotFound extends Error { readonly name = 'OrderNotFound' as const; }
+
+// getUser(id): Promise<Result<User, UserNotFound>>; getOrder(user): Promise<Result<Order, OrderNotFound>>
+const r = await gen(async function* () {
+  const user = yield* $(getUser(id));       // the user, or the run ends here with the failure as its result
+  const order = yield* $(getOrder(user));
+  return success(order);
+});
+// r: Result<Order, UserNotFound | OrderNotFound>
+if (r.status === 'failure') return notFound(r.error);
+```
+
+TypeScript compares types by structure, so error classes need a
+distinguishing member, like the literal `name` above, to stay separate in
+the inferred union. `unwrap(r)` is the named conversion to a defect: the
+value, or the error thrown. Await or return `gen(…)` at once: it is an
+ordinary async function, so a dropped `gen(…)` whose body throws is an
+unhandled rejection. `@typescript-eslint/no-floating-promises`, which needs
+type-aware linting (`recommendedTypeChecked`, or
+`parserOptions.projectService`), flags a bare `gen(…)` statement, but not
+`void gen(…)` or an awaited `gen` whose `Result` is discarded. The other
+helpers (`map`, `andThen`, `orElse`, `collect`, `fromThrowing`, …) and how
+`gen` behaves when the body is interrupted are in [DESIGN.md
+§4.13](DESIGN.md#413-results-and-gen-d38).
+
 ## Lint
 
 An ESLint plugin, `eslint-plugin-ramme` (ESLint 9 or later, flat config),

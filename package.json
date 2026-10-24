@@ -40,6 +40,10 @@
     "./async-context": {
       "types": "./dist/async-context.d.ts",
       "default": "./dist/async-context.js"
+    },
+    "./result": {
+      "types": "./dist/result.d.ts",
+      "default": "./dist/result.js"
     }
   },
   "main": "./dist/index.js",
