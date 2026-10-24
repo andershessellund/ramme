@@ -9,6 +9,7 @@ import type { Context, Fiber } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import type { NodeImpl } from './node-impl.js';
+import { $, gen, success } from './result.js';
 import { deferred, gcUntil, hasGc, here, tick } from './test/util.js';
 
 function spawn<T>(on: Context, body: () => Promise<T> | T, opts: Parameters<typeof task>[1] = {}): Fiber<T> {
@@ -160,6 +161,41 @@ describe.skipIf(!hasGc)('a frozen body is collectable (A2)', () => {
     expect(big.collected()).toBe(true);
     expect(B.state).toBe('releasing'); // still waiting for its child: the parent waits, whatever it costs
     gate.resolve();
+    await app.close();
+  });
+
+  // DESIGN.md §4.2, §4.13: the managed await inside `$` is the body's own. Its source is a call on a sibling
+  // node that outlives the body, so it is still pending when gc runs; over a call on the fiber itself, the
+  // fiber's release would complete the child and drop the source's reaction first.
+  it('frozen inside gen on $(holder.call(slowResultTask)) whose child is still running when gc runs', async () => {
+    const big = tracked();
+    const app = createRootContext();
+    const holder = app.child();
+    let slow!: NodeImpl;
+    const slowResultTask = task(async () => {
+      slow = here();
+      await here().never(); // on holder, which is never delivered: pending until holder.abort()
+      return success(1);
+    });
+    let resumed = false;
+    const B = spawn(app, async () => {
+      const arr = big.make();
+      const r = await gen(async function* () {
+        const v = yield* $(holder.call(slowResultTask));
+        resumed = true;
+        return success(arr.length + v);
+      });
+      return r;
+    });
+    await tick();
+    B.abort();
+    expect(impl(B).frozen).toBe(true);
+    expect((await app.result(B)).status).toBe('aborted');
+    expect(slow.state).toBe('running');
+    await gcUntil(big.collected);
+    expect(big.collected()).toBe(true);
+    expect([slow.state, resumed]).toEqual(['running', false]);
+    holder.abort();
     await app.close();
   });
 

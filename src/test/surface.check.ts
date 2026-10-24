@@ -11,16 +11,39 @@
 //   has no mapping, so 'ramme' resolves through package.json "exports" to
 //   dist/index.d.ts, what a consumer compiles against.
 //
+// 'ramme/result' has no mapping in either: it resolves through the package's
+// self-reference, to src/result.ts under `pnpm typecheck` (the output path
+// maps back to its source) and to dist/result.d.ts under `pnpm check:surface`.
+//
 // scripts/check-surface.mjs then compares the export clauses of
-// dist/index.d.ts with its expected list name by name.
+// dist/index.d.ts, and the declarations of dist/result.d.ts, with its expected
+// lists name by name.
 // ---------------------------------------------------------------------------
 
 import { all, attempt, current, settle } from 'ramme';
-import type { Context, Outcome, SettleResult, Task } from 'ramme';
+import type { Context, Failure, Fiber, Outcome, Result, SettleResult, Success, Task } from 'ramme';
 import * as ramme from 'ramme';
+import {
+  $,
+  andThen,
+  collect,
+  failure,
+  fromThrowing,
+  gen,
+  isFailure,
+  isSuccess,
+  map,
+  mapFailure,
+  orElse,
+  success,
+  unwrap,
+  unwrapOr,
+} from 'ramme/result';
+import * as rammeResult from 'ramme/result';
 
 type Equal<X, Y> = (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
+type Not<B extends boolean> = B extends true ? false : true;
 
 /** The free `all`, the method `all` on a named node, and `current().all` all infer the tuple (DESIGN.md §4.8). */
 export function d58(ctx: Context, a: Task<[number], number>, b: Task<[string], string>): void {
@@ -78,6 +101,280 @@ type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Promise<void>>>;
 
 /** `parent` is the resolution parent, a node or `undefined` (DESIGN.md §2.1, D33). */
 type _Parent = Expect<Equal<Context['parent'], Context | undefined>>;
+
+// --- Result (DESIGN.md §4.12, §4.13, D38) ------------------------------------
+
+/** `Result` is plain data; `Outcome` is `Result` plus `aborted`, with exactly the structure it had before `Result`. */
+type _Result = Expect<Equal<Result<number, string>, Success<number> | Failure<string>>>;
+type _ResultDefault = Expect<Equal<Result<number>, Result<number, unknown>>>;
+type _Members = Expect<
+  Equal<
+    [Success<number>, Failure<string>, Failure],
+    [
+      { readonly status: 'success'; readonly value: number },
+      { readonly status: 'failure'; readonly error: string },
+      { readonly status: 'failure'; readonly error: unknown },
+    ]
+  >
+>;
+type _Outcome = Expect<
+  Equal<
+    Outcome<number>,
+    | { readonly status: 'success'; readonly value: number }
+    | { readonly status: 'failure'; readonly error: unknown }
+    | { readonly status: 'aborted'; readonly reason: unknown }
+  >
+>;
+type _OutcomeMinusAborted = Expect<Equal<Exclude<Outcome<number>, { readonly status: 'aborted' }>, Result<number, unknown>>>;
+
+// The readers the `ramme/result` signatures name, unexported there: the value and the error types of a `Result`'s
+// members, `never` for a member of the other kind. Taken from the module's own signatures, since two conditional
+// types declared apart are never `Equal`; `_Readers` pins what they compute.
+type SuccessOf<R extends Result<unknown, unknown>> = ReturnType<typeof unwrap<R>>;
+type ErrorOf<R extends Result<unknown, unknown>> = Parameters<Parameters<typeof mapFailure<R, unknown>>[1]>[0];
+type _Readers = Expect<
+  Equal<
+    [
+      SuccessOf<Result<number, string>>,
+      ErrorOf<Result<number, string>>,
+      ErrorOf<Success<number>>,
+      SuccessOf<Failure<string>>,
+      SuccessOf<Failure<1> | Failure<2> | Success<3>>,
+      ErrorOf<Failure<1> | Failure<2> | Success<3>>,
+    ],
+    [number, string, never, never, 3, 1 | 2]
+  >
+>;
+
+/**
+ * The `ramme/result` signatures, exact. Each helper takes the whole `Result` as one type parameter and reads the
+ * value and error types off it, so a `Success`-only argument has error `never` (never `unknown`), and the several
+ * `Failure` members of an unannotated function's return type keep every error (`unannotatedSteps` below).
+ */
+type _Signatures = Expect<
+  Equal<
+    [
+      typeof success,
+      typeof failure,
+      typeof isSuccess,
+      typeof isFailure,
+      typeof map,
+      typeof mapFailure,
+      typeof andThen,
+      typeof orElse,
+      typeof unwrap,
+      typeof unwrapOr,
+      typeof collect,
+      typeof $,
+    ],
+    [
+      <T>(value: T) => Success<T>,
+      <E>(error: E) => Failure<E>,
+      <R extends Result<unknown, unknown>>(r: R) => r is Extract<R, Success<unknown>>,
+      <R extends Result<unknown, unknown>>(r: R) => r is Extract<R, Failure<unknown>>,
+      <R extends Result<unknown, unknown>, U>(r: R, f: (v: SuccessOf<R>) => U) => Result<U, ErrorOf<R>>,
+      <R extends Result<unknown, unknown>, F>(r: R, f: (e: ErrorOf<R>) => F) => Result<SuccessOf<R>, F>,
+      <R extends Result<unknown, unknown>, S extends Result<unknown, unknown>>(
+        r: R,
+        f: (v: SuccessOf<R>) => S,
+      ) => Result<SuccessOf<S>, ErrorOf<R> | ErrorOf<S>>,
+      <R extends Result<unknown, unknown>, S extends Result<unknown, unknown>>(
+        r: R,
+        f: (e: ErrorOf<R>) => S,
+      ) => Result<SuccessOf<R> | SuccessOf<S>, ErrorOf<S>>,
+      <R extends Result<unknown, unknown>>(r: R) => SuccessOf<R>,
+      <R extends Result<unknown, unknown>, U>(r: R, fallback: U) => SuccessOf<R> | U,
+      <R extends Result<unknown, unknown>>(rs: readonly R[]) => Result<SuccessOf<R>[], ErrorOf<R>>,
+      <X extends Result<unknown, unknown> | Promise<Result<unknown, unknown>>>(
+        x: X,
+      ) => { [Symbol.asyncIterator](): AsyncIterator<Failure<ErrorOf<Awaited<X>>>, SuccessOf<Awaited<X>>, unknown> },
+    ]
+  >
+>;
+
+/** `ramme/result` has no default export and no namespace object: its names are the functions above, `fromThrowing`, `gen` and `$`. */
+type _ResultNames = Expect<
+  Equal<
+    keyof typeof rammeResult,
+    | 'success' | 'failure' | 'isSuccess' | 'isFailure' | 'map' | 'mapFailure' | 'andThen' | 'orElse'
+    | 'unwrap' | 'unwrapOr' | 'fromThrowing' | 'collect' | 'gen' | '$'
+  >
+>;
+
+// Each error class has a distinct literal member: TypeScript compares classes by structure, so two bare
+// `class X extends Error {}` are one type and the inferred union collapses to one of them.
+class UserNotFound extends Error {
+  readonly name = 'UserNotFound' as const;
+}
+class OrderNotFound extends Error {
+  readonly name = 'OrderNotFound' as const;
+}
+interface User {
+  readonly id: string;
+}
+interface Order {
+  readonly user: User;
+}
+declare function getUser(id: string): Promise<Result<User, UserNotFound>>;
+declare function getOrder(user: User): Promise<Result<Order, OrderNotFound>>;
+
+/** `gen` infers the exact union of the yields' errors: `Equal`, since an assignment passes for the narrower union too. */
+export async function genUnion(id: string): Promise<void> {
+  const _r = await gen(async function* () {
+    const user = yield* $(getUser(id));
+    const order = yield* $(getOrder(user));
+    return success(order);
+  });
+  type _Union = Expect<Equal<typeof _r, Result<Order, UserNotFound | OrderNotFound>>>;
+  type _NotNarrower = Expect<Not<Equal<typeof _r, Result<Order, UserNotFound>>>>;
+}
+
+/** A `Success`-only step adds `never`, not `unknown`: mixing `$(success(1))` with `$(getUser(id))` is exact. */
+export async function genMixed(id: string): Promise<void> {
+  const _r = await gen(async function* () {
+    const one = yield* $(success(1));
+    const user = yield* $(getUser(id));
+    return success({ one, user });
+  });
+  type _Mixed = Expect<Equal<typeof _r, Result<{ one: number; user: User }, UserNotFound>>>;
+}
+
+/** The body's return must be a `Result`, so a `return failure(e)` beside `yield*` joins the union. */
+export async function genReturns(id: string): Promise<void> {
+  const _r = await gen(async function* () {
+    const user = yield* $(getUser(id));
+    if (user.id === '') return failure('empty id' as const);
+    return success(user);
+  });
+  type _Returned = Expect<Equal<typeof _r, Result<User, UserNotFound | 'empty id'>>>;
+  // @ts-expect-error -- a body that returns a non-Result
+  void gen(async function* () { yield* $(getUser(id)); return 1; }); // prettier-ignore
+}
+
+/** `yield*` over `$` evaluates to `T` itself, a promise included, as the runtime does: never `Awaited<T>`. */
+export async function genUnawaited(p: Promise<number>): Promise<void> {
+  await gen(async function* () {
+    const v = yield* $(success(p));
+    type _V = Expect<Equal<typeof v, Promise<number>>>;
+    return success(v);
+  });
+}
+
+/** `gen(thisArg, body)`: a generator in a method sees the instance as `this`. */
+export class Repo {
+  readonly #prefix = 'u';
+  load(id: string) {
+    return gen(this, async function* () {
+      const user = yield* $(getUser(this.#prefix + id));
+      return success(user);
+    });
+  }
+}
+type _This = Expect<Equal<ReturnType<Repo['load']>, Promise<Result<User, UserNotFound>>>>;
+
+/** The defaults keep `E`: `andThen` over a success-returning step, `orElse` over a recovery that cannot fail. */
+export function resultCombinators(r: Result<number, UserNotFound>): void {
+  const _then = andThen(r, (v) => success(v + 1));
+  const _else = orElse(r, () => success('fallback'));
+  const _map = map(success(1), (v) => v + 1);
+  const _collected = collect([r, r]);
+  type _Then = Expect<Equal<typeof _then, Result<number, UserNotFound>>>;
+  type _Else = Expect<Equal<typeof _else, Result<number | string, never>>>;
+  type _Map = Expect<Equal<typeof _map, Result<number, never>>>;
+  type _Collected = Expect<Equal<typeof _collected, Result<number[], UserNotFound>>>;
+}
+
+class InvalidCard extends Error {
+  readonly name = 'InvalidCard' as const;
+}
+class Insufficient extends Error {
+  readonly name = 'Insufficient' as const;
+}
+class AdminNotFound extends Error {
+  readonly name = 'AdminNotFound' as const;
+}
+interface Admin {
+  readonly admin: true;
+}
+type Receipt = { receipt: number };
+declare function getAdmin(id: string): Promise<Result<Admin, AdminNotFound>>;
+
+/** Unannotated: its inferred return type is `Promise<Failure<InvalidCard> | Failure<Insufficient> | Success<Receipt>>`. */
+async function charge(n: number) {
+  if (n < 0) return failure(new InvalidCard());
+  if (n > 100) return failure(new Insufficient());
+  return success({ receipt: n });
+}
+
+/**
+ * An unannotated fallible function has one `Failure` member per error. A `Result<T, E>` parameter takes one
+ * candidate for `E` and refuses it; every step here takes it, and `gen` infers the union, as it does over a
+ * union of promises.
+ */
+export async function unannotatedSteps(c: boolean, id: string): Promise<void> {
+  const _paid = await gen(async function* () {
+    const receipt = yield* $(charge(5));
+    return success(receipt);
+  });
+  const _either = await gen(async function* () {
+    const who = yield* $(c ? getUser(id) : getAdmin(id));
+    return success(who);
+  });
+  type _Paid = Expect<Equal<typeof _paid, Result<Receipt, InvalidCard | Insufficient>>>;
+  type _Either = Expect<Equal<typeof _either, Result<User | Admin, UserNotFound | AdminNotFound>>>;
+  const s = await charge(1);
+  const _map = map(s, (v) => v.receipt);
+  const _mapFailure = mapFailure(s, (e) => e.name);
+  const _then = andThen(s, (v) => (v.receipt > 1 ? success(v.receipt) : failure('small' as const)));
+  const _else = orElse(s, () => success('none'));
+  const _unwrap = unwrap(s);
+  const _unwrapOr = unwrapOr(s, 'none' as const);
+  const _collected = collect([s, s]);
+  type _Map = Expect<Equal<typeof _map, Result<number, InvalidCard | Insufficient>>>;
+  type _MapFailure = Expect<Equal<typeof _mapFailure, Result<Receipt, 'InvalidCard' | 'Insufficient'>>>;
+  type _Then = Expect<Equal<typeof _then, Result<number, InvalidCard | Insufficient | 'small'>>>;
+  type _Else = Expect<Equal<typeof _else, Result<Receipt | string, never>>>;
+  type _Unwrap = Expect<Equal<typeof _unwrap, Receipt>>;
+  type _UnwrapOr = Expect<Equal<typeof _unwrapOr, Receipt | 'none'>>;
+  type _Collected = Expect<Equal<typeof _collected, Result<Receipt[], InvalidCard | Insufficient>>>;
+  if (isSuccess(s)) {
+    type _Success = Expect<Equal<typeof s, Success<Receipt>>>;
+  } else {
+    type _Failure = Expect<Equal<typeof s, Failure<InvalidCard> | Failure<Insufficient>>>;
+  }
+  if (isFailure(s)) {
+    type _Failure = Expect<Equal<typeof s, Failure<InvalidCard> | Failure<Insufficient>>>;
+  }
+}
+
+/**
+ * `fromThrowing`: an async function or a promise gives a promise of the `Result`; a plain function, the `Result`; a
+ * function whose return type may or may not be a promise, either, as the runtime chains a returned thenable.
+ */
+export function fromThrowingTypes(fiber: Fiber<number>): void {
+  const _async = fromThrowing(async () => 1);
+  const _sync = fromThrowing(() => 'x');
+  const _promise = fromThrowing(Promise.resolve(true));
+  const _any = fromThrowing(() => JSON.parse('1'));
+  const _maybe = fromThrowing((): number | Promise<number> => 1);
+  const _mixed = fromThrowing((): string | Promise<number> => 'x');
+  const _unknown = fromThrowing((): unknown => 1);
+  const _fiber = fromThrowing(() => fiber);
+  type _Async = Expect<Equal<typeof _async, Promise<Result<number, unknown>>>>;
+  type _Sync = Expect<Equal<typeof _sync, Result<string, unknown>>>;
+  type _Promise = Expect<Equal<typeof _promise, Promise<Result<boolean, unknown>>>>;
+  type _Any = Expect<Equal<typeof _any, Result<any, unknown>>>;
+  type _Maybe = Expect<Equal<typeof _maybe, Result<number, unknown> | Promise<Result<number, unknown>>>>;
+  type _Mixed = Expect<Equal<typeof _mixed, Result<string, unknown> | Promise<Result<number, unknown>>>>;
+  type _Unknown = Expect<Equal<typeof _unknown, Result<unknown, unknown>>>; // says nothing of a thenable (D38)
+  type _Fiber = Expect<Equal<typeof _fiber, Result<Fiber<number>, unknown>>>; // a fiber is a value, never chained
+}
+
+/** `attempt` on a task returning a `Result` is two layers read with one vocabulary (DESIGN.md §4.12). */
+export function attemptResult(t: Task<[string], Result<User, UserNotFound>>): void {
+  const _o = attempt(t, 'id');
+  type _O = Expect<Equal<typeof _o, Promise<Outcome<Result<User, UserNotFound>>>>>;
+}
 
 // Names removed by the redesign: one import per name, which fails if the
 // name comes back as a value or as a type. Then the internal names that

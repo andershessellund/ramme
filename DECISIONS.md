@@ -1124,6 +1124,138 @@ interrupted the region's shutdown as
 more names in tier 1; `attempt` emits `join:enter`/`join:leave`, which
 `call` does not. DESIGN.md §4.5, §4.8, §4.12.
 
+### D38. `Result` is `Outcome` minus `aborted`; data only; `gen` and `$` are the `?` operator
+
+A failure a caller is meant to branch on is a return value, typed:
+`Result<T, E> = Success<T> | Failure<E>`, that is `{ readonly status:
+'success'; readonly value: T } | { readonly status: 'failure'; readonly
+error: E }`, a core type, and `Outcome<T>` is `Result<T, unknown>` plus
+`{ status: 'aborted', reason }`, with exactly the structure it had before.
+Everything thrown is a defect, handled at task boundaries (`attempt`,
+`onFailure`) and translated there, never used as domain control flow; an
+interruption is neither (D24). The helpers are free functions over plain
+objects in the subpath `ramme/result`, which imports only types from the
+core: `success`, `failure`, `isSuccess`, `isFailure`, `map`, `mapFailure`,
+`andThen`, `orElse`, `unwrap`, `unwrapOr`, `fromThrowing`, `collect`, and
+`gen` and `$`, which supply `?`: inside `gen(async function* () { … })`,
+`yield* $(r)` evaluates to the success value, or yields the failure, which
+ends the run as `gen`'s result, and `gen` infers the error union from the
+yields. Each helper takes the whole `Result` as one type parameter and
+reads the value and error types off it, so a member of the other kind
+contributes `never`.
+
+**Why.** Libraries written for ramme need one envelope to compose, or each
+invents its own `{ ok, data }` and every boundary between two of them is an
+adapter. The envelope is `Outcome`'s, so `attempt` on a task that returns a
+`Result` is two layers read with one vocabulary, and its discriminant key
+is `status`, as `Promise.allSettled` names it; `allSettled`'s values are
+`'fulfilled'`/`'rejected'`, with `reason`, and the values here are ramme's
+`Outcome` words. It is a plain object, so it survives JSON, structured
+clone and other libraries' helpers, and a hand-rolled object of the shape
+needs no adapter. The payload survives only as far as its own values do:
+JSON drops an `Error`'s message, and structured clone does not keep an
+`Error` subclass. The error channel stays untyped at the task boundary,
+because a declared `E` on a thrown failure is a claim, not a proof:
+whatever a body calls can throw anything, and only a returned value has the
+type its function declares (Effect's typed `E` needs the Effect wrapper,
+which ramme rejected together with `R`). `gen` infers the union from the
+yields and unwinds as data, not as an exception, so no `catch` can swallow
+the failure and nothing has to be declared. The helpers take the whole
+`Result` because a `Result<T, E>` parameter fails in two ways. TypeScript
+takes one inference candidate for `E`, so it refuses the inferred return
+type of an unannotated fallible function, `Failure<A> | Failure<B> |
+Success<T>`. And it infers `unknown` for a type parameter with no
+candidate, so `andThen(r, (v) => success(v + 1))` over `r: Result<number,
+UserNotFound>` would be `Result<number, unknown>`, and one
+`yield* $(success(1))` would widen a `gen`'s whole error union to
+`unknown`. Read off the whole `Result`, every error of a union is kept and a
+`Success`-only argument has error `never`, with nothing annotated.
+**Rejected:** a class with
+methods, neverthrow-style, which puts behaviour on the data and needs an
+adapter for every other shape; typed `E` on tasks (above); a thenable `$`,
+`await $(p)` with a declared `E`, which unwinds by exception through every
+intermediate `catch` and needs the type declared; `$` lifting functions
+(`$(getUser)(id)`), which loses `this`; making `Result` iterable, so that
+`yield* await getUser(id)` works without `$`, which puts behaviour on the
+data and still needs `$` for foreign results; `$` as an `async function*`,
+whose `return` awaits its operand, so a thenable success value would be
+unwrapped, a fiber's `then` would throw `FiberNotAwaitableError` (I27), and
+`$` would add a managed await that the type `T` does not show; an `Option`
+type; a synchronous `genSync`, left out until asked for; `match`, `tap` and
+other combinators, since narrowing on `status` is the combinator library
+and code that wants chaining wraps the plain object in neverthrow in one
+line. **Cost.** Two more concepts, and `yield*` syntax. Generators are not
+arrows, so `this` needs the overload `gen(thisArg, body)`. The freeze
+interplay had to be verified and documented (DESIGN.md §4.2): `await
+gen(…)` over `yield* $(p)` freezes as `await call(t)` does, while a stored
+`gen(…)`, or one used as a combinator member, is unsupported in a `freeze`
+body. So is a `fromThrowing(…)` over a managed promise that is stored,
+dropped or used as a combinator member: its promise form awaits at once, so
+it arms the managed await, can consume a failure that a body frozen
+elsewhere never reads, and can count a running body frozen. `gen` is an
+async function, so a dropped `gen(…)` whose body throws
+is an unhandled rejection, and the node does not surface that failure,
+which `$`'s await consumed; I10 is therefore stated for the core's promises.
+`@typescript-eslint/no-floating-promises` flags a bare `gen(…)` statement,
+but only with type information, and not `void gen(…)` or `await gen(…);`
+with its `Result` discarded, and nothing else reports those:
+`ramme/no-unused-outcome` matches `attempt` and `settle` only (D35).
+TypeScript compares types by structure, so error classes need a
+distinguishing member to stay separate in an inferred union. Three more
+names in the core surface, and a subpath of fourteen functions. DESIGN.md
+§4.2, §4.12, §4.13, §9.
+
+Settled while implementing it:
+
+- *`fromThrowing` keeps the three overloads in the order given, async
+  function first.* Otherwise `fromThrowing(async () => …)` matches
+  `() => T` and is typed as a `Success` holding an unfenced promise, whose
+  rejection goes unhandled. The order has one visible edge: a function
+  whose return type is `never` (it only throws) matches `() =>
+  PromiseLike<T>` first and is typed as a promise, while the call returns
+  the failure synchronously; giving the function its return type (`(): T
+  => { throw e }`) picks the synchronous overload. The `() => T`
+  overload's return type is conditional on `T`. A return type with a
+  thenable member (`number | Promise<number>`) gives `Result<number,
+  unknown> | Promise<Result<number, unknown>>`, as the runtime chains a
+  returned thenable; `Result<T, unknown>` would type a promise as a
+  `Result` whose `status` reads `undefined`, so neither branch on it runs.
+  `any` (`() => JSON.parse(s)`) and `unknown` say nothing of a thenable and
+  are typed synchronously: such a function that returns a promise gives a
+  promise its type does not show, so give it its return type, or fence the
+  promise itself. **Rejected:** a conditional overload that excludes
+  `never`, which is a fourth signature for a function nobody fences on
+  purpose; typing `any` as either, which would make
+  `fromThrowing(() => JSON.parse(s))` a union to await.
+- *A function's result is chained only when its `then` is a function.*
+  `fromThrowing(f)` fences the call of `f`. It then reads `then` on what
+  `f()` returned, and a read that throws counts as no thenable: a fiber's
+  `then` getter throws (I27), and a fiber is a value, which the core does
+  not probe either when a failure handler returns one. So
+  `fromThrowing(() => fork(t))` is the fiber as a success, and
+  `fromThrowing(() => pool.fork(job))` fences pool intake, which `attempt`
+  cannot: the fiber, or `PoolFullError` or `PoolClosedError` as a failure.
+  **Rejected:** reading `then` inside the fence, which made the throwing
+  read `f`'s failure although `f` returned: an admitted fork read as
+  `failure(FiberNotAwaitableError)`, as a refused one does, and its handle
+  was lost.
+- *The helpers take the whole `Result` as their type parameter.* The first
+  signatures were `<T = never, E = never>(r: Result<T, E>)`, and `$` took
+  `Result<T, E> | Promise<Result<T, E>>`. An unannotated function that
+  returns `failure(new InvalidCard())` or `failure(new Insufficient())` or
+  `success(receipt)` infers `Promise<Failure<InvalidCard> |
+  Failure<Insufficient> | Success<Receipt>>`, and TypeScript took the first
+  `Failure`'s error as `E` and refused the second, at `$` and at every
+  helper. Each helper now takes `R extends Result<unknown, unknown>` and
+  reads `SuccessOf<R>` and `ErrorOf<R>` (unexported), as `gen` already did.
+  `$` takes its argument whole and reads it through `Awaited`, so a union of
+  promises (`$(c ? getUser(id) : getAdmin(id))`) is taken too, which an
+  `R | Promise<R>` parameter, one candidate per promise, still refuses.
+  **Rejected:** keeping the `Result<T, E>` parameters and requiring a
+  fallible function to annotate its return type as one `Result<T, E1 |
+  E2>`, a rule nothing enforces, broken by every unannotated function with
+  an error far from its cause.
+
 ### D15. Pool intake stops at the signal
 
 `pool.fork` throws `PoolClosedError` once the pool is delivered or `close()`

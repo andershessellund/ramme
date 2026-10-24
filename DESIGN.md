@@ -64,6 +64,7 @@ rules (§9) are a separate package.
 | `ramme` | nodes, tasks, the ambient free functions, DI, topics, errors |
 | `ramme/node` | side-effect import: `AsyncLocalStorage` context storage |
 | `ramme/async-context` | side-effect import: TC39 `AsyncContext` storage |
+| `ramme/result` | the `Result` helpers (`success` … `collect`, `gen`, `$`; §4.13) |
 
 The two adapters are the only modules with side effects (`sideEffects` in
 package.json names exactly those files). One of them is required (§6, D9′).
@@ -72,7 +73,7 @@ package.json names exactly those files). One of them is required (§6, D9′).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()`, `sleep` | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()`, `sleep`; `Result`, with its helpers in `ramme/result` (§4.13) | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
@@ -737,14 +738,43 @@ by another body. Development mode reports them when they misfire (§4.4).
 the supported fulfilling `Promise.all` included, because syntax cannot tell
 it from one that rejects; such a use is disabled inline with a reason.
 
+**`gen` and `$` (§4.13).** Supported: `await gen(…)` (or `return gen(…)`)
+awaited at once by the body, whose generator awaits a managed promise inside
+`$` (`yield* $(p)`) or directly. `gen` runs the generator in the body's
+frame and `yield*` calls `$`'s `next()` synchronously, so the await inside
+`$` is a direct await in the body's own async context: the managed promise
+is armed for the body's node and cut at its delivery, as `await call(t)` is.
+`gen`'s `await it.next()` and `yield*`'s own awaits are bare promises
+chained behind it, so a cut drops the whole chain and the body counts frozen
+at once. Unsupported in a `freeze` body: a `gen(…)` stored and awaited
+later, or used as a member of any `Promise` combinator (its promise is
+bare). The managed await inside `$` is armed as soon as the generator
+reaches it, so a delivery while the body is suspended elsewhere counts the
+running body frozen and releases its node under it. Use `all`/`settle` over
+tasks instead.
+
+`fromThrowing(p)` over a managed promise, and `fromThrowing(f)` whose
+`f()` returns one, are the same shape. The promise form is an async
+function whose `await p` calls `then` as soon as `fromThrowing` is called,
+in the body's async context. Awaited (or returned) at once by the body, it
+is a direct await. Stored, dropped or used as a combinator member, it is
+unsupported in a `freeze` body, unlike the bare managed promise it wraps,
+which arms nothing until it is awaited. Its armed await consumes a failure
+(a `join`'s) as soon as the source settles, so when the body then freezes
+on another await, that failure is lost: it is held as data in a `Result`
+nobody reads, and nothing reports it. A delivery while the body is
+suspended elsewhere counts the running body frozen and releases its node
+under it, and so does a `void fromThrowing(join(f))` in plain code after
+delivery (I8), which takes the applied path at once.
+
 A managed promise wraps a **source**, an internal promise that never
 rejects (a node's completion, the end of an entry's release, a node's
 delivery), plus a **resume step** that runs only when an awaiter is
 actually resumed (unrelated to a node's delivery of its signal, §4.1). The
 resume step is where an awaited value is produced and a failure is
 *consumed*: a frozen awaiter consumes nothing, and the failure surfaces
-from the parent (§4.12). Since no source rejects, no ramme promise is ever
-an unhandled rejection, awaited or not.
+from the parent (§4.12). Since no source rejects, no promise the core makes
+is ever an unhandled rejection, awaited or not.
 
 ### 4.3 Interruption modes and the birth rule (D12, D20)
 
@@ -1023,7 +1053,20 @@ would be current only for the synchronous part. `runSync(fn, …args)` is
 `child()`, `run`, and `abort()` on exit: synchronous block scoping whose
 synchronous releases have run when it returns.
 
-### 4.12 Outcomes and errors (D17, D24)
+### 4.12 Outcomes and errors (D17, D24, D38)
+
+**Three kinds (D38).** An expected failure, one a caller is meant to branch
+on, is a `Result` value, returned and typed (`{ status: 'success', value }`
+or `{ status: 'failure', error }`, §4.13). A throw is a defect: a task's
+failure is untyped, handled at task boundaries (`attempt`, `onFailure`),
+where a `catch` translates it, and never used as domain control flow. An
+interruption is
+neither: it is decided by state (D24), and it reaches a caller as `aborted`
+from `attempt`/`settle`, or thrown as `FiberAbortedError` from `call` (or as
+a foreign operation's `AbortError` when that operation was handed
+`signal()`, §2.6). `Outcome` is `Result` plus `aborted`, so `attempt` on a
+task returning a `Result` yields `Outcome<Result<V, E>>`, two layers read
+with one vocabulary.
 
 Every node's outcome is computed at settling and decided by state, never by
 inspecting the error: a `freeze` or `restore` node delivered before its body
@@ -1060,8 +1103,9 @@ is consumed at most once: by the resume step (§4.2) of a `join` (or `call`),
 surfacing it. `result`, `attempt` and `settle` deliver a failure as a value
 (`{ status: 'failure', error }`) instead of throwing it, and an `aborted`
 outcome as a value instead of `FiberAbortedError`; the consumption is the
-same, so an outcome nobody inspects is a failure dropped (D31). Nothing ramme
-produces is an unhandled rejection.
+same, so an outcome nobody inspects is a failure dropped (D31). Nothing the
+core produces is an unhandled rejection. `gen` is an async function, and a
+dropped `gen(…)` can be one (§4.13).
 
 | Error | Thrown when |
 | --- | --- |
@@ -1079,6 +1123,105 @@ produces is an unhandled rejection.
 | `AsyncRunError` | `run(fn)` returned a promise (development mode, §4.4) |
 | `PlacementError` | providing a decided key (§3.4); a scoped provider below the node carrying its scope; a forced re-creation whose factory injected different keys than its first run (§3.4) |
 | `OwnerInterrupt` | never thrown: the abort reason of a parent's body exit, or of an entry's turn in the release loop; `.owner` |
+
+### 4.13 Results and `gen` (D38)
+
+`Result<T, E>` (`Success<T> | Failure<E>`) is a core type; its helpers are
+free functions in the subpath `ramme/result`, which imports only types from
+the core. None is a method, and each works on any plain object of the
+shape, so a hand-rolled `{ status, value | error }` needs no adapter.
+
+| Function | Is |
+| --- | --- |
+| `success(v)`, `failure(e)` | a plain, unfrozen `Success<T>` / `Failure<E>` |
+| `isSuccess(r)`, `isFailure(r)` | a type guard on `status` |
+| `map(r, f)`, `mapFailure(r, f)` | `f` over the value, or over the error; the other side returned as it is |
+| `andThen(r, f)` | the next fallible step: `f(value)`'s `Result`, whose error joins `r`'s |
+| `orElse(r, f)` | the recovery: `f(error)`'s `Result` |
+| `unwrap(r)` | the value, or the error **thrown**: the named moment an expected failure becomes a defect (Rust's `.unwrap()`) |
+| `unwrapOr(r, fallback)` | the value, or `fallback` |
+| `fromThrowing(f)`, `fromThrowing(p)` | foreign code fenced: what `f()` returns as a success, what it throws as a failure, whose error is `unknown` because a throw has no type; a function returning a promise, and a promise, give a promise of the `Result`, which never rejects, and are awaited at once (below) |
+| `collect(rs)` | the first failure, or every value in order (not `all`: that name is ramme's) |
+| `gen(body)`, `$(x)` | the `?` operator (below) |
+
+Each helper takes the whole `Result` as its type parameter and reads the
+value and error types off its members, as `gen` does. So every step takes
+the inferred return type of an unannotated fallible function, which has one
+`Failure` member per error (`Failure<InvalidCard> | Failure<Insufficient> |
+Success<Receipt>`), and keeps every error; a `Result<T, E>` parameter would
+take one inference candidate for `E` and refuse it. A member of the other
+kind contributes `never`, never `unknown`:
+`andThen(r, (v) => success(v + 1))` keeps `r`'s error type, and
+`orElse(r, () => success(x))` has error `never`.
+
+```ts
+class UserNotFound extends Error { readonly name = 'UserNotFound' as const; }
+class OrderNotFound extends Error { readonly name = 'OrderNotFound' as const; }
+
+const r = await gen(async function* () {
+  const user = yield* $(getUser(id));       // getUser: (id) => Promise<Result<User, UserNotFound>>
+  const order = yield* $(getOrder(user));   // getOrder: (u) => Promise<Result<Order, OrderNotFound>>
+  return success(order);
+});
+// r: Result<Order, UserNotFound | OrderNotFound>
+```
+
+`$(x)` takes a `Result` or a promise of one, typed by `x` as a whole,
+awaited, so a union of promises (`$(admin ? getAdmin(id) : getUser(id))`)
+is taken too. `yield* $(x)` evaluates to the
+success value itself, never awaited (a promise or a fiber included), or
+yields the failure. `gen(body)` drives the body's async generator: a
+yielded failure ends the run and is its result; otherwise the body's
+return value is, and it must be a `Result`, so `return failure(e)` works
+beside `yield*`. The error type, inferred, is the union of the errors of
+the yielded and the returned failures; TypeScript compares classes by
+structure, so each error class above has a distinct literal member,
+without which the union collapses to one of them. The failure unwinds as data, so no `catch`
+in the body sees it, and `gen` does not call the generator's `return()`:
+that would resume the body and run a `finally`, which a body does not
+have anyway (A7). Nested `gen`s compose, since the inner one returns a
+`Result` the outer `$` consumes. A generator is not an arrow, so a method
+passes its `this`: `gen(this, async function* () { … })`.
+
+`$` is a hand-written async iterator, not an `async function*`, whose
+`return` would await the value: a thenable success value would be
+unwrapped, and a fiber's `then` throws (§4.5). Its first `next()` awaits
+`x`, always, so a promise is handled and a settled `Result` costs one
+microtask. Over a managed promise that is the body's own direct await; the
+supported and unsupported shapes under a freeze are in §4.2. Over a bare
+promise it is a bare await (§4.4), which a delivery does not cut.
+
+`gen` is an async function, not a managed await. Its promise rejects at
+once with whatever the body throws, a defect, as the async function it
+replaces would. That includes a failure thrown by a `call` inside `$`:
+`$`'s await runs that call's resume step, which consumes the failure
+(D13), so the node does not surface it, and a dropped `gen(…)` whose body
+throws is an unhandled rejection. Await or return `gen(…)` at once; §9
+says which lint sees a dropped one.
+
+For ramme work, use `attempt`, which keeps `aborted` (§4.5). `fromThrowing`
+is for foreign code: over a ramme call it reports an abort as
+`failure(FiberAbortedError)`. Its promise forms await at once:
+`fromThrowing(p)`, and `fromThrowing(f)` whose `f()` returns a promise,
+call `then` on it when `fromThrowing` is called. So over a managed promise
+(`fromThrowing(managed(foreignPromise))`), await or return
+`fromThrowing(…)` at once, as `gen(…)`: stored, dropped or used as a
+combinator member, it is unsupported in a `freeze` body (§4.2). A
+function's return value is chained only when its `then` is a function. A
+fiber's `then` getter throws (§4.5), so a returned fiber is the success, and
+`fromThrowing(() => pool.fork(job))` fences pool intake, which `attempt`
+cannot: the fiber as a success, or `PoolFullError` or `PoolClosedError`
+(§4.10) as a failure.
+A function whose return type may or may not be a promise
+(`number | Promise<number>`) is typed as giving the `Result` or a promise of
+it, as the runtime does. One typed `any` or `unknown` is typed
+synchronously, whatever it returns: give it its return type, or fence the
+promise itself.
+
+Deliberately absent: a class or methods on the data, `match`, `tap`,
+`Option`, and a synchronous `genSync`. Narrowing on `status` is the
+combinator library; code that wants chaining wraps the plain object in
+neverthrow in one line.
 
 ---
 
@@ -1154,7 +1297,9 @@ forker's node nor a finished creation.
 The repository is a pnpm workspace. Its root is the `ramme` package, whose
 modules, in `src/`, are these; `packages/eslint-plugin-ramme` is the lint
 plugin (§9), a separate package that ramme does not depend on and that does
-not import ramme.
+not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
+the two adapters (`ramme/node`, `ramme/async-context`) and `result.ts`
+(`ramme/result`).
 
 | Module | Responsibility |
 | --- | --- |
@@ -1162,7 +1307,8 @@ not import ramme.
 | `scope.ts` | `Scope`, `createScope`, `SelfScope`, `RootScope`, `RequestScope` |
 | `topic.ts` | `createTopic`, `TopicReceiver` |
 | `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` |
-| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Outcome`, `Pool`, … |
+| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, … |
+| `result.ts` | the `ramme/result` subpath: free functions over plain `Result` objects, `gen`, `$` |
 | `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (the `own` overloads into one dispose) |
 | `context-storage.ts` | the `Frame`, the storage contract, `registerContextStorage`, current-frame reads |
 | `node.ts`, `async-context.ts` | the two storage adapters (side-effect entries) |
@@ -1180,7 +1326,8 @@ not import ramme.
 
 Runtime import graph (type-only imports not shown; no evaluation-order
 cycles): `scope`, `resource`, `internal-context` and `context` are leaves;
-`context-key` sits over `scope` (a key's declared scope, D32); `topic` sits
+`result` is a leaf: it imports only types from `context`; `context-key` sits
+over `scope` (a key's declared scope, D32); `topic` sits
 over `context-key`, and
 `lifecycle-events` over `topic`; `context-storage`, `stack` and `pool` sit
 over `resource`, and the adapters register into `context-storage`;
@@ -1234,7 +1381,19 @@ nothing process-global.
   They are syntactic, and the package's README names each rule's
   approximations. A named async function passed to `fork` or `call`
   (`fork(parse)`) has no lint and stays an open gap (D8′). Recommended
-  alongside: `@typescript-eslint/no-floating-promises`.
+  alongside: `@typescript-eslint/no-floating-promises`. A dropped `gen(…)`
+  (§4.13) is covered only in part: `ramme/no-unused-outcome` matches
+  `attempt` and `settle` only, so it does not flag `gen`;
+  `no-floating-promises` flags a `gen(…)` used as a bare expression
+  statement, but it needs type information (it is in
+  `tseslint.configs.recommendedTypeChecked`, not in `recommended`), and it
+  flags neither `void gen(…)` (its `ignoreVoid` option is on by default)
+  nor `await gen(…);` with its `Result` discarded, which nothing reports
+  (D38).
+- **Typed task failures** (D38): a task's failure is `unknown`, as a throw
+  is; a failure a caller is meant to branch on is a `Result` the function
+  returns (§4.12, §4.13). `ramme/result` has no `Option`, no `match` or
+  `tap`, and no `genSync`.
 - **kilde's hot layer**, the constructs that hold a subscription or run
   asynchronous work, lives in kilde, built on ramme's public API as tasks
   and as values on a factory's node (D6′).
@@ -1280,7 +1439,8 @@ moves, except a declared value's node at the end of its creation, §3.3; a
 failure handler's hold releases node entries ahead of passive ones, §4.7).
 I6 frozen is final. I7 after completion every operation throws. I8 between
 delivery and completion every synchronous operation works, except intake
-into a pool (D15). I9 marked before heard. I10 no unhandled rejections. I11
+into a pool (D15). I9 marked before heard. I10 no unhandled rejections from
+the core's promises. I11
 consumed once or surfaced. I12 aborted is not failure. I13 state decides.
 I14 every release is a fiber, current while it runs. I15 synchronous
 attachment. I16 nothing but the factory runs in a creation frame: no body,

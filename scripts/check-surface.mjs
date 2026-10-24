@@ -5,9 +5,12 @@
 // Parses every export clause of dist/index.d.ts and requires the exported
 // names to be exactly this file's `expected` map, each in its space (value or
 // type) and from its module: every core name (the node and the free functions,
-// task options, tasks, fibers and outcomes, pools, the error classes) is
-// there, `Fiber` only as a type, `runSync` only as the ambient function, and no
-// name removed by the redesign or internal to ramme. Also
+// task options, tasks, fibers, results and outcomes, pools, the error classes)
+// is there, `Fiber` only as a type, `runSync` only as the ambient function, and
+// no name removed by the redesign or internal to ramme. Then requires
+// dist/result.d.ts, the `ramme/result` subpath, to export exactly the
+// `resultExpected` functions and nothing else, and dist/result.js to import
+// nothing: the subpath is a leaf that imports only types (DESIGN.md §7). Also
 // requires that stripInternal left no `@internal` declaration in any
 // dist/*.d.ts. The type-level half is src/test/surface.check.ts.
 // ---------------------------------------------------------------------------
@@ -26,6 +29,9 @@ const expected = new Map([
     'Release',
     'Provider',
     'LookupOptions',
+    'Success',
+    'Failure',
+    'Result',
     'Outcome',
     'FailureDestination',
     'TaskOptions',
@@ -98,7 +104,7 @@ const expected = new Map([
   ['NodeEvent', ['type', './lifecycle-events.js']],
 ]);
 
-/** The core names: the node and the free functions, task options, tasks, fibers and outcomes, pools, and the error classes. */
+/** The core names: the node and the free functions, task options, tasks, fibers, results and outcomes, pools, and the error classes. */
 const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
@@ -106,14 +112,20 @@ const coreNames = [
   'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
   // task options
   'FailureDestination', 'TaskOptions',
-  // tasks, fibers, outcomes
-  'Fiber', 'Task', 'task', 'AllResult', 'SettleResult', 'Outcome', 'ContextKey',
+  // tasks, fibers, results, outcomes
+  'Fiber', 'Task', 'task', 'AllResult', 'SettleResult', 'Result', 'Success', 'Failure', 'Outcome', 'ContextKey',
   // pools
   'PoolOptions', 'Pool',
   // errors
   'NoCurrentNodeError', 'NodeCompletedError', 'PendingNodeError', 'NotOwnedError', 'AlreadyOwnedError',
   'UnawaitedCallError', 'FiberNotAwaitableError', 'FiberAbortedError', 'PoolClosedError',
   'CreationViolationError', 'AsyncRunError', 'PlacementError',
+];
+
+/** The exact export list of dist/result.d.ts, the `ramme/result` subpath (DESIGN.md §4.13): functions only. */
+const resultExpected = [
+  'success', 'failure', 'isSuccess', 'isFailure', 'map', 'mapFailure', 'andThen', 'orElse',
+  'unwrap', 'unwrapOr', 'fromThrowing', 'collect', 'gen', '$',
 ];
 
 /** Names removed by the redesign, and names internal to ramme. */
@@ -171,13 +183,44 @@ for (const name of absent) {
   if (new RegExp(`[{,\\s]${name}[\\s,}]`).test(text.replace(/'[^']*'/g, "''")))
     problems.push(`removed or internal name present: ${name}`);
 }
+// dist/result.d.ts: one `export declare function` per overload, unexported helper types (`type`, `interface`,
+// which its signatures name), type-only imports and TypeScript's `export {};`; any other export form is refused.
+// The names are not `\w` only: `$` is one of them.
+let resultTypes;
+let resultJs;
+try {
+  resultTypes = readFileSync(new URL('result.d.ts', dist), 'utf8');
+  resultJs = readFileSync(new URL('result.js', dist), 'utf8');
+} catch {
+  console.error('check-surface: dist/result.d.ts or dist/result.js is missing; run `pnpm build` first');
+  process.exit(1);
+}
+const resultCode = resultTypes.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+const resultActual = new Set();
+for (const [line] of resultCode.matchAll(/^export\b.*$/gm)) {
+  const fn = /^export declare function ([A-Za-z_$][\w$]*)\s*[<(]/.exec(line);
+  if (fn !== null) resultActual.add(fn[1]);
+  else if (line.trim() !== 'export {};')
+    problems.push(`result.d.ts has an export form the check cannot read (only "export declare function …" is allowed): ${line.trim()}`);
+}
+for (const name of resultExpected) if (!resultActual.has(name)) problems.push(`ramme/result: missing ${name}`);
+for (const name of resultActual) if (!resultExpected.includes(name)) problems.push(`ramme/result: not in the expected list: ${name}`);
+for (const [line] of resultCode.matchAll(/^import\b.*$/gm))
+  if (!/^import type \{[^}]*\} from '\.\/context\.js';$/.test(line.trim()))
+    problems.push(`result.d.ts imports something other than types from ./context.js: ${line.trim()}`);
+if (/^\s*import\b|\bfrom\s*['"]|\bimport\s*\(/m.test(resultJs.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')))
+  problems.push('dist/result.js imports at runtime: ramme/result is a leaf that imports only types (DESIGN.md §7)');
+
 for (const file of readdirSync(dist).filter((f) => f.endsWith('.d.ts'))) {
   if (readFileSync(new URL(file, dist), 'utf8').includes('@internal'))
     problems.push(`dist/${file} keeps an @internal declaration: is stripInternal off?`);
 }
 
 if (problems.length > 0) {
-  console.error(`check-surface: dist/index.d.ts does not match the expected surface:\n- ${problems.join('\n- ')}`);
+  console.error(`check-surface: the build output does not match the expected surface:\n- ${problems.join('\n- ')}`);
   process.exit(1);
 }
-console.log(`check-surface: dist/index.d.ts exports exactly the ${expected.size} expected names`);
+console.log(
+  `check-surface: dist/index.d.ts exports exactly the ${expected.size} expected names, ` +
+    `and dist/result.d.ts exactly the ${resultExpected.length} ramme/result functions`,
+);
