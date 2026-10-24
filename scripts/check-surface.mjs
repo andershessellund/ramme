@@ -60,6 +60,8 @@ const expected = new Map([
     'all',
     'race',
     'settle',
+    'shield',
+    'unshield',
     'pool',
     'child',
     'join',
@@ -81,6 +83,7 @@ const expected = new Map([
     'UnawaitedCallError',
     'FiberNotAwaitableError',
     'FiberAbortedError',
+    'InterruptedError',
     'PoolClosedError',
     'PoolFullError',
     'CreationViolationError',
@@ -108,8 +111,8 @@ const expected = new Map([
 const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
-  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'pool', 'child',
-  'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
+  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
+  'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, results, outcomes
@@ -118,7 +121,7 @@ const coreNames = [
   'PoolOptions', 'Pool',
   // errors
   'NoCurrentNodeError', 'NodeCompletedError', 'PendingNodeError', 'NotOwnedError', 'AlreadyOwnedError',
-  'UnawaitedCallError', 'FiberNotAwaitableError', 'FiberAbortedError', 'PoolClosedError',
+  'UnawaitedCallError', 'FiberNotAwaitableError', 'FiberAbortedError', 'InterruptedError', 'PoolClosedError',
   'CreationViolationError', 'AsyncRunError', 'PlacementError',
 ];
 

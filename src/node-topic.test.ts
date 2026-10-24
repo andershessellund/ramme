@@ -2,7 +2,7 @@
 // receiver is a construction-time provider on the root, resolved once per root;
 // node:created is always a node's first event, and a pending value node emits
 // events before placement; node:stalled is armed for every delivered body that
-// has neither settled nor frozen (DESIGN.md §4.4); a throwing receiver is
+// has not settled (DESIGN.md §4.4); a throwing receiver is
 // reported with console.error and the event dropped; with no receiver, no stall
 // timer is armed.
 // Also ported from the pre-redesign lifecycle-events suite: fiber events, entry
@@ -105,7 +105,7 @@ describe('event sequences per operation', () => {
     await ev.root.close();
   });
 
-  it('join: join:enter and join:leave on the joiner; a frozen joiner emits node:frozen and no join:leave', async () => {
+  it('join: join:enter and join:leave on the joiner; a rejected joiner emits no join:leave, and settles after it unwound', async () => {
     const ev = events();
     let joinerId = -1;
     let joinedId = -1;
@@ -119,7 +119,7 @@ describe('event sequences per operation', () => {
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'success']]);
 
     const gate = deferred();
-    let frozenId = -1;
+    let rejectedId = -1;
     const joiner = ev.root.fork(
       task(
         async () => {
@@ -129,15 +129,14 @@ describe('event sequences per operation', () => {
         { onFailure: 'link' },
       ),
     );
-    frozenId = joiner.id;
+    rejectedId = joiner.id;
     await tick();
     joiner.abort();
     gate.resolve();
     await ev.root.close();
-    expect(ev.of('join:enter').filter((e) => e.id === frozenId)).toHaveLength(1);
-    expect(ev.of('join:leave').filter((e) => e.id === frozenId)).toHaveLength(0);
-    expect(ev.typesOf(frozenId)).toContain('node:frozen');
-    expect(ev.typesOf(frozenId)).not.toContain('node:settled');
+    expect(ev.of('join:enter').filter((e) => e.id === rejectedId)).toHaveLength(1);
+    expect(ev.of('join:leave').filter((e) => e.id === rejectedId)).toHaveLength(0);
+    expect(ev.of('node:settled').filter((e) => e.id === rejectedId).map((e) => e.outcome)).toEqual(['aborted']);
   });
 
   it("a DI value: node:created (kind 'value', stack 'none') → entry:registered for what its constructor owned → node:placed → node:started of its constructor's forks (D10′)", async () => {
@@ -218,8 +217,8 @@ describe('event sequences per operation', () => {
   });
 });
 
-describe('delivery, freeze and stall events', () => {
-  it('node:delivered for every node of a delivery, then node:frozen for a body cut at its managed await', async () => {
+describe('delivery, rejection and stall events', () => {
+  it('node:delivered for every node of a delivery, then node:settled for a body rejected at its managed await', async () => {
     const ev = events();
     const f = ev.root.fork(
       task(
@@ -235,10 +234,10 @@ describe('delivery, freeze and stall events', () => {
     await ev.root.close();
     for (const id of [ev.root.id, f.id, c.id])
       expect(ev.of('node:delivered').filter((e) => e.id === id).map((e) => e.reason)).toEqual(['stop']);
-    expect(ev.typesOf(f.id).filter((t) => t === 'node:frozen' || t === 'node:settled')).toEqual(['node:frozen']);
+    expect(ev.of('node:settled').filter((e) => e.id === f.id).map((e) => e.outcome)).toEqual(['aborted']);
     const deliveredSeqs = [ev.root.id, f.id, c.id].map((id) => ev.of('node:delivered').find((e) => e.id === id)!.seq);
-    const frozenSeq = ev.of('node:frozen').find((e) => e.id === f.id)!.seq;
-    expect(Math.max(...deliveredSeqs)).toBeLessThan(frozenSeq); // every signal fires before any freeze (I9)
+    const settledSeq = ev.of('node:settled').find((e) => e.id === f.id)!.seq;
+    expect(Math.max(...deliveredSeqs)).toBeLessThan(settledSeq); // every signal fires before any body settles (I9)
   });
 
   it('node:stalled for a delivered freeze body that never reaches a managed await, and for a delivered observe body that never settles', async () => {
@@ -520,7 +519,7 @@ describe('ported lifecycle-events cases', () => {
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'failure']]);
   });
 
-  it('result(f) emits join:enter and join:leave on the awaiter, and a frozen awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
+  it('result(f) emits join:enter and join:leave on the awaiter, and a rejected awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
     const ev = events();
     let awaiterId = -1;
     const ids: number[] = [];
@@ -562,7 +561,7 @@ describe('ported lifecycle-events cases', () => {
     await ev.root.close();
     expect(ev.of('join:enter').filter((e) => e.id === waiter.id).map((e) => e.joinedId)).toEqual([slowId]);
     expect(ev.of('join:leave').filter((e) => e.id === waiter.id)).toHaveLength(0);
-    expect(ev.typesOf(waiter.id)).toContain('node:frozen');
+    expect(ev.of('node:settled').filter((e) => e.id === waiter.id).map((e) => e.outcome)).toEqual(['aborted']);
   });
 
   it('join/result in method form on another node emit on the awaiting body, not on the receiver; with no body, on the receiver (DESIGN.md §4.2)', async () => {

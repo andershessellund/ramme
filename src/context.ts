@@ -15,7 +15,7 @@ export type NodeState = 'pending' | 'running' | 'settling' | 'releasing' | 'comp
 /**
  * How a node reacts to interruption (DESIGN.md §4.3).
  *
- * - `freeze` (default): delivered → applied; managed awaits never settle; forwards to subscribers.
+ * - `freeze` (default): delivered → applied; every managed await but release work rejects with `InterruptedError`; forwards to subscribers.
  * - `observe`: delivered only; the body sees the signal and settles on its own; forwards only to `restore` subscribers.
  * - `restore`: delivered whenever any ancestor is; re-opens a cancellable window inside an `observe` region.
  */
@@ -207,11 +207,25 @@ export interface Context {
   call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
   /**
    * `call` with the outcome delivered as a value: the child's failure is consumed, never thrown. An interrupted
-   * `freeze` or `restore` caller freezes here as on `call`, so `aborted` describes the child's own abort, unless
-   * the child is `restore`: it also hears an `observe` caller's interruption, and an `observe` ancestor's that a
-   * `freeze` caller below it does not, and reports either as `aborted` (DESIGN.md §4.5).
+   * `freeze` or `restore` caller is rejected here with `InterruptedError` as on `call`, so `aborted` describes the
+   * child's own abort, unless the child is `restore`: it also hears an `observe` caller's interruption, and an
+   * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted` (DESIGN.md §4.5).
    */
   attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
+  /**
+   * Run `t` in a release fiber of this node and await it: release work, which no interruption rejects (D39,
+   * DESIGN.md §4.2). It lends the current node as `call` does, until it completes or that node's body settles;
+   * this node completes after it, awaited or not, and is the owner an `unshield` inside it follows.
+   */
+  shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
+  /**
+   * A hole in the enclosing shield (D39, DESIGN.md §4.2): `attempt` on this node, whose child is also linked to the
+   * signal of the shield's owner, the node the nearest `shield` at or above this node runs on (its release fiber's
+   * parent). That node's interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject and it
+   * ends `aborted`; an `observe` hole hears it through `signal()`. One that already came skips the hole, and the
+   * outcome is a value. `TypeError` outside any shield.
+   */
+  unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
   /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>` (DESIGN.md §4.8). */
   all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>>;
   race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T>;
@@ -220,15 +234,15 @@ export interface Context {
   pool(opts: PoolOptions): Pool;
   child(opts?: NodeOptions): Context;
 
-  // --- awaiting; the freeze decision is made for the awaiting body's node, current(), if any (DESIGN.md §4.2) ---
+  // --- awaiting; the target is the awaiting body's node, current(), if any (DESIGN.md §4.2) ---
   join<T>(fiber: Fiber<T>): Promise<T>;
   result<T>(fiber: Fiber<T>): Promise<Outcome<T>>;
   interrupted(): Promise<unknown>;
   never(): Promise<never>;
   /**
    * Resolves after `ms` milliseconds, in [0, 2^31 − 1] (`RangeError` otherwise). A managed await: a delivered
-   * `freeze` or `restore` body awaiting it is frozen and its timer cleared; with no current node it is a plain
-   * delay (DESIGN.md §4.2).
+   * `freeze` or `restore` body awaiting it is rejected with `InterruptedError` and its timer cleared; with no
+   * current node it is a plain delay (DESIGN.md §4.2).
    */
   sleep(ms: number): Promise<void>;
   managed<T>(promise: Promise<T>): Promise<T>;

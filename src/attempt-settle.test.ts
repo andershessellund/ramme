@@ -1,23 +1,23 @@
 // attempt-settle.test.ts — outcomes as values (DESIGN.md §4.5, §4.8, §4.12, D31). `attempt` is `call`
 // with `result`'s resume step: it starts synchronously, lends the current node (D11, D22), resolves with
 // the child's outcome and consumes its failure on resume (D13); an interrupted `freeze` or `restore` caller
-// freezes on it, so `aborted` describes the child, except that a `restore` child also hears an `observe`
-// caller's interruption, or an `observe` ancestor's that a `freeze` caller below it does not, and hands it
-// back as `aborted`. `settle` is `all` resolving with outcomes instead of rejecting: as in
-// `all`, every member is waited for and none is aborted on a sibling's account; its members' failures wait
-// on the group's parent for the caller's resume step, so a frozen caller consumes nothing.
+// is rejected on it with `InterruptedError` once the child has completed (D39), so `aborted` describes the
+// child, except that a `restore` child also hears an `observe` caller's interruption, or an `observe`
+// ancestor's that a `freeze` caller below it does not, and hands it back as `aborted`. `settle` is `all`
+// resolving with outcomes instead of rejecting: as in `all`, every member is waited for and none is aborted on
+// a sibling's account; its members' failures wait on the group's parent for the caller's resume step, so an
+// interrupted caller consumes nothing.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { all, attempt, call, fork, interrupted, lookup, managed, never, own, settle, signal } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Outcome } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import type { NodeImpl } from './node-impl.js';
 import { factoryProvider, valueProvider } from './provider-util.js';
-import { CreationViolationError, NoCurrentNodeError, UnawaitedCallError } from './resource.js';
+import { CreationViolationError, InterruptedError, NoCurrentNodeError, UnawaitedCallError } from './resource.js';
 import type { SuppressedErrorLike } from './resource.js';
-import { deferred, events, here, impl, neverSettles, tick, trace, within } from './test/util.js';
+import { deferred, events, here, impl, tick, trace, within } from './test/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -126,40 +126,43 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it('an interrupted caller freezes on attempt as on call: the promise never settles and the caller never resumes, while the child is aborted, released and gives the lending back', async () => {
+  it('an interrupted caller is rejected on attempt as on call, with InterruptedError and never an outcome, once the child is aborted, released and has given the lending back (D39)', async () => {
     const t = trace();
     const root = createRootContext();
-    let p: Promise<Outcome<void>> | undefined;
     let Y!: NodeImpl;
     let child!: NodeImpl;
+    let caught: unknown;
     const y = root.fork(
       task(async () => {
         Y = here();
-        p = attempt(async () => {
-          child = here();
-          own(t.at('child released'));
-          await never();
-        });
-        const o = await p;
-        t.push(`resumed with ${o.status}`); // never: 'aborted' would describe the caller's interruption
+        try {
+          const o = await attempt(async () => {
+            child = here();
+            own(t.at('child released'));
+            await never();
+          });
+          t.push(`resumed with ${o.status}`); // never: 'aborted' would describe the caller's interruption (D31)
+        } catch (e) {
+          caught = e;
+          t.push(`rejected; child ${child.state}, lent to ${String(Y.lentTo)}`);
+          throw e;
+        }
       }, link),
     );
     await tick();
     expect(Y.lentTo).toBe(child);
     y.abort('caller interrupted');
-    expect(Y.frozen).toBe(true);
-    await tick();
-    expect(child.state).toBe('complete');
+    await within(root.result(y));
     expect(child.outcome).toEqual({ status: 'aborted', reason: 'caller interrupted' });
-    expect(Y.lentTo).toBeUndefined();
     expect(child.lender).toBeUndefined();
-    await neverSettles(p!);
-    expect(t.log).toEqual(['child released']);
+    expect(t.log).toEqual(['child released', 'rejected; child complete, lent to undefined']);
+    expect(caught).toBeInstanceOf(InterruptedError);
+    expect((caught as InterruptedError).reason).toBe('caller interrupted');
     expect(y.outcome?.status).toBe('aborted');
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it("a caller that does not freeze can be handed an interruption that is not the child's own: a restore child hears every delivery on its subscription path, so under an observe caller or an observe ancestor its aborted carries that reason (DESIGN.md §4.3, §4.5)", async () => {
+  it("a caller that is not interrupted can be handed an interruption that is not the child's own: a restore child hears every delivery on its subscription path, so under an observe caller or an observe ancestor its aborted carries that reason (DESIGN.md §4.3, §4.5)", async () => {
     const root = createRootContext();
     const hang = task(
       async () => {
@@ -169,7 +172,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     );
     const observe = { interrupt: 'observe', onFailure: 'link' } as const;
     const seen: Record<string, { r: unknown; mine: boolean }> = {};
-    // An observe caller is never frozen (§4.3): its own interruption reaches the restore child and comes back.
+    // An observe caller is never rejected (§4.3): its own interruption reaches the restore child and comes back.
     const a = root.fork(
       task(async () => {
         const r = await attempt(hang);
@@ -236,27 +239,33 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it('a frozen caller consumes nothing: an observe child that fails after the caller froze surfaces from the caller, not as a value (D13)', async () => {
+  it('an interrupted caller consumes nothing: an observe child that fails after the caller was delivered surfaces from the caller, not as a value (D13, D39)', async () => {
     const root = createRootContext();
     const err = new Error('late observe failure');
     let P!: NodeImpl;
+    let seen: unknown;
     const p = root.call(async () => {
       P = here();
-      await attempt(
-        task(
-          async () => {
-            await interrupted();
-            await tick();
-            throw err;
-          },
-          { interrupt: 'observe' },
-        ),
-      );
+      try {
+        seen = await attempt(
+          task(
+            async () => {
+              await interrupted();
+              await tick();
+              throw err;
+            },
+            { interrupt: 'observe' },
+          ),
+        );
+      } catch (e) {
+        seen = e;
+        throw e;
+      }
     });
     await tick();
     P.abort();
-    expect(P.frozen).toBe(true);
     await expect(p).rejects.toBe(err);
+    expect(seen).toBeInstanceOf(InterruptedError); // not { status: 'failure', error: err }
     expect(P.outcome).toEqual({ status: 'failure', error: err });
     await expect(root.close()).resolves.toBeUndefined();
   });
@@ -361,7 +370,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await root.close();
   });
 
-  it("join:enter and join:leave, with the outcome, on the awaiting body's node, after node:lent; ctx.attempt emits them on the body, and a frozen caller emits no join:leave (DESIGN.md §5)", async () => {
+  it("join:enter and join:leave, with the outcome, on the awaiting body's node, after node:lent; ctx.attempt emits them on the body, and a rejected caller emits no join:leave (DESIGN.md §5)", async () => {
     const ev = events();
     const other = ev.root.child({ name: 'other' });
     let me!: NodeImpl;
@@ -398,9 +407,9 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     );
     await tick();
     y.abort();
-    await tick();
+    await within(ev.root.result(y));
     expect(ev.of('join:enter').filter((e) => e.id === Y.id)).toHaveLength(1);
-    expect(ev.of('join:leave').filter((e) => e.id === Y.id)).toHaveLength(0);
+    expect(ev.of('join:leave').filter((e) => e.id === Y.id)).toHaveLength(0); // the resume step never ran
     await other.close();
     await ev.root.close();
   });
@@ -593,40 +602,45 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it("an interrupted caller freezes on settle as on all: it never resumes, and a member's failure, never delivered, surfaces from the caller (D13)", async () => {
+  it("an interrupted caller is rejected on settle as on all, never resumed, and a member's failure, never delivered, surfaces from the caller (D13, D39)", async () => {
     const t = trace();
     const err = new Error('early member failure');
     const root = createRootContext();
     let P!: NodeImpl;
     let group!: NodeImpl;
+    let caught: unknown;
     const p = root.call(async () => {
       P = here();
-      const r = await settle([
-        task(async () => {
-          group = here().parent!;
-          throw err;
-        }),
-        task(async () => {
-          await never();
-        }),
-      ]);
-      t.push(`resumed with ${r.length} outcomes`);
+      try {
+        const r = await settle([
+          task(async () => {
+            group = here().parent!;
+            throw err;
+          }),
+          task(async () => {
+            await never();
+          }),
+        ]);
+        t.push(`resumed with ${r.length} outcomes`);
+      } catch (e) {
+        caught = e;
+        throw e;
+      }
     });
     await tick();
     expect(P.unconsumed.size).toBe(1); // the failed member's record waits on the group's parent for the resume step (D31)
     P.abort();
     await expect(p).rejects.toBe(err);
-    expect(P.frozen).toBe(true);
+    expect(caught).toBeInstanceOf(InterruptedError);
     expect(P.outcome).toEqual({ status: 'failure', error: err });
-    expect(group.frozen).toBe(true);
     expect(group.outcome?.status).toBe('aborted');
     expect(t.log).toEqual([]);
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it("a frozen caller's members' failures surface from the receiver, not lost: a group on another node runs on after its caller froze, and a member failing then reaches the receiver's completion (I11, D31)", async () => {
+  it("an interrupted caller's members' failures surface from the receiver, not lost: the call's mark delivers a group on another node, the caller waits for it, and a member failing then reaches the receiver's completion (I11, D31, D39)", async () => {
     const t = trace();
-    const err = new Error('member failed after its caller froze');
+    const err = new Error('member failed after its caller was interrupted');
     const root = createRootContext();
     const other = root.child({ name: 'other' });
     const gate = deferred();
@@ -636,25 +650,31 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
       task(async () => {
         Y = here();
         const r = await other.settle([
-          task(async () => {
-            group = here().parent!;
-            await gate.promise; // bare: the member outlives the caller's freeze
-            throw err;
-          }),
+          task(
+            async () => {
+              group = here().parent!;
+              await gate.promise; // bare: the member outlives the caller's interruption
+              throw err; // observe: delivered with its group, but its own result stands (DESIGN.md §4.3)
+            },
+            { interrupt: 'observe' },
+          ),
         ]);
         t.push(`resumed with ${r.length} outcomes`);
       }, link),
     );
     await tick();
-    expect(group.parent).toBe(impl(other)); // the group is other's child, not Y's: Y's abort does not reach it
+    expect(group.parent).toBe(impl(other)); // the group is other's child, not Y's: Y's delivery does not reach it
     y.abort('caller interrupted');
-    expect(Y.frozen).toBe(true);
+    expect(group.delivered).toBe(true); // the call's mark delivers it (D39, A.2)
     expect(group.state).toBe('running');
+    await tick();
+    expect(Y.state).toBe('running'); // lent to the group until it completes (D11)
     gate.resolve();
     await within(group.completion);
-    expect(group.outcome?.status).toBe('success'); // the member's failure is not the group's (D31)
-    await expect(other.close()).rejects.toBe(err); // surfaced once, from the receiver: nobody resumed to consume it
+    expect(group.outcome).toEqual({ status: 'aborted', reason: 'caller interrupted' }); // the member's failure is not the group's (D31)
+    await within(root.result(y));
     expect(Y.outcome).toEqual({ status: 'aborted', reason: 'caller interrupted' });
+    await expect(other.close()).rejects.toBe(err); // surfaced once, from the receiver: nobody resumed to consume it
     expect(t.log).toEqual([]);
     await expect(root.close()).resolves.toBeUndefined();
   });
@@ -775,7 +795,7 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
         ),
         task(async () => 1, { timeoutMs: -1 }),
       ]),
-    ); // top level: nothing freezes, the resume step runs
+    ); // top level: nothing is interrupted, the resume step runs
     expect(out).toEqual([
       { status: 'failure', error: memberErr },
       { status: 'aborted', reason: 'stop' },

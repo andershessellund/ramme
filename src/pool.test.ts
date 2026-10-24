@@ -205,7 +205,7 @@ describe('pools (DESIGN.md §4.10)', () => {
     await app.close();
   });
 
-  it('pool.abort() cancels the queue: running fibers freeze, waiters settle aborted without running (D15)', async () => {
+  it('pool.abort() cancels the queue: running fibers are interrupted, waiters settle aborted without running (D15)', async () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     let waiterRan = false;

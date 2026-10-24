@@ -33,11 +33,11 @@ export class AlreadyOwnedError extends Error {
   override name = 'AlreadyOwnedError';
 }
 
-/** A body-shaped operation on a node that is lent to a `call` (DESIGN.md §4.9): the call was not awaited. */
+/** A body-shaped operation on a node that is lent to a `call` (an `attempt`, an `unshield`) or a `shield` (DESIGN.md §4.9): it was not awaited. */
 export class UnawaitedCallError extends Error {
   override name = 'UnawaitedCallError';
   constructor(
-    /** The call fiber the node is lent to. */
+    /** The call fiber (an `unshield`'s hole included), or the shield's release fiber, the node is lent to. */
     readonly child: Context,
     message?: string,
   ) {
@@ -50,7 +50,10 @@ export class FiberNotAwaitableError extends Error {
   override name = 'FiberNotAwaitableError';
 }
 
-/** The awaited fiber was aborted, and the awaiter is not frozen (DESIGN.md §4.2). */
+/**
+ * Other work was aborted: the awaited fiber, or the node a managed promise was made for when another body awaits
+ * it (DESIGN.md §4.2, §4.12). Never the awaiter's own interruption, which is `InterruptedError`.
+ */
 export class FiberAbortedError extends Error {
   override name = 'FiberAbortedError';
   constructor(
@@ -59,6 +62,33 @@ export class FiberAbortedError extends Error {
     message?: string,
   ) {
     super(message ?? 'the fiber was aborted');
+  }
+}
+
+/**
+ * The awaiting body's own interruption (D39, DESIGN.md §4.2): after its `freeze` or `restore` node is delivered,
+ * every managed await the body makes rejects with it, except release work. The node's outcome is `aborted` whatever
+ * the body then does, so a `catch` that sees one rethrows it. A promise derived from another body's managed await
+ * and shared with this one (a memoized load) carries that body's instead; `signal().aborted` tells them apart
+ * (DESIGN.md §4.4).
+ */
+export class InterruptedError extends Error {
+  override name = 'InterruptedError';
+  constructor(
+    /** The delivery's reason, as `signal().reason` reads it. */
+    readonly reason: unknown,
+    message?: string,
+  ) {
+    super(message ?? `interrupted: ${reasonText(reason)}`);
+  }
+}
+
+/** An abort reason as text that never throws: an error's message, else `String(reason)`. */
+function reasonText(reason: unknown): string {
+  try {
+    return reason instanceof Error ? reason.message : String(reason);
+  } catch {
+    return '[unprintable reason]';
   }
 }
 

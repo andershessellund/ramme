@@ -23,8 +23,8 @@ import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import type { NodeImpl } from './node-impl.js';
 import { valueProvider } from './provider-util.js';
-import { FiberAbortedError, UnawaitedCallError } from './resource.js';
-import { deferred, events, here, impl, tick } from './test/util.js';
+import { FiberAbortedError, InterruptedError, UnawaitedCallError } from './resource.js';
+import { deferred, events, here, impl, tick, within } from './test/util.js';
 
 const linked = { onFailure: 'link' } as const;
 
@@ -265,14 +265,57 @@ describe('lending (DESIGN.md §4.9)', () => {
     await app.close();
   });
 
+  it('an interrupted lender stays lent until its otherCtx.call(...) child completes: the mark delivers the child, and the call rejects after it (D39, A.2)', async () => {
+    const app = createRootContext();
+    const gate = deferred();
+    let work!: NodeImpl;
+    let Y!: NodeImpl;
+    let caught: unknown;
+    let atCatch: { workState: string; lentTo: unknown } | undefined;
+    const y = spawn(app, async () => {
+      Y = here();
+      try {
+        await app.call(
+          task(
+            async () => {
+              work = here();
+              await gate.promise;
+            },
+            { interrupt: 'observe' },
+          ),
+        );
+      } catch (e) {
+        caught = e;
+        atCatch = { workState: work.state, lentTo: Y.lentTo }; // read by the test: the body's own outcome is aborted
+        throw e;
+      }
+    });
+    await tick();
+    expect(work.lender).toBe(Y);
+    y.abort();
+    expect(work.delivered).toBe(true); // app's child, outside Y's subtree: delivered by the call's mark
+    expect(work.signal.aborted).toBe(true);
+    await tick();
+    expect(Y.state).toBe('running'); // still lent: the child is observe and has not stopped
+    expect(work.lender).toBe(Y);
+    gate.resolve();
+    await within(app.result(y));
+    expect(caught).toBeInstanceOf(InterruptedError);
+    expect(atCatch).toEqual({ workState: 'complete', lentTo: undefined }); // the call rejected only after its child completed
+    expect(y.outcome?.status).toBe('aborted');
+    await app.close();
+  });
+
   it('a lender that completes before its otherCtx.call(...) child leaves child.lender undefined (A2)', async () => {
     const app = createRootContext();
     const gate = deferred();
     let work!: NodeImpl;
     let Y!: NodeImpl;
-    const y = spawn(app, async () => {
+    let stored: Promise<void> | undefined;
+    spawn(app, () => {
       Y = here();
-      await app.call(
+      // A forgotten await: the body returns while lent, which is how a lender completes before its child (D11).
+      stored = app.call(
         task(
           async () => {
             work = here();
@@ -283,8 +326,7 @@ describe('lending (DESIGN.md §4.9)', () => {
       );
     });
     await tick();
-    expect(work.lender).toBe(Y);
-    y.abort();
+    expect(stored).toBeDefined();
     expect(Y.state).toBe('complete');
     expect(work.state).toBe('running');
     expect(work.lender).toBeUndefined();

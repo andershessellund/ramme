@@ -1,8 +1,9 @@
 // sleep.test.ts — `sleep(ms)` and `ctx.sleep(ms)`, ramme's timer (D34, DESIGN.md §4.2).
 //
-// A managed await over a timer whose freeze target is managed.ts `freezeTarget()` when the promise is made: a
-// delivered `freeze` or `restore` body awaiting it is frozen, and the target's delivery clears the timer, whether
-// the sleep is awaited or only stored. A target already applied arms no timer. Without a target (an `observe` body,
+// A managed await over a timer whose target is managed.ts `awaitTarget()` when the promise is made: a delivered
+// `freeze` or `restore` body awaiting it is rejected with `InterruptedError` (D39), and the target's delivery clears
+// the timer, whether the sleep is awaited or only stored. A target already applied arms no timer and rejects as soon
+// as it is awaited. Without a target (an `observe` body,
 // a release fiber, a failure handler, top level) it runs its full duration. A failure handler that awaits a sleep a
 // body made waits on a timer of its own, to that sleep's deadline. Body-shaped like `never`.
 //
@@ -88,26 +89,33 @@ describe('sleep resolves after ms (DESIGN.md §4.2)', () => {
 });
 
 describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
-  it('a freeze fiber awaiting sleep is frozen at delivery and its node releases at once; no timer remains', async () => {
+  it('a freeze fiber awaiting sleep is rejected at delivery, its timer cleared at once, and its node releases after the body unwinds, not after 10 s', async () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
     const f = app.fork(
       task(async () => {
         own(t.at('released'));
-        await sleep(10_000);
-        t.push('resumed');
+        try {
+          await sleep(10_000);
+          t.push('resumed');
+        } catch (e) {
+          t.push(`rejected: ${(e as Error).name}`);
+          throw e;
+        }
       }, quiet),
     );
     await tick();
     expect(vi.getTimerCount()).toBe(1);
     f.abort();
-    expect(f.state).toBe('complete'); // released inside abort(), not after 10 s (DESIGN.md §2.4)
+    expect(vi.getTimerCount()).toBe(0); // cleared inside abort(), with the delivery (D34)
+    expect(f.state).toBe('running'); // the rejection is a queued job (DESIGN.md §4.2)
+    await tick();
+    expect(f.state).toBe('complete');
     expect(f.outcome?.status).toBe('aborted');
-    expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(10_000);
     await tick();
-    expect(t.log).toEqual(['released']);
+    expect(t.log).toEqual(['rejected: InterruptedError', 'released']);
     await app.close();
   });
 
@@ -128,9 +136,10 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     await tick();
     expect(vi.getTimerCount()).toBe(1);
     f.abort();
+    expect(vi.getTimerCount()).toBe(0);
+    await tick();
     expect(f.state).toBe('complete');
     expect(f.outcome?.status).toBe('aborted');
-    expect(vi.getTimerCount()).toBe(0);
     expect(t.log).toEqual(['released']);
     await app.close();
   });
@@ -150,11 +159,11 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     expect(vi.getTimerCount()).toBe(1);
     f.abort();
     expect(vi.getTimerCount()).toBe(0);
-    expect(f.state).toBe('complete');
+    expect((await within(app.result(f))).status).toBe('aborted');
     await app.close();
   });
 
-  it('a target already applied arms no timer: a fork born under a delivered freeze parent, and a body running plain code after its delivery (I8), freeze on await sleep(1e6)', async () => {
+  it('a target already applied arms no timer: a fork born under a delivered freeze parent, and a body running plain code after its delivery (I8), are rejected at await sleep(1e6)', async () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
@@ -162,8 +171,12 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     const outcome = await app.attempt(async () => {
       current().abort(); // delivered; this body is running plain code (I8)
       born = fork(async () => {
-        await sleep(1e6); // born delivered (D12): its first managed await freezes it (DESIGN.md §4.6)
-        t.push('fork resumed');
+        try {
+          await sleep(1e6); // born delivered (D12): its first managed await rejects (DESIGN.md §4.6)
+          t.push('fork resumed');
+        } catch (e) {
+          t.push(`fork: ${(e as Error).name}`);
+        }
       });
       await tick(2); // a bare await: the fork starts and reaches its sleep
       t.push(`timers after the fork's sleep: ${vi.getTimerCount()}`);
@@ -171,10 +184,9 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
       t.push('body resumed');
     });
     expect(outcome.status).toBe('aborted');
-    expect(t.log).toEqual(["timers after the fork's sleep: 0"]);
+    expect(t.log).toEqual(['fork: InterruptedError', "timers after the fork's sleep: 0"]);
     expect(vi.getTimerCount()).toBe(0);
-    expect(born.outcome?.status).toBe('aborted');
-    expect(impl(born).frozen).toBe(true);
+    expect(born.outcome?.status).toBe('aborted'); // by state: it caught its interruption and returned (D24)
     await app.close();
   });
 });
@@ -239,7 +251,7 @@ describe('no target: the full duration (DESIGN.md §4.2, §4.7)', () => {
           {
             onFailure: async () => {
               t.push('handler waits');
-              await sleep(20); // a handler's awaits never freeze (DESIGN.md §4.7): the parent's delivery leaves it
+              await sleep(20); // a handler's awaits are never rejected (DESIGN.md §4.7): the parent's delivery leaves it
               t.push('handler resumed');
             },
           },
@@ -304,7 +316,7 @@ describe("a failure handler awaiting a sleep its parent's body made waits on a t
     await app.close();
   });
 
-  it('first awaited after the delivery froze the body on it: the handler resumes at the sleep’s deadline, for the time left, unwarned', async () => {
+  it('first awaited after the delivery rejected the body’s await of it: the handler resumes at the sleep’s deadline, for the time left, unwarned', async () => {
     fakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const app = createRootContext();
@@ -321,13 +333,14 @@ describe("a failure handler awaiting a sleep its parent's body made waits on a t
         await box.s;
         t.push('handler resumed');
       });
-      await box.s; // the body is suspended on the sleep: the delivery cuts it
+      await box.s; // the body is suspended on the sleep: the delivery rejects it
     });
     await tick(2);
     vi.advanceTimersByTime(20);
     P.abort();
-    expect(impl(P).frozen).toBe(true);
     expect(vi.getTimerCount()).toBe(0); // the body's timer is cleared (D34)
+    await tick();
+    expect(impl(P).bodyDone).toBe(true); // the body unwound; the handler holds P open
     gate.resolve();
     await tick();
     expect(t.log).toEqual(['handler waits']);

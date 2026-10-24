@@ -9,7 +9,7 @@ export default defineConfig({
     // adapter, D-57).
     isolate: true,
     pool: 'forks',
-    // globalThis.gc for the collection tests (managed.test.ts, freeze-gc.test.ts).
+    // globalThis.gc for the collection tests (managed.test.ts).
     execArgv: ['--expose-gc'],
     // The unhandled-rejection guard (I10).
     setupFiles: ['./src/test/setup.ts'],

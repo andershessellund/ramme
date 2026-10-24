@@ -30,7 +30,9 @@ import {
   releaseAll,
   result,
   runSync,
+  shield,
   signal,
+  sleep,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber } from './context.js';
@@ -49,7 +51,7 @@ import {
   PlacementError,
   UnawaitedCallError,
 } from './resource.js';
-import { deferred, events, impl, neverSettles, tick, trace, unhandledRejectionGuard, within } from './test/util.js';
+import { deferred, events, impl, tick, trace, unhandledRejectionGuard, within } from './test/util.js';
 
 const link = { onFailure: 'link' } as const;
 
@@ -65,8 +67,8 @@ async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
 
 /**
  * What `fn` throws, or 'ok'. A promise it returns is dropped, not caught: every promise ramme returns
- * here is a managed promise over a source that never rejects (D13), and attaching `.catch` to one
- * without awaiting it would arm a cut in the current body (DESIGN.md §4.2).
+ * here is a managed promise over a source that never rejects (D13), and a dropped one is never an
+ * unhandled rejection (I10), while attaching `.catch` to one would make it an await of the current body.
  */
 function attempt(fn: () => unknown): unknown {
   try {
@@ -277,34 +279,53 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I6 frozen is final: a frozen body never resumes, and a managed await requested in its frame after freezing never settles', async () => {
+  it('I6 interruption is sticky: after delivery every managed await of the body rejects with InterruptedError, a swallowed one and one made later in its frame included, except release work; the outcome is aborted', async () => {
     const t = trace();
     const root = createRootContext();
-    const hold = deferred();
     const trigger = deferred();
-    let late: Promise<string> | undefined;
+    const lateSettled = deferred<unknown>();
     const f = root.fork(
       task(async () => {
-        own(() => hold.promise); // keeps the node releasing after the freeze
+        const x = own({}, () => void t.push('x released'));
         void trigger.promise.then(() => {
-          late = managed(Promise.resolve('x')); // runs later, in this body's frame
+          const late = managed(Promise.resolve('x')); // made later, in this body's frame, and awaited there
+          late.then(
+            (v) => lateSettled.resolve(v),
+            (e: unknown) => lateSettled.resolve(e),
+          );
         });
         t.push('before');
-        await never();
-        t.push('after (never)');
+        try {
+          await never();
+        } catch (e) {
+          t.push(`never: ${(e as Error).name}`); // swallowed
+        }
+        try {
+          await sleep(1);
+          t.push('slept');
+        } catch (e) {
+          t.push(`sleep: ${(e as Error).name}`); // swallowed again: still interrupted
+        }
+        await release(x); // release work is exempt
+        t.push('released early');
+        trigger.resolve();
+        const seen = await lateSettled.promise; // a bare await
+        t.push(`late: ${(seen as Error).name}`);
+        return 'swallowed';
       }, link),
     );
     await tick();
-    f.abort();
-    expect(impl(f).frozen).toBe(true);
-    trigger.resolve();
-    await tick();
-    expect(late).toBeDefined();
-    await neverSettles(late!);
-    hold.resolve();
+    f.abort('stop');
+    expect(await within(root.result(f))).toEqual({ status: 'aborted', reason: 'stop' }); // by state, the return discarded (D24)
+    expect(t.log).toEqual([
+      'before',
+      'never: InterruptedError',
+      'sleep: InterruptedError',
+      'x released',
+      'released early',
+      'late: InterruptedError',
+    ]);
     await root.close();
-    expect(t.log).toEqual(['before']);
-    expect(f.outcome?.status).toBe('aborted');
   });
 
   // -------------------------------------------------------------------------
@@ -330,6 +351,7 @@ describe('invariants (DESIGN.md §10)', () => {
         call: () => n.call(t),
         all: () => n.all([t]),
         race: () => n.race([t]),
+        shield: () => n.shield(t),
         pool: () => n.pool({ name: 'p', onFailure: () => {} }),
         child: () => n.child(),
         join: () => n.join(done!),
@@ -349,7 +371,7 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I8 open window: between delivery and completion own/release/fork/child/get work, and what is owned then is released at completion', async () => {
+  it('I8 open window: between delivery and completion own/release/fork/child/get work, release work can be awaited, and what is owned then is released at completion', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const gate = deferred();
@@ -369,6 +391,9 @@ describe('invariants (DESIGN.md §10)', () => {
         void release(y); // runs now; the promise is a managed await this body never awaits
         seen.releasedNow = t.log.includes('released early');
         seen.xLive = impl(current()).explicit.find(x) !== undefined;
+        const z = own(t.at('released and awaited'));
+        await release(z); // release work: awaited after delivery without rejection (D39)
+        seen.shielded = await shield(() => lookup(K)); // so is a shield
         await never();
       }, link),
     );
@@ -383,8 +408,9 @@ describe('invariants (DESIGN.md §10)', () => {
       childBornDelivered: true,
       releasedNow: true,
       xLive: true,
+      shielded: 'k',
     });
-    expect(t.log).toEqual(['released early', 'owned after delivery']);
+    expect(t.log).toEqual(['released early', 'released and awaited', 'owned after delivery']);
     // from outside: own() on a delivered node that is still releasing (C2)
     const other = createRootContext();
     const N = other.child();
@@ -516,13 +542,22 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I13 state decides: a delivered freeze body is aborted whatever it produced; an undelivered one that throws an AbortError has failed', async () => {
+  it('I13 state decides: a delivered freeze body is aborted whatever it produced, a caught InterruptedError included; an undelivered one that throws an AbortError has failed', async () => {
     const root = createRootContext();
     const gate = deferred();
     const returning = root.fork(
       task(async () => {
         await gate.promise;
         return 'value';
+      }, link),
+    );
+    const swallowing = root.fork(
+      task(async () => {
+        try {
+          await never();
+        } catch {
+          return 'caught its interruption'; // the outcome stays aborted (D24, D39)
+        }
       }, link),
     );
     const throwing = root.fork(
@@ -541,11 +576,12 @@ describe('invariants (DESIGN.md §10)', () => {
       ),
     );
     await tick();
-    for (const f of [returning, throwing, observer]) f.abort('stop');
+    for (const f of [returning, throwing, swallowing, observer]) f.abort('stop');
     gate.resolve();
     await tick(2);
     expect(returning.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     expect(throwing.outcome).toEqual({ status: 'aborted', reason: 'stop' });
+    expect(swallowing.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     expect(observer.outcome).toEqual({ status: 'success', value: 'observed' });
     const abortError = new DOMException('not really', 'AbortError');
     const fake = await root.call(async () =>
@@ -940,6 +976,7 @@ describe('invariants (DESIGN.md §10)', () => {
             pool: () => y.pool({ name: 'p', onFailure: () => {} }),
             all: () => y.all([t]),
             race: () => y.race([t]),
+            shield: () => y.shield(t),
             join: () => y.join(other),
             result: () => y.result(other),
             interrupted: () => y.interrupted(),
@@ -958,7 +995,7 @@ describe('invariants (DESIGN.md §10)', () => {
       }, link),
     );
     expect(await root.call(async () => (await result(Y)).status)).toBe('aborted');
-    for (const name of ['get', 'call', 'fork', 'child', 'pool', 'all', 'race', 'join', 'result', 'interrupted', 'never', 'managed', 'run', 'runSync']) {
+    for (const name of ['get', 'call', 'fork', 'child', 'pool', 'all', 'race', 'shield', 'join', 'result', 'interrupted', 'never', 'managed', 'run', 'runSync']) {
       expect(seen[name], name).toBeInstanceOf(UnawaitedCallError);
       expect((seen[name] as UnawaitedCallError).child, name).toBe(callChild);
     }
@@ -984,7 +1021,7 @@ describe('invariants (DESIGN.md §10)', () => {
       expect(await rejection(Promise.all([f]))).toBeInstanceOf(FiberNotAwaitableError);
       expect(await join(f)).toBe(42);
     });
-    // an aborted fiber awaited from the top level reports FiberAbortedError rather than freezing (DESIGN.md §4.2)
+    // an aborted fiber awaited from the top level reports FiberAbortedError: the top level is never interrupted (DESIGN.md §4.2)
     const g = root.fork(task(async () => never(), link));
     await tick();
     g.abort('stop');

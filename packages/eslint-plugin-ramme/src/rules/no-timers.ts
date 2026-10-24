@@ -1,8 +1,8 @@
 // The platform's timers. A timer is a bare await: an interruption cannot
-// freeze a body waiting on one before it fires, so its node is held for the
+// reject a body waiting on one before it fires, so its node is held for the
 // rest of the wait, and nothing clears a timer when its node ends
 // (DESIGN.md §4.2, §4.4). ramme's `sleep` is a managed await whose timer is
-// cleared at the interruption.
+// cleared at the interruption, which rejects it.
 
 import type { Rule } from 'eslint';
 import { type EsNode, isGlobalName, propertyName, unwrap } from '../ast.js';
