@@ -75,7 +75,7 @@ package.json names exactly those files). One of them is required (§6, D9′).
 | --- | --- |
 | `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()`, `sleep`; `Result`, with its helpers in `ramme/result` (§4.13) | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
-| `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
+| `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
 ---
 
@@ -449,11 +449,14 @@ An `InjectionKey<T>` is a class, a function, or a token made by
 and a token with a `factory`, is its own **default factory**.
 `setDependencies(target, ...keys)` declares constructor or function
 arguments. Providers (`valueProvider`, `factoryProvider`, `classProvider`,
-`aliasProvider`) bind keys on a node, at construction (`providers`) or
-later (`addProvider`). A `Scope` is a name nodes carry (`scopes`), made by
-`createScope(name)`; a scoped key or provider stores its value on the
-nearest node carrying that scope. A key's scope is declared at the key
-(D32):
+`aliasProvider`) bind keys on a node, at construction (`providers` on a
+`child()`, a task's options, a pool or `createRootContext`) or later
+(`addProvider`), and **a provider lives where it is registered**: its value
+is stored on that node, whatever the key declares as its scope (D36). A
+`Scope` is a name nodes carry (`scopes`), made by `createScope(name)`; scope
+is a property of a key's own default: a scoped key's default stores its
+value on the nearest node carrying that scope, and a key that declares
+nothing is auto-hoisted (§3.3). A key's scope is declared at the key (D32):
 
 ```ts
 const SessionScope = createScope('session');
@@ -474,17 +477,50 @@ with no initializer emits) and a function (a static method named `scope`,
 such as an ORM's `Model.scope()`) are ignored; any other value is a
 `TypeError` naming the key, at every read of the key's scope: resolution,
 the shadow checks of §3.4, and provider registration (`child({ providers })`,
-`addProvider`). `setScope(key, scope)` is the form for a key you do not
+`addProvider`), which validates the key's scope although a provider never
+uses it. `setScope(key, scope)` is the form for a key you do not
 own (a third-party class, a function), including one whose unrelated static
 `scope` member would otherwise be refused; the registered scope wins over
 the property, and `setScope` on a key that already declares a scope, own or
 inherited, is a `TypeError` (two declarations). A token takes
-`createInjectionKey(name, { scope })`. A provider's own `scope` option takes
-precedence over the key's and never reads it.
+`createInjectionKey(name, { scope })`.
+
+**The helpers.** `valueProvider(key, value)`, `factoryProvider(key, factory)`
+and `classProvider(key, Impl)` (or `classProvider(Class)`) state a
+placement: the value is built on the providing node at the first resolution
+through it, and stored there. `classProvider(Key, Impl)` therefore ignores
+`Impl`'s own `static scope`. `aliasProvider(key, target)` is a **redirect**:
+from the providing node down, resolving `key` resolves `target` instead, by
+`target`'s own rules (an explicit provider for it on the path, its declared
+scope, auto-hoisting), from the base of the walk that found the alias
+(§3.3), and nothing is cached under `key`. It binds a key to an
+implementation whose own declaration should govern placement: a root
+`aliasProvider(Cache, SessionCache)` gives each session its own
+`SessionCache`, a target declaring `SelfScope` gives each creation its own,
+and an auto-hoisted target lands at its deepest dependency as if injected
+directly. Chains of aliases are followed; a cycle is
+`Circular dependency detected: A → B → A`, whether it is all aliases or
+passes through a creation (a class target that injects the alias key again).
+
+**Providers are checked against the public surface (D37).** A helper takes
+what it is given (a value, a factory's result, a class, an alias target) as
+`Public<T>`: `T`'s public members (`keyof T`, which leaves out `private` and
+`#private` ones), what a consumer of `inject(T)` can reach. Functions, topic
+receivers, classes, `any` and `unknown` pass through unchanged, and `T` is
+inferred from the key alone. So a test fake of a class with `#private`
+fields needs no cast, while a fake that misses a public member, or has one
+of the wrong type, does not compile. `inject` and `lookup` still return `T`.
+**An injected value is the key's public surface:** do not brand-check an
+injected service (`instanceof`, `#x in v`) or pass it to code that reads its
+private members from outside the instance; on a fake such a check answers
+`false` or throws, and a TS-`private` member reads `undefined`.
 
 `SelfScope` means "per consuming creation, stored nowhere" (or at a node
-that carries it); `RootScope` is on every root; `RequestScope` is the
-conventional per-request scope, attached explicitly: to the request's
+that carries it) for a key's default and for an alias target; a provider
+for a `SelfScope`-declared key is stored at its node and shared like any
+provider (D36), so the per-creation binding is an alias to an
+implementation that declares `SelfScope`. `RootScope` is on every root;
+`RequestScope` is the conventional per-request scope, attached explicitly: to the request's
 fiber (`task(async (req) => …, { scopes: [RequestScope] })`, or
 `handle.with({ scopes: [RequestScope] })` for an existing task `handle`),
 which the unit-of-work idiom of §2.6 requires, or to a bodiless
@@ -513,11 +549,19 @@ visible.
 
 ### 3.3 Creation, the value's node and auto-hoisting (D7)
 
-Resolving `K` walks from the requester `R` upward: the first cache hit or
-provider answers. A value has a **declared placement** when a provider or a
-scope says where it is stored: on the providing node, or on the nearest node
-carrying the provider's or the key's scope. A key with no provider but a
-default factory is **auto-hoisted**: its factory runs in a **creation
+Resolving `K` walks from its base `R` upward: the first cache hit or
+provider answers. The base is the requester for `get`, `lookup` and an
+auto-hoisted factory's `inject`; the storage node `S` for a
+declared-placement factory's `inject`, which resolves from `S`; and the
+parent for `skipSelf`. An alias provider answers by resolving its target
+from that same base (D36): the target is placed exactly as if the base had
+injected it, and a factory on the root that injects an alias to a
+session-declared target fails as one that injects the target would, with no
+session above the root. A value has a **declared placement** when a provider
+or a scope says where it is stored: a provider is a declared placement at
+its own node, and a key's scope is a declared placement for the key's
+default, on the nearest node carrying the key's scope. A key with no
+provider but a default factory is **auto-hoisted**: its factory runs in a **creation
 frame** (§6) that records every `inject` into a dependency tracker, and the
 value is stored on the deepest node that served one of its dependencies (clamped by
 the nearest `captureAutoScoped` node, a `NodeOptions` flag for harnesses
@@ -534,7 +578,9 @@ the root and is shared by every session, and nothing in the class says so.
 A service that holds state for one session, request or other unit declares
 its scope (`static readonly scope`, §3.1); its value is then stored on the
 nearest node carrying that scope, whatever it injects, and a requester with
-no such node above it gets the error of any scoped key without one.
+no such node above it gets the error of any scoped key without one. A
+provider for the key still lives where it is registered (§3.1): to bind an
+implementation at the root and keep its declared lifetime, alias to it.
 Everything else is left to inference.
 
 The value's **own node** is excluded from tracking (D4′):
@@ -582,16 +628,23 @@ answer was a value or "not provided here". If the answer was an
 auto-hoisted value `V`, the same nodes also mark every key in `deps(V)`,
 its recorded dependencies (below). `addProvider(K)` at `C` throws
 `PlacementError` iff `K` is decided at `C`. A fresh child has no decisions,
-so providing at construction is always allowed. A provider for a scoped
-key below the node that key resolves to is also a `PlacementError` (at
-`addProvider`, at `child({ providers })`, and when a pending value node
-that built such a child is placed; D10′).
+so providing at construction is always allowed. A key's scoped default,
+created at its scope owner, decides the key on the whole walk, from `R` up
+to the root, as a miss does: the provider search already walked to the root
+without finding one, and a provider added above later would serve `R`'s
+descendants values built from another view of the key. So once a scoped
+default exists, no ancestor can provide its key. An alias that answered
+decides its key from `R` up to the alias node; the walk that resolved its
+target marks the target.
 
 **Placement by view.** When `R` finds auto-hoisted `V` cached at `S`, a
 node from `R` itself up to, but not including, `S` is a **shadow** if it
-provides a key in `deps(V)` or carries the effective scope of one: the scope
-of the first provider for that key at or above `S`, else the key's own
-(`SelfScope` aside). A shadow changes `R`'s view of that dependency, so the
+provides a key in `deps(V)` or carries the declared scope of one that no
+provider at or above `S` serves (`SelfScope` aside). A key such a provider
+serves has no scope to shadow, since a provider places where it is
+registered, and no scoped default of it is cached below one (the marker
+above); an alias's target is in `deps(V)` and is checked on its own. A
+shadow changes `R`'s view of that dependency, so the
 cache is not `R`'s answer: `V`'s factory runs from `R`, and the result is
 placed by `R`'s view and memoized there, on the deepest node that serves
 one of its dependencies as `R` sees them (clamped as in §3.3). That node,
@@ -605,10 +658,16 @@ shares the value. With `A` provided at `P` and at `C`, and `B` injecting
 `deps(V)` is recorded at creation: the keys `V` injected (an optional miss
 included: "not provided" is part of `V`'s view, though no node served it),
 plus the `deps` of each injected auto-hoisted value; declared-placement
-values contribute their key only. A value built from a requester-relative
-read (a per-creation `SelfScope` value, a `skipSelf` read) is **pinned**:
-it is placed at its requester and served only to a requester at that same
-node, so any other requester, a descendant included, builds its own.
+values contribute their key only. An `inject` that reaches an alias also
+records the alias keys on the redirect chain and the final target, whether
+the target resolved or missed, and `V` is never stored above the deepest
+alias node on the chain, as it is never stored above a provider it read
+from; with the alias at or above the target's placement (the root,
+typically) `V` is placed exactly as if it injected the target. A value
+built from a requester-relative read (a per-creation `SelfScope` value, a
+`skipSelf` read) is **pinned**: it is placed at its requester and served
+only to a requester at that same node, so any other requester, a
+descendant included, builds its own.
 Pinning carries through an injected auto-hoisted value that is itself
 pinned; declared-placement values are never pinned (D25). What this gives:
 no node ever changes an answer it has given; no requester is served a value
@@ -618,11 +677,18 @@ keys on every run (below).
 
 **An auto-hoisted factory must inject the same keys on every run.** A
 re-creation forced by placement by view runs the factory from `R` with the
-recorded `deps(V)` in hand. If this run injects a different set of keys,
+keys its first run injected itself in hand: its own reads, misses and
+`skipSelf` reads, not the `deps` those reads brought in, which a shadow may
+legitimately change (an override that serves a dependency as a value where
+the first run got an auto-hoisted one, or a per-creation `SelfScope` one,
+with dependencies of its own, or that replaces an alias). A per-creation
+dependency's reads run through `V`'s creation but are among those `deps`,
+not `V`'s own. If this run injects a different set of keys itself,
 the resolution throws `PlacementError` naming the key and both sets, the
 new instance's node is released, nothing is cached, and the answer at `S`
-is untouched. With equal sets the re-run lands at or below the shadow,
-never on a node that already caches the key (D7).
+is untouched. With equal sets each shadowed read lands at or below its
+shadow, so the re-run lands at or below the shadow, never on a node that
+already caches the key (D7).
 
 ### 3.5 Creation is pure
 
@@ -1121,7 +1187,7 @@ dropped `gen(…)` can be one (§4.13).
 | `CreationViolationError` | `lookup` or a body-shaped operation during creation; `inject` outside creation; `get(ContextKey)` |
 | `FactoryReturnedUndefinedError` | a factory or provider returned `undefined` (a `CreationViolationError`) |
 | `AsyncRunError` | `run(fn)` returned a promise (development mode, §4.4) |
-| `PlacementError` | providing a decided key (§3.4); a scoped provider below the node carrying its scope; a forced re-creation whose factory injected different keys than its first run (§3.4) |
+| `PlacementError` | providing a decided key (§3.4); a forced re-creation whose factory injected different keys than its first run (§3.4) |
 | `OwnerInterrupt` | never thrown: the abort reason of a parent's body exit, or of an entry's turn in the release loop; `.owner` |
 
 ### 4.13 Results and `gen` (D38)
@@ -1306,18 +1372,18 @@ the two adapters (`ramme/node`, `ramme/async-context`) and `result.ts`
 | `context-key.ts` | `InjectionKey`, default factories, key scopes, `setDependencies` |
 | `scope.ts` | `Scope`, `createScope`, `SelfScope`, `RootScope`, `RequestScope` |
 | `topic.ts` | `createTopic`, `TopicReceiver` |
-| `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` |
-| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, … |
+| `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` (marked as a redirect through `inject.ts`) |
+| `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, `Provider`, `Public`, … |
 | `result.ts` | the `ramme/result` subpath: free functions over plain `Result` objects, `gen`, `$` |
 | `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (the `own` overloads into one dispose) |
 | `context-storage.ts` | the `Frame`, the storage contract, `registerContextStorage`, current-frame reads |
 | `node.ts`, `async-context.ts` | the two storage adapters (side-effect entries) |
-| `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, pin), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed) |
+| `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, the keys its factory injected itself, pin), resolve results (with the redirect an alias followed), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed) |
 | `stack.ts` | `Entry`, `Stack`: the two stacks, fixed positions, LIFO release order |
 | `managed.ts` | `ManagedPromise`: the freeze decision and the resume step |
 | `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, lending, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, awaits, events |
 | `pool.ts` | the pool's concurrency queue and intake rules |
-| `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, decided markers, placement by view, the value node's creation and placement |
+| `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, alias redirects, decided markers, placement by view, the value node's creation and placement |
 | `fiber.ts` | `task()` |
 | `ambient.ts` | the free functions: `current`, `signal`, `lookup`, `own`, `release`, `fork`, `call`, … |
 | `lifecycle-events.ts` | `NodeEvent`, `NodeTopic` |

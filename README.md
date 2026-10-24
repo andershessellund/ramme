@@ -120,6 +120,7 @@ class SessionCache {
   static readonly scope = SessionScope;              // one per session, whatever it injects
   readonly #config = inject(Config);
   readonly #entries = new Map<string, unknown>();
+  get(key: string): unknown { return this.#entries.get(key); }
 }
 
 const session = app.child({ scopes: [SessionScope] });   // lookup(SessionCache) below it is this session's
@@ -165,6 +166,57 @@ its outcome is how the request ended. A bodiless
 work ended: under `await using` every unit of work on it rolls back, and
 after `close()` every one commits, even when a `call` on it failed and the
 error was caught ([DESIGN.md §2.6](DESIGN.md#26-ownership)).
+
+### Tests and overrides
+
+A provider lives where it is registered: `valueProvider`, `factoryProvider`
+and `classProvider` store their value on the node you give them to (in
+`providers`, or with `addProvider`), whatever the key declares as its
+scope. A child or a task that provides a key overrides it for everything
+below, a request's unit of work included. To replace a service with one
+that keeps a lifetime of its own, alias the key to it: `aliasProvider`
+redirects, so the replacement is placed by its own declaration.
+
+```ts
+import { aliasProvider, createRootContext } from 'ramme';
+
+class FakeSessionCache {
+  static readonly scope = SessionScope;               // the fake declares its lifetime too
+  readonly reads: string[] = [];                      // a test-only member is fine
+  get(key: string): unknown { this.reads.push(key); return undefined; }
+}
+
+await using app = createRootContext({ providers: [aliasProvider(SessionCache, FakeSessionCache)] });
+// below each session, lookup(SessionCache) is that session's own FakeSessionCache
+```
+
+A provider is checked against the key's public members (`Public<T>`): the
+fake needs `SessionCache`'s `get`, with its type, and cannot have its
+`#entries`, so it needs no cast. Since a fake is not an instance of the
+class, code should not test an injected service with `instanceof`.
+
+For a seam with no class of its own, declare an interface and a token of
+the same name whose default is the implementation. Call sites read
+`inject(Mailer)` exactly as they would a class key, and a test or another
+environment provides its own:
+
+```ts
+import { createInjectionKey, inject, valueProvider } from 'ramme';
+
+export interface Mailer {
+  send(to: string, body: string): Promise<void>;
+}
+export const Mailer = createInjectionKey<Mailer>('Mailer', { factory: () => inject(SmtpMailer) });
+
+class Signup {
+  readonly #mailer = inject(Mailer);                  // the same call site as a class key
+}
+
+const sent: string[] = [];
+await using test = createRootContext({
+  providers: [valueProvider(Mailer, { send: async (to) => void sent.push(to) })],
+});
+```
 
 ## Fork now, join later
 

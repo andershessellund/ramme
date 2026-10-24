@@ -9,6 +9,7 @@ export type {
   Body,
   Release,
   Provider,
+  Public,
   LookupOptions,
   Success,
   Failure,
@@ -73,7 +74,6 @@ export type { ContextStorage, Frame } from './context-storage.js';
 export { createInjectionKey, setScope, setDependencies } from './context-key.js';
 export type { InjectionKey, CreateInjectionKeyOptions } from './context-key.js';
 export { classProvider, factoryProvider, valueProvider, aliasProvider } from './provider-util.js';
-export type { ProviderOptions } from './provider-util.js';
 export { createScope, SelfScope, RootScope, RequestScope } from './scope.js';
 export type { Scope } from './scope.js';
 export { createTopic } from './topic.js';

@@ -311,8 +311,9 @@ A default-factory value with no declared placement is cached on the deepest
 node that served one of its `inject`ed dependencies, clamped by the nearest
 `captureAutoScoped` node; nodes below share it. The tracker also records
 `deps(V)`, the keys `V` injected plus the `deps` of each injected
-auto-hoisted value, which D10′ uses; the value's own node is untracked (D4′);
-reads place only auto-hoisted values.
+auto-hoisted value, which D10′ uses, and apart from it the keys `V`'s
+factory injected itself, which the re-run check below compares; the value's
+own node is untracked (D4′); reads place only auto-hoisted values.
 
 **Why.** Inherited from the lineage and kept: it makes "placement follows
 dependencies" (I17) mechanical, sharing as wide as dependencies allow and
@@ -331,17 +332,27 @@ abandoned the new instance and served the existing one, with a development
 warning. That collision happens only when a factory's key set varies, and
 serving the existing instance hid the defect; checking the key set at the
 re-run names the cause, and the collision branch remains only as an I19
-guard that throws. **Cost.** Placement depends on what a factory injected on
+guard that throws. Rejected too: comparing the closure `deps(V)` at the
+re-run, the check's earlier form. The closure changes legitimately when a
+shadow changes a dependency's kind, which made an ordinary override an
+order-dependent `PlacementError`: with `class Dep { c = inject(Config) }`
+and `V` injecting `Dep`, `root.get(V)` and then a child providing
+`valueProvider(Dep, …)` threw "V injected {Dep} when re-created …, but
+{Dep, Config} when first created", while the child-first order worked, and
+a child overriding an alias (D36), whose target is in `deps(V)`, did the
+same. **Cost.** Placement depends on what a factory injected on
 its run, so **an auto-hoisted factory must inject the same keys on every
 run.** A factory that does not is a defect, and it is detected where it can
 be: a re-creation forced by a shadow of a *first-run* dependency (`P` and
 `C` both provide `A`; `B@P`, the instance of `B` cached at `P`, was built
 with `inject(A)`; `C` resolves `B` and must not be served `P`'s view) runs
-the factory again from `C` with the recorded `deps(B)` in hand; if that run
-injects a different set of keys, the resolution throws `PlacementError`
-naming both sets, the new instance is released, and `P`'s answer is
-untouched (I19). With equal sets the re-run always lands at or below the
-shadow, so it can never collide with an existing instance. What is not
+the factory again from `C` with the keys its first run injected itself in
+hand (its own reads, misses and `skipSelf` reads, not the `deps` they
+brought in); if that run injects a different set of keys itself, the
+resolution throws `PlacementError` naming both sets, the new instance is
+released, and `P`'s answer is untouched (I19). With equal sets each shadowed
+read lands at or below its shadow, so the re-run always lands at or below
+the shadow and can never collide with an existing instance. What is not
 detected: a factory whose key set varies, but whose cached instance meets no
 shadow of a first-run dependency, is never re-run, so every requester under
 it is served that instance, built from the keys its first run read. A
@@ -446,11 +457,11 @@ of the key's scope: resolution, the shadow checks of placement by view
 `setScope(key, scope)` registers a scope for a key that declares none, and
 wins over its property; on a key with a declaration, own or inherited, it
 is a `TypeError`. `createInjectionKey(name, { scope })` is unchanged and is
-the form for tokens. Placement is the existing scoped placement: the value
-is stored on the nearest node carrying the scope, whatever it injects, and
-a provider's own `scope` still takes precedence over the key's
-(`p.scope ?? getKeyScope(key)`), so such a provider never reads the
-property. The rule for users: a service that holds state for one session,
+the form for tokens. Placement is the existing scoped placement: the key's
+default is stored on the nearest node carrying the scope, whatever it
+injects. A provider has no scope and places where registered (D36);
+provider registration still reads the key's scope, to refuse a malformed
+one. The rule for users: a service that holds state for one session,
 request or other unit declares its scope; inference is for stateless and
 derived services, and gives the widest sharing the dependencies allow.
 
@@ -478,13 +489,17 @@ value that `own`s something is hoisted to the root, which cannot tell state
 from stateless (a root service that owns a connection pool is the normal
 case); decorators, which need a compiler flag and are not zero-dependency;
 mandatory scopes, which punish the stateless majority that inference serves
-well; a structural `Scope` test (above). **Cost.** A declared scope on a
-class that is also provided elsewhere with a different scope is two
-declarations, and the provider's wins, as it does today. A third-party
-class whose static `scope` is something else must be given `setScope`
-before it is resolved or provided, or it is refused. The property is read
-at every read of the key's scope: each resolution that does not hit a
-cached value, each shadow check, each provider registration. Nothing is
+well; a structural `Scope` test (above). **Cost.** A declared scope places
+only the key's default: a provider for the key has no scope and places
+where registered (D36), so a class provided at the root is shared whatever
+it declares, and binding it at the root with its declared lifetime takes an
+alias; provider registration still reads the key's scope, to refuse a
+malformed one. A third-party class whose static `scope` is something else
+must be given `setScope` before it is resolved or provided, or it is
+refused. The property is read
+at every read of the key's scope: each resolution of the key's default
+that does not hit a cached value (resolution through a provider never reads
+it), each shadow check, each provider registration. Nothing is
 memoized beyond the cached value itself, so a cache hit reads no `scope`,
 and a property reassigned after a value was cached leaves that value where
 it is for every requester the cache serves. DESIGN.md §3.1, §3.3.
@@ -637,8 +652,9 @@ Each cache hit on an auto-hoisted value writes its key and every key of
 `deps(V)` into the decided set of every node on the walk, and the shadow
 check tests each key of `deps(V)` against the providers of every node
 between `R` and `S` and, at each node that carries scopes, against the key's
-effective scope, found by a provider walk from `S` up: work proportional to
-the walk's length times `|deps(V)|` per hit. Decided sets grow with every
+effective scope: none when a provider walk from `S` up finds a provider for
+the key, else the key's declared scope. That is work proportional to the
+walk's length times `|deps(V)|` per hit. Decided sets grow with every
 key resolved through a node and are dropped only when it completes.
 DESIGN.md §3.4.
 
@@ -662,18 +678,34 @@ Settled while implementing it:
 - *A node carrying a scope shadows a scoped dependency.* The rule names
   providers, but a node at `R` or between `R` and `S` that carries the
   effective scope of some `d ∈ deps(V)` changes `R`'s view of `d` exactly
-  as a provider would, since `R`'s walk resolves `d` at the nearest node
-  carrying that scope; so it is a shadow too. The effective scope is that
-  of the first provider for `d` at or above `S` (one at `R` or between them
-  is a shadow already), else the key's own. The key's alone misses the usual
-  case, an unscoped key given a `{ scope: σ }` provider at the root: `R`
-  under a nested node carrying σ would be served a `V` built from the outer
-  one's `d`. `SelfScope` is excluded: inside a creation a `SelfScope`
-  dependency is made per creation, and a value that reads one is pinned to
-  its requester instead (D25).
-- *A scoped provider below the node carrying its scope is refused.* A
-  provider for a σ-scoped key stores its value on the nearest node carrying
-  σ. Declared below that node, it would still store there, and every
+  as a provider would, since `R`'s walk resolves `d`'s default at the
+  nearest node carrying that scope; so it is a shadow too. The effective
+  scope is `d`'s declared scope when no provider for `d` (an alias included)
+  sits at or above `S`, and none when one does: a provider places where it
+  is registered (D36), so `R`, whose walk meets no provider below `S` (one
+  at `R` or between them is a shadow already), is served the same `d` as
+  `S`. Taking the declared scope alone is wrong there: with a root
+  `classProvider(SessionCache)` for a session-declared class and an
+  auto-hoisted `V` injecting it, a second session would count as a shadow
+  of a key the root serves, and the re-run would land on the root, which
+  already holds `V` (the I19 guard of D7). The rule is exact because a
+  scoped default decides its key up to the root when it is created, as a
+  miss does: the provider search walked to the root without finding one,
+  and without the marker a provider added later at an ancestor would let a
+  sibling's `V` be cached above the default and served to the default's
+  own requesters, built from another view. So a scoped default is never
+  cached below a provider of its key. The usual case is an alias at the
+  root to a σ-declared implementation (D36): the alias's key has no
+  effective scope, the target is in `deps(V)` with its own σ, and `R`
+  under a nested node carrying σ is served a `V` built from its own
+  target, not the outer one's. `SelfScope` is excluded: inside a creation a
+  `SelfScope` dependency is made per creation, and a value that reads one is
+  pinned to its requester instead (D25).
+- *Superseded by D36: a scoped provider below the node carrying its scope
+  was refused.* D36 removes the rule; a provider now stores its value where
+  it is registered. The rule as it stood: a provider for a σ-scoped key
+  stores its value on the nearest node carrying σ. Declared below that
+  node, it would still store there, and every
   requester under that node would be served whichever value was created
   first: the provider's, if a requester below it asked first, or the
   default's or another provider's, if a sibling did. That answer would
@@ -682,10 +714,157 @@ Settled while implementing it:
   pending value node that built such a child is checked when it is placed,
   since the node carrying σ above it is unknown until then. **Rejected:**
   storing the value at the provider's node, which turns the key's scope
-  into a suggestion.
+  into a suggestion. D36 answers that rejection: scope is a property of the
+  key's default, and an explicit provider is a statement; the order
+  dependence came from a provider inheriting the key's scope, which D36
+  also removes.
 - *A DI value's node has its own event kind, `'value'`.* It is the one node
   kind whose placement the design explains; emitting it as a context would
   hide it in `node:created`/`node:placed`/`node:complete`.
+
+### D36. Providers place where registered; `aliasProvider` redirects
+
+An explicit provider lives where it is registered. `addProvider(p)` on a
+node, or `providers:` on a `child()`, a task's options (run by `fork` or
+`call`, `task.with` included), `pool({ providers })` or
+`createRootContext`, stores the value on that node, whatever the key, or an
+implementation class, declares as its scope. Scope is a property of default
+providers only: a key's `static scope`, `setScope` or
+`createInjectionKey(name, { scope })` decides where the key's own default
+stores its value, and auto-hoisting decides when nothing is declared
+(D7, D32). The provider `scope` option is removed, and with it the helpers'
+options argument and `ProviderOptions`. `classProvider(Key, Impl)`
+constructs `Impl` on the providing node. `aliasProvider(key, target)` is a
+redirect: from its node down, resolving `key` resolves `target` instead,
+from the base of the walk that found the alias (the requester, the storage
+node in a declared-placement creation, the parent for `skipSelf`), by
+`target`'s own rules, and caches nothing under `key`. The alias is a
+decision on `key` at its node (D10′); a value that injects `key` records
+the redirect chain and its target in `deps(V)`, misses included, and is
+never stored above the alias node; a cycle of aliases is the
+circular-dependency error, naming the hops. Placement by view keeps its
+guarantees under the rule with two adjustments (D10′): a dependency that a
+provider at or above the cached value's node serves has no effective scope,
+and a scoped default decides its key up to the root when it is created. The
+re-run check compares the keys a factory injected itself (D7). This
+supersedes D10′'s settled bullet "a scoped provider below the node carrying
+its scope is refused". DESIGN.md §3.1, §3.3, §3.4.
+
+**Why.** An `addProvider` at a node is a statement, not an inference: its
+author said where the value lives. The defect D32 addressed was an inferred
+placement (a stateful class auto-hoisted to the root because nothing it
+injects is session-scoped), and a provider that inherited its key's scope
+was placed by inference too: its author wrote a node and the value went
+elsewhere. Registered on a session node for a session-declared class, it
+built a second instance at a nested owner of the scope below that node, and
+`providers:` on a task for a key whose scope owner sat above the call was a
+`PlacementError`. One rule for explicit providers (where registered) and
+one for defaults (the key's scope, else its dependencies) leaves nothing to
+infer, and the override a test needs below a declared scope becomes legal:
+a `call` child that provides a fake unit of work shadows the request's for
+that child only. Binding an interface at the root without fixing the
+implementation's lifetime is a redirect's job, as it is for Angular's
+`useExisting`: a root `aliasProvider(SessionCache, FakeSessionCache)`, the
+fake declaring `SessionScope`, gives each session its own fake, and an
+auto-hoisted target lands at its deepest dependency as if injected
+directly. D10′ rejected storing a provider's value at the provider's node
+because it "turns the key's scope into a suggestion"; the answer is that
+scope is a property of the key's default, and an explicit provider is a
+statement. The order dependence that rule guarded against came from the
+provider inheriting the key's scope, which is gone. The two adjustments to
+placement by view keep D10′'s guarantees: under a provider a key has no
+scope for a nested owner to shadow, and without the root-wide marker a
+provider added at an ancestor after a scoped default was created would let
+another requester's value, built from the ancestor's provider, be cached
+above the default and served to the default's own requesters.
+**Rejected:** a provider inheriting the key's scope, the previous rule, with
+its `PlacementError` for a provider below the node carrying the scope; an
+asymmetric "widening" guard that refuses a provider above a declared scope
+unless it is marked explicit, judged a surprise where there is none, since
+a provider above the scope is exactly what its author wrote; a cached
+alias, the previous `aliasProvider` (a factory `() => inject(target)` whose
+value was cached under `key` at the alias node), which shares one instance
+and so cannot bind a per-session or per-request implementation at the
+root. **Cost.** Binding a per-request (or per-session) implementation at the
+root must use the redirect: a `classProvider` there shares one instance.
+`classProvider(Key, Impl)` ignores `Impl`'s own declaration, by its
+documented meaning. A provider for a `SelfScope`-declared key is stored at
+its node and shared by every creation, not made per creation, so
+`SelfScope` applies to defaults and alias targets only; the per-creation
+binding is `aliasProvider(K, Impl)` with `Impl` declaring `SelfScope`.
+After a scoped default is created, no ancestor can provide its key. A
+value that injects an alias is never cached above the alias node, so an
+alias below the root narrows the sharing of everything that injects its
+key, as a provider there does. Nothing is cached under an alias key, so
+each resolution of it walks to the alias node and resolves the target.
+
+Settled while implementing it:
+
+- *The redirect checks its own cycles.* runCreation's frame-chain check
+  sees only creations, and a redirect runs no factory, so a cycle of
+  aliases alone recursed until the stack overflowed. The redirect keeps the
+  alias keys it has followed in the current resolution and throws on a
+  repeat; and a creation reached through a redirect keeps its hops, so an
+  alias `A → B` whose class `B` injects `A` again reads
+  `Circular dependency detected: A → B → A`, as the cached alias's frame
+  made it, rather than `A → B → A → B`. The redirect counts a repeat by an
+  enclosing creation only from the same base, so it does not take for a
+  cycle a decorator written as an alias whose target injects the key with
+  `skipSelf`, which resolves from the parent, nor a declared-placement
+  target's `inject` of the key, which resolves from its storage node, where
+  the key may reach another alias, or the same alias and then other
+  providers. Whether those resolve is up to the frame check, as for any
+  creation; when it finds the target repeated, reached through an alias hop
+  that also led to the first one, it ends the message at that hop, so a
+  declared or provided `B` requested from below its storage node reads
+  `A → B → A` too.
+- *`Provider<T>` keeps its public shape.* Users write providers as
+  `{ key, provide }` literals, so the redirect is marked in a module-private
+  `WeakMap` in inject.ts that `aliasProvider` fills (`markAlias`), as
+  context-key.ts keeps its markers; only resolveFrom's provider branch reads
+  it, and resolution never calls an alias's `provide`.
+
+### D37. Providers are checked against the public surface
+
+The provider helpers check what they are given against `Public<T>`, the
+members a consumer of `inject(T)` can reach: `valueProvider(key, value)`
+takes `NoInfer<Public<T>>`, `factoryProvider(key, factory)` a factory
+returning it, `classProvider(key, Impl)` and `aliasProvider(key, target)`
+an implementation (for an alias: a class, a function or a token) of a
+`U extends Public<T>`, and `T` is inferred from the key alone. `Public<T>`
+is a public type: `{ [K in keyof T]: T[K] }`, with functions, classes, `any`
+and `unknown` passed through unchanged. `inject` and `lookup` keep
+returning `T`. DESIGN.md §3.1.
+
+**Why.** Angular's providers are untyped (`useValue: any`): a wrong provider
+fails at run time, and a fake drifts from what it replaces without notice.
+Typing them against `T` itself forbids a fake of any class with a
+`#private` member, since no other class can have it, and that breeds casts,
+which hide exactly the drift the type should catch. `keyof` leaves out
+`private` and `#private` members, so `Public<T>` is the consumer's view of
+`T` and the right contract at the provider boundary: a fake needs every
+public member, each of a compatible type, and may have more. The
+pass-throughs keep what the mapped type alone loses. It erases call
+signatures, so a topic receiver (`valueProvider(MyTopic, (e) => …)`) would
+lose its contextual typing and any non-nullish value would pass for a
+function-valued key; over `any` it rejects primitives, `null` and
+`undefined`, and over `unknown`, where it is `{}`, it rejects `null` and
+`undefined`. `NoInfer` keeps `T` from being inferred from the value: a fake that
+lacks a method is a supertype of the class, and `T` inferred from it would
+type the provider as the fake's and compile. An alias target's token
+branch refuses functions (`{ call?: never }`), because every function has a
+`name` and would otherwise pass as a token of any type. **Rejected:**
+`inject` returning `Public<T>`: it is viral, into every signature that
+passes a service on, and it would not close the identity hole below, which
+is a run-time fact; untyped providers; `T` itself, the previous form.
+**Cost.** The one hole is any check of class identity on an injected value:
+`instanceof`, a `#private` read or a `#x in v` brand check, which throw or
+answer `false` on a fake, and a TS-`private` member read, which returns
+`undefined`. The types cannot see it, so DESIGN.md §3.1 says not to
+brand-check an injected service. A generic wrapper
+`<T>(k: InjectionKey<T>, v: T) => valueProvider(k, v)` does not compile,
+since an unresolved `T` is not assignable to `Public<T>`, and needs
+`v as Public<T>`; none exists in the repository. One more name in tier 1.
 
 ### D11. `call` lends the current node, never the receiver
 

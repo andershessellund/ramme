@@ -1,7 +1,8 @@
 // declared-scope.test.ts — a key's lifetime declared at the class: `static readonly scope = S` (D32,
 // DESIGN.md §3.1, §3.3). A declaration is a Scope made by createScope, read through the prototype chain;
-// `undefined` and function values are ignored; anything else is a TypeError at every read. setScope is the form
-// for keys you do not own, refused on a key that already declares one; a provider's own scope still wins.
+// `undefined` and function values are ignored; anything else is a TypeError at every read, provider registration
+// included. setScope is the form for keys you do not own, refused on a key that already declares one. The scope
+// places the key's own default only: a provider stores its value where it is registered (D36).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
 import { createInjectionKey, getKeyScope, setScope } from './context-key.js';
@@ -120,11 +121,11 @@ describe('a declared scope places the value at the scope node (DESIGN.md §3.1, 
     await app.close();
   });
 
-  it('a provider’s own scope takes precedence over the key’s static scope', async () => {
+  it('a provider stores its value where it is registered, whatever the key’s static scope (D36)', async () => {
     class Declared {
       static readonly scope = SessionScope;
     }
-    const app = createRootContext({ providers: [classProvider(Declared, Declared, { scope: RootScope })] });
+    const app = createRootContext({ providers: [classProvider(Declared)] });
     const s1 = app.child({ name: 's1', scopes: [SessionScope] });
     const s2 = app.child({ name: 's2', scopes: [SessionScope] });
     const a = await fromRequest(s1, Declared);
@@ -196,9 +197,6 @@ describe('setScope and the scope property (D32)', () => {
     expect(() => app.child({ providers: [valueProvider(Bad, new Bad())] })).toThrow(TypeError);
     expect(() => app.child({ providers: [valueProvider(Bad, new Bad())] })).toThrow(/Bad\.scope/);
     expect(() => s1.addProvider(factoryProvider(Bad, () => new Bad()))).toThrow(TypeError);
-    // A provider with its own scope never reads the key's (`p.scope ?? getKeyScope(key)`).
-    const ok = app.child({ name: 'ok', scopes: [SessionScope], providers: [valueProvider(Bad, new Bad(), { scope: SessionScope })] });
-    expect(ok.get(Bad)).toBeInstanceOf(Bad);
     await app.close();
   });
 

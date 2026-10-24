@@ -1817,24 +1817,25 @@ describe('Disposal', () => {
     });
   });
 
-  describe('Provider.scope', () => {
-    it('should store explicit provider value on scoped context', () => {
+  // FLIP (D36): a provider has no `scope` option and stores its value where it is registered; a key's scope places
+  // only the key's own default. The per-creation binding is an alias to a SelfScope-declared implementation.
+  describe('providers place where registered', () => {
+    it('should store explicit provider value on its own node', () => {
       const requestScope = createScope('request');
-      const CONFIG = createInjectionKey<string>('CONFIG');
+      const CONFIG = createInjectionKey<string>('CONFIG', { scope: requestScope });
 
       const root = createRootContext({
-        scopes: [requestScope],
-        providers: [valueProvider(CONFIG, 'root-config', { scope: requestScope })],
+        providers: [valueProvider(CONFIG, 'root-config')],
       });
-      const child = root.child();
+      const child = root.child({ scopes: [requestScope] });
 
-      // Provider is on root with scope=requestScope, root owns requestScope:
-      // the value is stored on root (the scope owner)
+      // The key's scope is owned by the child, below the provider: the value is still the root's.
       expect(child.get(CONFIG)).toBe('root-config');
-      expect(root.get(CONFIG)).toBe('root-config');
+      expect(impl(root).cache.has(CONFIG)).toBe(true);
+      expect(impl(child).cache.has(CONFIG)).toBe(false);
     });
 
-    it('should override key scope with provider scope', () => {
+    it('should let a provider below the key scope owner override the key default for its subtree', () => {
       const appScope = createScope('app');
       const requestScope = createScope('request');
 
@@ -1847,34 +1848,38 @@ describe('Disposal', () => {
       const mid = root.child({ scopes: [requestScope] });
       const child = mid.child();
 
-      // Provider has scope=requestScope, overriding key's appScope
-      mid.addProvider(factoryProvider(KEY, () => 'overridden', { scope: requestScope }));
+      // Below the owner of the key's appScope, and allowed: stored on mid
+      mid.addProvider(factoryProvider(KEY, () => 'overridden'));
 
-      // Resolving from child: provider scope wins, stored on mid (nearest requestScope)
       expect(child.get(KEY)).toBe('overridden');
       expect(mid.get(KEY)).toBe('overridden');
+      expect(impl(mid).cache.has(KEY)).toBe(true);
+      expect(root.get(KEY)).toBe('default'); // the default, at the scope owner
     });
 
-    it('should throw when provider scope is not found in chain', () => {
+    it('should not need the key scope to be carried anywhere when provided', () => {
       const missingScope = createScope('missing');
-      const KEY = createInjectionKey<string>('KEY');
+      const KEY = createInjectionKey<string>('KEY', { scope: missingScope });
+      const DEFAULTED = createInjectionKey<string>('DEFAULTED', { scope: missingScope, factory: () => 'default' });
 
       const root = createRootContext({
-        providers: [valueProvider(KEY, 'val', { scope: missingScope })],
+        providers: [valueProvider(KEY, 'val')],
       });
 
-      expect(() => root.get(KEY)).toThrow("No context found for scope 'missing'");
+      expect(root.get(KEY)).toBe('val');
+      expect(() => root.get(DEFAULTED)).toThrow("No context found for scope 'missing'"); // a default needs its scope
     });
 
-    it('should support SelfScope on provider scope (creation context)', () => {
+    it('should give each creation its own instance through an alias to a SelfScope implementation (creation context)', () => {
       let counter = 0;
       const KEY = createInjectionKey<number>('SelfProvider');
+      const IMPL = createInjectionKey<number>('SelfImpl', { scope: SelfScope, factory: () => ++counter });
 
       const root = createRootContext({
-        providers: [factoryProvider(KEY, () => ++counter, { scope: SelfScope })],
+        providers: [aliasProvider(KEY, IMPL)],
       });
 
-      // SelfScope on provider: each creation gets its own instance. root.create(WRAPPER) is removed:
+      // Each creation gets its own instance. root.create(WRAPPER) is removed:
       // two sibling children each resolve WRAPPER, pinned at its requester (DESIGN.md §3.4).
       const WRAPPER = createInjectionKey<number>('Wrapper', {
         factory: () => inject(KEY),
@@ -1885,50 +1890,56 @@ describe('Disposal', () => {
       expect(c2).toBe(2);
     });
 
-    it('should support SelfScope on provider scope (scoped context)', () => {
+    it('should give each SelfScope context its own instance through an alias to a SelfScope implementation (scoped context)', () => {
       let counter = 0;
       const KEY = createInjectionKey<number>('SelfProvider');
+      const IMPL = createInjectionKey<number>('SelfImpl', { scope: SelfScope, factory: () => ++counter });
 
       const root = createRootContext({
-        providers: [factoryProvider(KEY, () => ++counter, { scope: SelfScope })],
+        providers: [aliasProvider(KEY, IMPL)],
       });
 
       const child1 = root.child({ scopes: [SelfScope] });
       const child2 = root.child({ scopes: [SelfScope] });
       expect(child1.get(KEY)).toBe(1);
       expect(child2.get(KEY)).toBe(2);
+      expect(child1.get(KEY)).toBe(1);
     });
 
-    it('should work with factoryProvider scope', () => {
-      const requestScope = createScope('request');
+    it('should cache a factoryProvider value on its node', () => {
       let counter = 0;
       const KEY = createInjectionKey<number>('Counter');
 
       const root = createRootContext({
-        scopes: [requestScope],
-        providers: [factoryProvider(KEY, () => ++counter, { scope: requestScope })],
+        providers: [factoryProvider(KEY, () => ++counter)],
       });
 
       expect(root.get(KEY)).toBe(1);
-      expect(root.get(KEY)).toBe(1); // cached
+      expect(root.child().get(KEY)).toBe(1); // cached
     });
 
-    it('should work with classProvider scope', () => {
+    it("should construct a classProvider value on its node, ignoring the implementation's static scope", () => {
       const appScope = createScope('app');
 
       class MyService {
         name = 'service';
       }
+      class MyServiceImpl extends MyService {
+        static readonly scope = appScope; // ignored: classProvider(Key, Impl) states the placement (D36)
+      }
 
       const root = createRootContext({
-        scopes: [appScope],
-        providers: [classProvider(MyService, MyService, { scope: appScope })],
+        providers: [classProvider(MyService, MyServiceImpl)],
       });
-      const child = root.child();
+      const child = root.child({ scopes: [appScope] }); // the owner of the implementation's scope, below the provider
 
       const fromChild = child.get(MyService);
+      expect(fromChild).toBeInstanceOf(MyServiceImpl);
       expect(fromChild.name).toBe('service');
       expect(root.get(MyService)).toBe(fromChild); // same instance, stored at root
+      expect(impl(root).cache.has(MyService)).toBe(true);
+      expect(impl(child).cache.has(MyService)).toBe(false);
+      expect(impl(child).cache.has(MyServiceImpl)).toBe(false);
     });
   });
 
@@ -2111,17 +2122,19 @@ describe('Disposal', () => {
       expect(released).toBe(true);
     });
 
-    it('should support scope option', () => {
-      const KEY = createInjectionKey<{ v: string }>('Scoped');
+    it('should store an owning provider value on its own node, whatever the key scope (D36)', () => {
       const myScope = createScope('test-scope');
+      const KEY = createInjectionKey<{ v: string }>('Scoped', { scope: myScope });
 
       const root = createRootContext();
       const child = root.child({
-        providers: [factoryProvider(KEY, () => own({ v: 'val' }, () => {}), { scope: myScope })],
-        scopes: [myScope],
+        providers: [factoryProvider(KEY, () => own({ v: 'val' }, () => {}))],
       });
+      const scoped = child.child({ scopes: [myScope] });
 
-      expect(child.get(KEY).v).toBe('val');
+      expect(scoped.get(KEY).v).toBe('val');
+      expect(impl(child).cache.get(KEY)?.valueNode?.parent).toBe(child); // the value's node is on the provider's node
+      expect(impl(scoped).cache.has(KEY)).toBe(false);
     });
   });
 

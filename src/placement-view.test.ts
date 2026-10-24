@@ -292,18 +292,20 @@ describe('decided markers (DESIGN.md §3.4)', () => {
     expect(sibling.get(K)).toBe('fresh');
   });
 
-  it('a scoped provider below its scope owner is a PlacementError, at addProvider and at child({ providers })', () => {
+  it('a provider below its key’s scope owner is allowed, at addProvider and at child({ providers }), and stores on its node (D36)', () => {
     const σ = createScope('app');
-    const K = createInjectionKey<string>('K', { scope: σ });
-    const K2 = createInjectionKey<string>('K2');
+    const K = createInjectionKey<string>('K', { scope: σ, factory: () => 'default' });
     const root = createRootContext({ scopes: [σ] });
     const child = root.child();
-    expect(() => child.addProvider(valueProvider(K, 'x'))).toThrow(PlacementError);
-    expect(() => child.addProvider(valueProvider(K, 'x'))).toThrow(/above this context/);
-    expect(() => root.child({ providers: [valueProvider(K, 'x')] })).toThrow(PlacementError);
-    expect(() => root.child({ providers: [valueProvider(K2, 'x', { scope: σ })] })).toThrow(PlacementError); // provider-level scope
-    expect(() => root.child({ scopes: [σ], providers: [valueProvider(K, 'x')] })).not.toThrow(); // at its own owner
-    expect(() => root.addProvider(valueProvider(K, 'x'))).not.toThrow();
+    child.addProvider(valueProvider(K, 'at child'));
+    const sibling = root.child({ providers: [valueProvider(K, 'at sibling')] });
+    expect(child.child().get(K)).toBe('at child');
+    expect(sibling.get(K)).toBe('at sibling');
+    expect(impl(child).cache.has(K)).toBe(true);
+    expect(impl(sibling).cache.has(K)).toBe(true);
+    expect(root.get(K)).toBe('default'); // the key's default, at the owner of its scope
+    // A decision still refuses: the child answered K.
+    expect(() => child.addProvider(valueProvider(K, 'late'))).toThrow(PlacementError);
   });
 
   it('decisions are cleared at completion', async () => {
@@ -376,24 +378,8 @@ describe('deps(V)', () => {
     expect(vc).not.toBe(vt);
   });
 
-  it('a provider-level scope is a scope shadow too, wherever the provider sits (D10′)', () => {
-    const σ = createScope('request');
-    let n = 0;
-    const Dk = createInjectionKey<{ n: number }>('D');
-    class V {
-      d = inject(Dk);
-    }
-    const root = createRootContext({ providers: [factoryProvider(Dk, () => ({ n: ++n }), { scope: σ })] });
-    const r1 = root.child({ name: 'r1', scopes: [σ] });
-    const v1 = r1.get(V);
-    expect(v1.d.n).toBe(1);
-    const r2 = r1.child({ name: 'r2', scopes: [σ] }); // a nested owner of the provider's scope
-    const v2 = r2.child().get(V);
-    expect(v2).not.toBe(v1);
-    expect(v2.d.n).toBe(2);
-    expect(v2.d).toBe(r2.get(Dk));
-    expect(r1.child().get(V)).toBe(v1);
-  });
+  // The provider-level scope shadow is gone with the provider `scope` option (D36): its alias form, a root alias to a
+  // σ-declared implementation, is in alias-provider.test.ts.
 });
 
 describe('scoped cache hits are served only to requesters of the same scope owner', () => {
@@ -427,16 +413,18 @@ describe('scoped cache hits are served only to requesters of the same scope owne
     expect(root.get(KEY)).toBe(1);
   });
 
-  it('the inner owner uses the provider found above the outer owner', () => {
+  it('a provider above nested owners of the key’s scope serves both from its own node (D36)', () => {
     const σ = createScope('request');
-    const Kk = createInjectionKey<{ n: number }>('K');
+    const Kk = createInjectionKey<{ n: number }>('K', { scope: σ });
     let n = 0;
-    const root = createRootContext({ providers: [factoryProvider(Kk, () => ({ n: ++n }), { scope: σ })] });
+    const root = createRootContext({ providers: [factoryProvider(Kk, () => ({ n: ++n }))] });
     const outer = root.child({ scopes: [σ] });
     const inner = outer.child({ scopes: [σ] });
     expect(outer.get(Kk).n).toBe(1);
-    expect(inner.get(Kk).n).toBe(2);
-    expect(impl(inner).cache.get(Kk)?.scope).toBe(σ);
+    expect(inner.get(Kk).n).toBe(1);
+    expect(impl(root).cache.get(Kk)?.scope).toBeUndefined();
+    expect(impl(outer).cache.has(Kk)).toBe(false);
+    expect(impl(inner).cache.has(Kk)).toBe(false);
   });
 });
 

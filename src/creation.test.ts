@@ -6,8 +6,8 @@
 // creation-frame leak into a forked body, a constructor-forked fiber's parent),
 // SelfScope attachment, placement into a releasing or complete storage
 // context, cycles and skipSelf, re-entry from releases (DESIGN.md §3.3), the
-// end of a creation (DESIGN.md §3.5) and the scoped-provider rule at placement
-// (DESIGN.md §3.4).
+// end of a creation (DESIGN.md §3.5) and a provider on a node built under a
+// pending node, stored there once it is placed (D36).
 //
 // `child`, `fork`, `lookup`, `own` and `pool` are the free functions of
 // ambient.ts. The other operations use the method form on `here()`
@@ -30,9 +30,8 @@ import {
   NoCurrentNodeError,
   NodeCompletedError,
   PendingNodeError,
-  PlacementError,
 } from './resource.js';
-import { RootScope, SelfScope, createScope } from './scope.js';
+import { RootScope, SelfScope } from './scope.js';
 import { child, fork, lookup, own, pool } from './ambient.js';
 import { deferred, events, gcUntil, here, impl, tick, trace } from './test/util.js';
 
@@ -1199,76 +1198,32 @@ describe('a creation ends when its factory returns (DESIGN.md §3.5)', () => {
   });
 });
 
-describe('a scoped provider built under a pending node is checked when the node is placed (DESIGN.md §3.4)', () => {
-  const shapes: Record<string, (p: Provider<unknown>) => void> = {
-    'child({ providers })': (p) => void child({ providers: [p] }),
-    'child().addProvider': (p) => child().addProvider(p),
-    'a grandchild': (p) => void child().child({ providers: [p] }),
-    'fork(task(…, { providers }))': (p) => void fork(task(async () => {}, { providers: [p], onFailure: () => {} })),
-    'pool({ providers })': (p) => void pool({ name: 'p', providers: [p], onFailure: () => {} }),
-  };
-
-  it('below the scope owner it is a PlacementError, nothing is cached, and the owner keeps its own answer (DESIGN.md §3.4, I19)', async () => {
+describe('a provider on a node built under a pending node (D36)', () => {
+  it('stores its value on that node once the pending node is placed, whatever the key’s scope', async () => {
+    const shapes: Record<string, (p: Provider<unknown>) => Context> = {
+      'child({ providers })': (p) => child({ providers: [p] }),
+      'child().addProvider': (p) => {
+        const c = child();
+        c.addProvider(p);
+        return c;
+      },
+      'a grandchild': (p) => child().child({ providers: [p] }),
+      'pool({ providers })': (p) => pool({ name: 'p', providers: [p], onFailure: () => {} }),
+    };
     for (const [shape, build] of Object.entries(shapes)) {
-      const K = createInjectionKey<string>('K');
+      const K = createInjectionKey<string>('K', { scope: RootScope, factory: () => 'default' }); // owned by the root, above the node
+      let built: Context | undefined;
       class V {
         constructor() {
-          build(valueProvider(K, 'leaked', { scope: RootScope }) as Provider<unknown>);
+          built = build(valueProvider(K, 'built') as Provider<unknown>);
         }
       }
-      const root = createRootContext({ providers: [valueProvider(K, 'root', { scope: RootScope })] });
-      expect(() => root.get(V), shape).toThrow(PlacementError);
-      expect(() => root.get(V), shape).toThrow(/Cannot provide scoped key 'K' .* resolves to .* above this context/);
-      expect(impl(root).cache.has(V), shape).toBe(false);
-      expect(impl(root).provided.size, shape).toBe(0); // the refused node was aborted at its requester (DESIGN.md §3.3)
-      expect(root.get(K), shape).toBe('root');
+      const root = createRootContext();
+      expect(root.get(V), shape).toBeInstanceOf(V); // placed at the root, the scope's owner above the built node
+      expect(built!.get(K), shape).toBe('built');
+      expect(impl(built!).cache.get(K)?.scope, shape).toBeUndefined(); // a provider's value: no scope on its entry
+      expect(root.get(K), shape).toBe('default'); // the key's own default, at its scope owner
       await root.close();
     }
-  });
-
-  it('the same for a key-level scope, and as on a live node: allowed at its own owner, and where no owner exists', async () => {
-    const σ = createScope('app');
-    const K = createInjectionKey<string>('K', { scope: σ });
-    class Bad {
-      constructor() {
-        child({ providers: [factoryProvider(K, () => 'x')] });
-      }
-    }
-    const root = createRootContext({ scopes: [σ] });
-    expect(() => root.get(Bad)).toThrow(PlacementError);
-    expect(() => root.get(K)).toThrow('No provider found for key: K'); // the root's answer is not the child's value
-    // A control: on a live node the same provider is refused at construction.
-    expect(() => root.child().child({ providers: [factoryProvider(K, () => 'x')] })).toThrow(PlacementError);
-    // Allowed: at its own owner under the pending node, and for a scope nothing owns.
-    const τ = createScope('nowhere');
-    const L = createInjectionKey<string>('L', { scope: τ });
-    let c: Context | undefined;
-    class Good {
-      constructor() {
-        c = child({ scopes: [σ], providers: [factoryProvider(K, () => 'own owner')] });
-        child({ providers: [factoryProvider(L, () => 'unowned')] });
-      }
-    }
-    expect(root.get(Good)).toBeInstanceOf(Good);
-    expect(c!.get(K)).toBe('own owner');
-    expect(impl(c!).cache.get(K)?.scope).toBe(σ);
-    await root.close();
-  });
-
-  it('a failed creation drops such a provider before its releases run, so they resolve the owner’s answer', async () => {
-    const K = createInjectionKey<string>('K');
-    let seen: unknown;
-    class V {
-      constructor() {
-        const c = child({ providers: [valueProvider(K, 'leaked', { scope: RootScope })] });
-        c.own(() => void (seen = lookup(K)));
-        throw new Error('boom');
-      }
-    }
-    const root = createRootContext({ providers: [valueProvider(K, 'root', { scope: RootScope })] });
-    expect(() => root.get(V)).toThrow('boom');
-    expect(seen).toBe('root');
-    expect(root.get(K)).toBe('root');
-    await root.close();
   });
 });

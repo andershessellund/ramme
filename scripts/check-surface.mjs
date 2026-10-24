@@ -7,10 +7,10 @@
 // type) and from its module: every core name (the node and the free functions,
 // task options, tasks, fibers, results and outcomes, pools, the error classes)
 // is there, `Fiber` only as a type, `runSync` only as the ambient function, and
-// no name removed by the redesign or internal to ramme. Then requires
-// dist/result.d.ts, the `ramme/result` subpath, to export exactly the
-// `resultExpected` functions and nothing else, and dist/result.js to import
-// nothing: the subpath is a leaf that imports only types (DESIGN.md §7). Also
+// no name removed by the redesign or since (`ProviderOptions`, D36) or internal
+// to ramme. Then requires dist/result.d.ts, the `ramme/result` subpath, to export
+// exactly the `resultExpected` functions and nothing else, and dist/result.js to
+// import nothing: the subpath is a leaf that imports only types (DESIGN.md §7). Also
 // requires that stripInternal left no `@internal` declaration in any
 // dist/*.d.ts. The type-level half is src/test/surface.check.ts.
 // ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ const expected = new Map([
     'Body',
     'Release',
     'Provider',
+    'Public',
     'LookupOptions',
     'Success',
     'Failure',
@@ -95,7 +96,6 @@ const expected = new Map([
   ['InjectionKey', ['type', './context-key.js']],
   ['CreateInjectionKeyOptions', ['type', './context-key.js']],
   ...['classProvider', 'factoryProvider', 'valueProvider', 'aliasProvider'].map((n) => [n, ['value', './provider-util.js']]),
-  ['ProviderOptions', ['type', './provider-util.js']],
   ...['createScope', 'SelfScope', 'RootScope', 'RequestScope'].map((n) => [n, ['value', './scope.js']]),
   ['Scope', ['type', './scope.js']],
   ['createTopic', ['value', './topic.js']],
@@ -128,7 +128,7 @@ const resultExpected = [
   'unwrap', 'unwrapOr', 'fromThrowing', 'collect', 'gen', '$',
 ];
 
-/** Names removed by the redesign, and names internal to ramme. */
+/** Names removed by the redesign or since, and names internal to ramme. */
 const absent = [
   'createContext', 'withAbortSignal', 'linkAbortSignal', 'createFiberSet', 'RegisterResource', 'ContextRefKey',
   'create', 'registerResource', 'addProvider', 'createRefCountedKey', 'refCountedProvider', 'Drain', 'Flush',
@@ -136,6 +136,7 @@ const absent = [
   'FiberType', 'FiberOptions', 'ForkOptions', 'FiberResult', 'FiberSet', 'FiberSetOptions', 'FiberSetSpawnOptions',
   'RefCountedKeyOptions', 'ContextRef', 'ManagedResource', 'ResourceHandle', 'RegisterResourceFunction',
   'ContextEvent', 'FiberEvent', 'Created', 'ContextStatus', 'RunSyncOptions', 'CreateContextOptions',
+  'ProviderOptions', // removed with the provider `scope` option (D36)
   'requireCurrent', 'captureAutoScoped', 'NodeImpl', 'NO_NODE', 'runInFrame', 'currentFrame',
 ];
 
