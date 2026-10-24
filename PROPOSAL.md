@@ -66,7 +66,7 @@ lost: using ramme from existing async code.
 | 15 | Expected failures | **decided** | (b′): `yield* fail(e)`, `E` inferred, a four-way `Outcome`, `gen` retired; `all` and `race` fail on it as on a defect (D28) | 3.6 |
 | 16 | Async code under a node | **decided** | there is none; an Op that knows its node is thenable (rejected: the bridge, B1 as recommended and B0) | 4 |
 | 17 | Where an Op checks its guards | **decided** | at construction, which reads the slot (rejected: pure construction, the former recommendation) | 4.1 |
-| 18 | Async context | **decided** | none, on any platform: `ramme/node`, `ramme/async-context` and the storage registry go; D41 supersedes D9′; the floor is any ES2018 runtime (rejected: optional storage, the former recommendation) | 2.1 |
+| 18 | Async context | **decided** | none, on any platform: `ramme/node`, `ramme/async-context` and the storage registry go; D41 supersedes D9′; the floor is ES2022 syntax plus four runtime APIs, Node 22+ or an evergreen browser (rejected: optional storage, the former recommendation; an ES2018 floor with shims) | 2.1 |
 | 19–26 | Platform: placement, `fetch`, `listen`, `once`/`on`, `each`, observers, lint scope | recommended | `ramme/platform` | 5.3 |
 | 27 | Type names | recommended; `wait` decided | `Operation<T>`, `Op<T>`, exported `Instruction` | 6 |
 | 28 | An Op returned by a body, a release or a handler | **decided** | driven in the returning frame | 1.4 |
@@ -402,25 +402,26 @@ in a `promised` body (§4.2); in creation and failure-handler frames
 optional storage, the former recommendation, kept for async code under a
 node (§4.5); a `ramme/browser` import that only satisfies a check.
 
-**The floor is any ES2018 runtime** (decided); the browser and every
-server runtime are targets on equal terms. Today's build does not meet it,
-so PR 2 pays for it. tsconfig's `target` goes from ES2022 to ES2018, which
-downlevels the `#private` fields to WeakMaps (with
-`useDefineForClassFields: true` made explicit, since its default follows
-the target), and `lib` from ES2024 to ES2018 plus the disposable and DOM
-declarations, so a later API is a compile error. A local `withResolvers()`
-replaces `Promise.withResolvers` (ES2024) at the sites that survive PR 2
-(nine today: managed.ts 646, 668; node-impl.ts 286, 621, 994, 1033, 1271,
-1367, 1656); `settle`'s one `flatMap` (ES2019, node-impl.ts 1721) and the
-`globalThis` reads (ES2020: node-impl.ts 106, resource.ts 166; managed.ts
-170) are rewritten; `Symbol.asyncDispose` and `Symbol.dispose` are read
-through a `Symbol.for` fallback where the runtime lacks them; and
-`AggregateError` (ES2021) is shimmed, as `SuppressedError` already is
-(resource.ts 148–166). `AbortSignal.any`/`timeout` are WHATWG, not
-ECMAScript; they are shimmed where missing too, so A3 keeps only
-`AbortController` and `queueMicrotask` beyond ES2018. About 35–50 lines in
-all (§3.1). `engines` loses its `node >= 22` pin, and A3 is rewritten in
-PR 5.
+**The floor is ES2022 syntax plus four runtime APIs** (decided): the
+browser and every server runtime are targets on equal terms, but ramme
+carries no shims for runtimes its audience does not run. The compile target
+stays ES2022 (`#private` fields and the rest of the syntax already in use).
+The runtime requirement is stated as a list, not an ECMAScript version:
+`Promise.withResolvers` (ES2024; Node 22, every evergreen browser since
+early 2024; core-js polyfills it), `AbortSignal.any` and
+`AbortSignal.timeout` (WHATWG, not ECMAScript, so core-js does not cover
+them; Node 20.3+, evergreen browsers since 2023; standalone polyfills
+exist), and `Symbol.dispose`/`Symbol.asyncDispose`, which ramme keys
+releases off and therefore defines itself at import where absent
+(`Symbol.asyncDispose ??= Symbol.for('Symbol.asyncDispose')`, one line
+each), because TypeScript's downlevelled `using` helper throws rather than
+falls back. README states it as "Node 22+ or an evergreen browser" with the
+four names, so anyone older knows exactly what to polyfill. `engines` keeps
+`node >= 22`; A3 is rewritten in PR 5 to drop the async-context clause,
+which was the part that excluded browsers. *Rejected:* an ES2018 floor with
+35–50 lines of shims (`withResolvers`, `AggregateError`, `AbortSignal.*`,
+downlevelled fields), the first revision's choice: it buys nothing the
+target audience needs and puts platform shims in the core.
 
 The yielded op **runs in the awaiter's frame**: today's node methods take
 their target, lender and event node from `currentFrame()`, not the
@@ -761,7 +762,7 @@ from d0bc2f8 and count gross source lines in src/, tests excluded.
 | `wait`, `promised` | `managed` | three `wait` forms; `promised`, `ctx.promised` | +55 |
 | Expected failures | — | `fail`, `defect`, the four-way `Outcome`, `E` routing, the generator `$` | +50 |
 | Body checks | `AsyncRunError` | the async-body `TypeError`; `run`'s twin of `AsyncRunError` | +15 |
-| The ES2018 floor (§2.1) | ES2022 output, ES2024 APIs | a local `withResolvers`, the `AggregateError`, `AbortSignal.any` and `AbortSignal.timeout` shims, the disposal-symbol fallback | +35 to +50 |
+| The floor (§2.1) | ES2022 output, ES2024 APIs | the two disposal-symbol guards at import | +2 |
 
 Kept: the halt predicates (`completionOf`, `strictlyBelow`,
 `subscribedBelow`, `joinMark`, 307–344), `heldByUnwindingBody`,
@@ -780,9 +781,8 @@ rules after, against eight today (§3.4).
 ### 3.2 Totals, and the "simpler" claim
 
 **Source.** About 900–1,000 lines go (165 + 490–600 + 27 + 113 + 15 +
-85 = 895–1,005) and 445–540 come (410–490, plus 35–50 for the ES2018
-floor): src/ (5,885 lines, tests excluded) shrinks by about 355–560 lines,
-6–10%, the low end if managed.ts's lifecycle promise keeps today's
+85 = 895–1,005) and 410–490 come: src/ (5,885 lines, tests excluded)
+shrinks by about 405–595 lines, 7–10%, the low end if managed.ts's lifecycle promise keeps today's
 resume-step helpers and `thenAsHandler` (about 200 lines). managed.ts
 falls from 689 lines to about 90–200. The driver and managed.ts's residual are estimates;
 the other deletions are read from the files. The first draft's bridge (B1)
@@ -921,8 +921,9 @@ release work, never interrupted (D21)". I8's "the unwinding body may still
 await release work" becomes "its own `finally` may wait". I10 adds "a work
 Op nobody consumes never runs". I14 becomes "every release is a fiber,
 current while it runs synchronously or steps". I26 and A1 go; A3 becomes
-*the platform is any ES2018 runtime with `AbortController` and
-`queueMicrotask`* (the rest shimmed, §2.1); A2 drops the
+*the platform is Node 22+ or an evergreen browser: ES2022 syntax,
+`Promise.withResolvers`, `AbortSignal.any`/`timeout`, the disposal
+symbols* (§2.1); A2 drops the
 stored managed promise; A7 drops "invisible to ramme" and "can await only
 release work"; A8 reads "pass `signal()` on or yield often enough".
 
@@ -1443,7 +1444,7 @@ paragraphs, §4.9 and §6; PR 3 §4.12–§4.13; PR 4 the platform section;
 2. **PR 2: removal.** Async bodies refused (decision 5); `ramme/node`,
    `ramme/async-context` and the storage adapters deleted (decision 18),
    with their `exports` and `sideEffects` entries, and the synchronous
-   slot in the storage's place; the ES2018 floor (§2.1); the bridge
+   slot in the storage's place; the floor's two symbol guards (§2.1); the bridge
    machinery deleted (managed.ts's targets, stickiness, call-shaped
    deferral, exempt shape, rejection jobs, classification and handler
    timer), with `InterruptedError`, lending and `UnawaitedCallError`;
@@ -1564,7 +1565,7 @@ applied before the author's decisions. Their status now:
 The second review (22 findings, R1–R22, 6 blocking, of this revision and
 the PR 1 specification) was checked against d0bc2f8 and applied:
 
-- R1 (B, the floor): applied. "Any ES2018 runtime" is stated as decided,
+- R1 (B, the floor): applied in the first revision as an ES2018 floor with shims; overturned by the author on 2026-10-25 (ES2022 syntax plus four APIs, no shims; §2.1). The first revision's text:
   its costs in PR 2 and §3.1 (+35 to +50); beyond the finding's list,
   `settle`'s `flatMap` (ES2019), the `globalThis` reads (ES2020) and an
   explicit `useDefineForClassFields`; `AbortSignal.any`/`timeout` shimmed
@@ -1599,7 +1600,8 @@ the PR 1 specification) was checked against d0bc2f8 and applied:
 - R14 (B, the `UnawaitedCallError` counts): applied; re-counted 60
   mentions, 33 assertion lines, 21 outside lending.test.ts.
 - R15 (A, managed.ts's residual): applied; totals recomputed with R1's
-  shims: 895–1,005 lines go, 445–540 come, 355–560 net (6–10%).
+  shims: 895–1,005 lines go, 445–540 come, 355–560 net (6–10%); recomputed
+  without the shims after the floor was overturned: 410–490 come, 405–595 net (7–10%).
 - R16 (A, the DESIGN table): applied; the finding's "shield and unshield
   (868–984)" corrected to the passage that also holds `sleep`.
 - R17 (A, PR 1 against its specification): applied; `run`'s twin of
