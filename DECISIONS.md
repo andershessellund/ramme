@@ -572,12 +572,13 @@ Settled while implementing it:
 
 ### D11. `call` lends the current node, never the receiver
 
-`call` (and `all`, `race`, which are calls) records `lentTo` on the node
-that was current when it ran, and that node's body-shaped operations throw
-`UnawaitedCallError` until the call settles (the child completes, its
-releases included); `own`, `release`, `releaseAll`, `abort`, `close` and
-the `Symbol` methods do not. With no current node, or from a failure handler (which
-runs with its parent current but is not its body), nothing is lent.
+`call` (and `attempt`, `all`, `race` and `settle`, which are calls) records
+`lentTo` on the node that was current when it ran, and that node's
+body-shaped operations throw `UnawaitedCallError` until the call settles
+(the child completes, its releases included); `own`, `release`,
+`releaseAll`, `abort`, `close` and the `Symbol` methods do not. With no
+current node, or from a failure handler (which runs with its parent current
+but is not its body), nothing is lent.
 
 **Why.** The awaiting body is the one that is supposed to be suspended on
 the call's promise, so it is the one whose further use means the `await`
@@ -775,7 +776,8 @@ unhandled rejection while the timer ran. **Cost.** Consumption is final once
 the resume step runs: a combinator that takes one member's failure and keeps
 waiting on a sibling that is then cut loses it, which is why
 `Promise.allSettled` is unsupported in `freeze` bodies; multi-member waits
-belong in ramme's `all`/`race`, which join their members themselves.
+belong in ramme's `all`/`race`/`settle`, which join their members themselves
+(D31).
 
 ### D14. A `'join'` fork onto a bodiless node is refused
 
@@ -864,6 +866,69 @@ rejection, first settlement); honouring each member's own destination.
 to their end before it rejects, and fail-fast is a body that forks with
 `'link'`. The names match the `Promise` combinators while the rules
 differ. DESIGN.md §4.8.
+
+### D31. Outcomes as values: `attempt` and `settle`
+
+`attempt(t, …args)` (also `ctx.attempt`, `t.attempt`) is `call` with
+`result`'s resume step: the same child, started synchronously, the current
+node lent until it completes, and a managed await that freezes an
+interrupted `freeze` or `restore` caller; it resolves with the child's
+`Outcome` and consumes a failure instead of throwing it. `settle(tasks,
+opts)` (also `ctx.settle`) is `all` that resolves with every member's
+outcome instead of rejecting: its members run as `'join'` fibers of a group
+the caller `call`s, each runs to its end and none is aborted on a sibling's
+account, as in `all` (D28), and it resolves with the tuple of outcomes in
+order once every member has completed. A member's failure is held by the
+group's parent, not by the group, until `settle`'s resume step consumes it.
+`settle` rejects only with a failure of the group's own, and then with the
+members' failures attached and consumed, in the shape `all` rejects with.
+`call` and `all` stay as they are.
+
+**Why.** A body that branches on how other work ended had one tool:
+`try/catch` around `call`, where a `catch` sees a real failure or a
+`FiberAbortedError` (DESIGN.md §2.6). "Try with a deadline, fall back" was
+`try { await call(t.with({ timeoutMs })) } catch (e) { if (e instanceof
+FiberAbortedError) … else throw e }`: a catch that must rethrow what it did
+not mean to handle, around an `instanceof` test. With the outcome as a
+value, `aborted` is a branch, and for a `freeze` or `restore` caller a
+precise one: its own interruption freezes it (D13) instead of arriving as an
+outcome, so `aborted` describes the child (its `timeoutMs`, its `signal`, an
+explicit abort). An `observe` caller is never frozen, so a `restore` child,
+which hears every delivery on its subscription path (D20), hands it its own
+interruption as `aborted`; such a body sees its interruption by design
+(DESIGN.md §4.3) and checks `signal()` before it falls back. The outcome is
+the one `result` already reports, decided by state (D24), so nothing new is
+classified. `attempt` keeps what `call` has and `result(fork(t))` lacks: the
+body starts synchronously (D22) and the current node is lent (D11), so an
+unawaited `attempt` is caught as an unawaited `call` is. `settle` is the form for several tasks, and the
+structured replacement for `Promise.allSettled`, which is unsupported in
+`freeze` bodies because it consumes a member's failure that a frozen body
+never sees (D13): the group freezes as a whole, and nothing is consumed
+before the caller resumes. The members' failures wait on the group's parent
+because the group completes before its caller resumes: held on the group,
+they would be folded into the group's outcome at its completion, so the
+group would report its members' failures as its own; consumed by the
+group's body, they would be lost whenever the caller froze while the group
+ran on (I11). On the parent they are what a joinable failure is, delivered
+by one resume step or surfaced once from the parent's completion. When the
+group fails on its own account, the resumed caller is still handed them,
+with the group's error: left held on the receiver, they would surface from
+the caller's completion after its `catch` had already handled the
+rejection, which `all` never does.
+**Rejected:** `result(fork(t))` as the idiom, which loses the synchronous
+start and the lending; making `call` itself resolve with an outcome, which
+hides every failure by default, so the forgotten check is silent where a
+forgotten `catch` today is loud; `settle` as an option on `all`, which
+waits the same way and differs only in the result shape (values and a
+rejection, or outcomes), two result types under one name; holding the
+members' failures on the group, or consuming them in its body (above).
+**Cost.** An outcome nobody inspects drops its error silently: `await
+attempt(t)` with no look at `status` is the failure mode outcomes-as-values
+invite, which is why `call` stays the default and `attempt` is opt-in. A
+lint rule requiring that the result of `attempt` or `settle` be used is a
+follow-up, not yet written. Two more names in tier 1; `attempt` emits
+`join:enter`/`join:leave`, which `call` does not. DESIGN.md §4.5, §4.8,
+§4.12.
 
 ### D15. Pool intake stops at the signal
 

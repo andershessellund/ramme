@@ -24,7 +24,7 @@
 //   ManagedPromise whose freeze decision is made for the awaiting body's node
 //   (DESIGN.md §4.2) and whose `deliver` step is the only place a failure is
 //   consumed (D13);
-// - tasks, lending, all/race (DESIGN.md §4.5, §4.9, §4.8), creation hooks
+// - tasks, lending, attempt, all/race/settle (DESIGN.md §4.5, §4.9, §4.8), creation hooks
 //   (DESIGN.md §4.6, §3.3, §3.4), pools' node side (DESIGN.md §4.10),
 //   get/own/run/runSync (DESIGN.md §4.11, §2.6), events (DESIGN.md §5).
 // ---------------------------------------------------------------------------
@@ -46,6 +46,7 @@ import type {
   PoolOptions,
   Provider,
   Release,
+  SettleResult,
   Task,
 } from './context.js';
 import { NO_NODE, currentCreation, currentFrame, hasStorage, runDetached, runInFrame } from './context-storage.js';
@@ -92,6 +93,9 @@ let nextId = 0;
 /** NodeEvent.seq (observability only). */
 let seq = 0;
 
+/** The operations that make a call (`callTask`), named in the lending error (DESIGN.md §4.9). */
+type CallOp = 'call' | 'attempt' | 'all' | 'race' | 'settle';
+
 /** One shared empty set; `scopeSet` is never mutated after construction. */
 const EMPTY_SCOPES: ReadonlySet<Scope> = new Set<Scope>();
 
@@ -135,7 +139,7 @@ function reportReceiverError(err: unknown): void {
 /**
  * What a failure handler may do on its own parent while the parent's body is lent (DESIGN.md §4.7, §4.9): resolve,
  * fork and make children. None of them awaits, enters the parent or lends it, so none of them is a forgotten
- * await (I26). `call`, `all`, `race`, `run` and the managed awaits through the parent stay refused, so
+ * await (I26). `call`, `attempt`, `all`, `race`, `settle`, `run` and the managed awaits through the parent stay refused, so
  * `lentTo` is never touched. Through any other node a handler is checked as the receiver only.
  */
 const HANDLER_MAY_WHILE_LENT: ReadonlySet<string> = new Set(['get', 'fork', 'child', 'pool', 'runSync']);
@@ -236,12 +240,24 @@ function take<T>(f: NodeImpl): T {
   throw new FiberAbortedError(o.reason, `fiber ${describeNode(f)} was aborted`);
 }
 
+/**
+ * The resume step of `result(f)` and `attempt` (D13): `join:leave` on the awaiter, then `f`'s outcome as a value;
+ * a failure it delivers is consumed. A frozen awaiter never runs it, so it consumes nothing.
+ */
+function outcomeStep<T>(f: NodeImpl, awaiter: NodeImpl): () => Outcome<T> {
+  return () => {
+    awaiter.emit({ type: 'join:leave', joinedId: f.id, outcome: f.outcome!.status }); // a frozen awaiter never gets here
+    f.consumeFailure();
+    return f.outcome as Outcome<T>;
+  };
+}
+
 function asFiber(f: unknown, op: string): NodeImpl {
   if (!isNodeImpl(f) || f.kind !== 'fiber') throw new TypeError(`${op}(): expected a fiber`);
   return f;
 }
 
-/** `all`/`race` members run as `'join'` fibers of the group (DESIGN.md §4.8). */
+/** `all`/`race`/`settle` members run as `'join'` fibers of the group (DESIGN.md §4.8). */
 function asJoinMember(t: unknown): TaskLike {
   const tl = toTask(t as TaskLike);
   return { [TASK]: true, name: tl.name, body: tl.body, opts: { ...tl.opts, onFailure: 'join' } };
@@ -506,8 +522,15 @@ export class NodeImpl implements Context {
   aggregatedExtra: unknown = undefined;
   /** Failures held for this node (I11, D16); a record leaves the set when delivered. */
   readonly unconsumed = new Set<FailureRecord>();
-  /** This node's own final failure, created at completion; the same object sits in parent.unconsumed. */
+  /** This node's own final failure, created at completion; the same object sits in its holder's `unconsumed` (`failureHolder`). */
   failure: FailureRecord | undefined = undefined;
+  /**
+   * A `settle` group only (DESIGN.md §4.8, D31): the node that holds its member fibers' failures instead of the
+   * group, its parent. They wait there for the caller's resume step, which consumes them as values; a frozen
+   * caller consumes nothing, and they surface from that node's completion (D13, I11). The group's outcome
+   * stays its own.
+   */
+  memberFailuresTo: NodeImpl | undefined = undefined;
   readonly completionResolvers: PromiseWithResolvers<void> = Promise.withResolvers<void>();
 
   // --- creation bookkeeping (value nodes) ---
@@ -807,9 +830,9 @@ export class NodeImpl implements Context {
     console.warn(
       `ramme: the body of ${describeNode(this)} ${r.kind === 'returned' ? 'returned' : 'threw'} after it was counted frozen; ` +
         'its node was already released, so the result is ignored. The body awaited in an unsupported shape: ' +
-        'Promise.race or Promise.any, a Promise.all that rejects, Promise.allSettled, a result() member of a combinator, ' +
+        'Promise.race or Promise.any, a Promise.all that rejects, Promise.allSettled, a result(), attempt() or settle() member of a combinator, ' +
         'a bare member of a combinator, a .then/.catch/.finally attached to a managed promise without awaiting it at once, ' +
-        "or a managed promise awaited by a body other than the one that created it. Use ramme's all()/race(), " +
+        "or a managed promise awaited by a body other than the one that created it. Use ramme's all()/race()/settle(), " +
         'or await each managed promise directly.',
     );
   }
@@ -1078,7 +1101,8 @@ export class NodeImpl implements Context {
     // restart it; queued waiters are admitted first (their start is a microtask, and nothing completes here).
     if (this.pooled) poolChildComplete(p!, this);
     // Route this node's FINAL failure (DESIGN.md §4.7, §4.12, §2.8 "routed or collected"). Nothing below
-    // can complete the parent before the routing is recorded on it, so no failure is lost (I11). The record is in p.unconsumed and this
+    // can complete the parent before the routing is recorded on it, so no failure is lost (I11). The record is in p.unconsumed (a
+    // settle member's: the group's parent's, which waits for the group, so it is open too; D31) and this
     // node is off p's stack before the 'link'/C5 escalation, which runs last; a handler runs while this
     // node's entry holds p's release loop, so its exception lands on an open parent.
     const own = this.entryOnOwner;
@@ -1107,7 +1131,7 @@ export class NodeImpl implements Context {
         }
         release?.();
       } else {
-        p.unconsumed.add(record); // surfaces from the parent's completion unless delivered first (D16)
+        this.failureHolder()!.unconsumed.add(record); // surfaces from the holder's completion unless delivered first (D16)
         if (d === 'link' || (this.kind === 'fiber' && !this.subscribed)) escalate = o;
       }
     }
@@ -1171,12 +1195,18 @@ export class NodeImpl implements Context {
     this.wakeReleaseLoop?.();
   }
 
-  /** failure.consumed = true and out of the parent's set; idempotent; a no-op without a failure (DESIGN.md §4.12). */
+  /** failure.consumed = true and out of its holder's set; idempotent; a no-op without a failure (DESIGN.md §4.12). */
   consumeFailure(): void {
     const r = this.failure;
     if (r === undefined) return;
     r.consumed = true;
-    this.parent?.unconsumed.delete(r);
+    this.failureHolder()?.unconsumed.delete(r);
+  }
+
+  /** Where this node's failure record is held: its parent, or, for a member of a `settle` group, the group's parent (D31). */
+  private failureHolder(): NodeImpl | undefined {
+    const p = this.parent;
+    return (this.kind === 'fiber' ? p?.memberFailuresTo : undefined) ?? p;
   }
 
   // =========================================================================
@@ -1217,11 +1247,7 @@ export class NodeImpl implements Context {
     awaiter.emit({ type: 'join:enter', joinedId: f.id });
     return managedFor<void, Outcome<T>>(
       f.completion,
-      () => {
-        awaiter.emit({ type: 'join:leave', joinedId: f.id, outcome: f.outcome!.status }); // a frozen awaiter never gets here
-        f.consumeFailure();
-        return f.outcome as Outcome<T>;
-      },
+      outcomeStep<T>(f, awaiter),
       completionOf(f), // a handler awaiting it holds nothing (DESIGN.md §4.7)
     );
   }
@@ -1302,7 +1328,7 @@ export class NodeImpl implements Context {
   }
 
   // =========================================================================
-  // fork / call, lending, all / race (DESIGN.md §4.8, §4.9)
+  // fork / call / attempt, lending, all / race / settle (DESIGN.md §4.5, §4.8, §4.9)
   // =========================================================================
 
   /** A subscribed fiber child of this node on its explicit stack (fork, call, pool.fork). Not started. */
@@ -1336,11 +1362,30 @@ export class NodeImpl implements Context {
 
   call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
     this.assertBodyShaped('call');
-    return this.callTask<T>('call', toTask(t as unknown as TaskLike), args);
+    return this.callTask<T>('call', toTask(t as unknown as TaskLike), args, (child) => () => take<T>(child));
   }
 
-  /** `call`, and the group fiber of `all` and `race`: `op` is the method the user called, for the lending error. */
-  private callTask<T>(op: 'call' | 'all' | 'race', task: TaskLike, args: unknown[]): Promise<T> {
+  /**
+   * `call` with `result`'s resume step instead of `join`'s (DESIGN.md §4.5, D31): the outcome as a value, a
+   * failure consumed rather than thrown, and the join events on the awaiting body's node. A frozen caller never
+   * resumes, so for a `freeze` or `restore` caller `aborted` describes the child; an `observe` caller is never
+   * frozen, and a `restore` child delivered by its interruption reports that as `aborted`.
+   */
+  attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+    this.assertBodyShaped('attempt');
+    return this.callTask<Outcome<T>>('attempt', toTask(t as unknown as TaskLike), args, (child) => {
+      const awaiter = this.awaiterNode(); // as result(): the awaiting body's node, else the receiver (DESIGN.md §5)
+      awaiter.emit({ type: 'join:enter', joinedId: child.id });
+      return outcomeStep<T>(child, awaiter);
+    });
+  }
+
+  /**
+   * `call` and `attempt`, and the group fiber of `all`, `race` and `settle`: `op` is the method the user called,
+   * for the lending error. `resume(child)` runs once the child exists and the current node is lent, before the
+   * body starts, and returns the resume step (D13): the only difference between the five.
+   */
+  private callTask<R>(op: CallOp, task: TaskLike, args: unknown[], resume: (child: NodeImpl) => () => R): Promise<R> {
     // DESIGN.md §4.9: `call` lends the CURRENT node (the awaiting body), not the receiver (D11). A current
     // node that is already lent has a call it did not await. A failure handler's frame is not its parent's
     // body, so a call made there lends nothing and checks nothing on the parent (DESIGN.md §4.7).
@@ -1355,9 +1400,10 @@ export class NodeImpl implements Context {
       lender.lentTo = child;
       lender.emit({ type: 'node:lent', childId: child.id });
     }
+    const step = resume(child);
     child.startBody(); // DESIGN.md §4.6: synchronous, with the child current
-    // The freeze decision is for current(), not for `this`; take runs only when the caller is resumed (D13).
-    return managedFor<void, T>(child.completion, () => take<T>(child));
+    // The freeze decision is for current(), not for `this`; the step runs only when the caller is resumed (D13).
+    return managedFor<void, R>(child.completion, step);
   }
 
   all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>> {
@@ -1389,7 +1435,7 @@ export class NodeImpl implements Context {
         return fibers.map((f) => (f.outcome as { value: unknown }).value);
       },
     };
-    return this.callTask<unknown[]>('all', group, []) as unknown as Promise<AllResult<T>>;
+    return this.callTask<unknown[]>('all', group, [], (g) => () => take<unknown[]>(g)) as unknown as Promise<AllResult<T>>;
   }
 
   race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T> {
@@ -1434,7 +1480,58 @@ export class NodeImpl implements Context {
         throw new FiberAbortedError((fibers[0].outcome as { reason: unknown }).reason, 'every task was aborted'); // every member aborted (DESIGN.md §4.8)
       },
     };
-    return this.callTask<T>('race', group, []);
+    return this.callTask<T>('race', group, [], (g) => () => take<T>(g));
+  }
+
+  settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<SettleResult<T>> {
+    this.assertBodyShaped('settle');
+    const members = tasks.map(asJoinMember);
+    const name = opts?.name ?? 'settle';
+    let fibers: NodeImpl[] | undefined; // undefined: the group was aborted before its body ran (DESIGN.md §4.6)
+    const group: TaskLike<[], void> = {
+      [TASK]: true,
+      name,
+      opts: { ...opts, name },
+      body: async () => {
+        const g = currentFrame()!.node!; // the group fiber
+        // Before any member exists: their failures wait on the group's parent for the caller's resume step,
+        // not on the group, so the group neither folds them into its own outcome nor consumes them (D13, D31).
+        g.memberFailuresTo = g.parent;
+        fibers = members.map((m) => g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
+        // One managed await over never-rejecting sources (DESIGN.md §4.8, D13): the group freezes as a whole. No
+        // member is aborted on a sibling's account: the group waits for every one.
+        await managedFor(Promise.all(fibers.map((f) => f.completion)));
+      },
+    };
+    return this.callTask<Outcome<unknown>[]>('settle', group, [], (g) => () => {
+      // The resume step (D13): every member has completed, since the group waited for its stack.
+      const ms = fibers;
+      if (g.outcome!.status === 'failure') {
+        // The group's own failure, never a member's. The caller is resumed, so it is handed every failure once,
+        // as `all` does: the members' are consumed with the group's, not left on the receiver to surface past the
+        // caller's catch (DESIGN.md §4.8, D31).
+        const errors: unknown[] = [];
+        for (const f of ms ?? [])
+          if (f.outcome!.status === 'failure') {
+            f.consumeFailure();
+            errors.push(f.outcome!.error);
+          }
+        if (errors.length === 0) return take<never>(g);
+        g.consumeFailure();
+        throw new SuppressedErrorCtor(
+          g.outcome!.error,
+          new AggregateError(errors, `${errors.length} of ${ms!.length} tasks failed`),
+          'settle() failed after its tasks failed',
+        ); // the group's error over the members', in the shape `all` rejects with (DESIGN.md §4.12)
+      }
+      if (ms === undefined) {
+        // Aborted before its body ran: no member was forked, and each reports the group's abort.
+        const reason = (g.outcome as { reason: unknown }).reason;
+        return members.map(() => ({ status: 'aborted', reason }) as const);
+      }
+      for (const f of ms) f.consumeFailure(); // delivered as values: the caller's now (DESIGN.md §4.12)
+      return ms.map((f) => f.outcome!);
+    }) as unknown as Promise<SettleResult<T>>;
   }
 
   pool(opts: PoolOptions): Pool {
@@ -1723,9 +1820,11 @@ export class NodeImpl implements Context {
     throw new UnawaitedCallError(
       child,
       `${op}() on ${describeNode(this)} while it is lent to ${describeNode(child)}: the call was not awaited ` +
-        (op === 'all' || op === 'race'
-          ? `(await it before this ${op}(), or put both in one all())` // all() and race() name themselves in the lending error
-          : '(two concurrent calls on one node? use all())'),
+        (op === 'all' || op === 'race' || op === 'settle'
+          ? `(await it before this ${op}(), or put both in one ${op === 'settle' ? 'settle' : 'all'}())` // the group combinators name themselves in the lending error
+          : op === 'attempt'
+            ? '(two concurrent attempts on one node? use settle())'
+            : '(two concurrent calls on one node? use all())'),
     );
   }
 
@@ -1737,7 +1836,7 @@ export class NodeImpl implements Context {
     this.assertNotLent(op);
   }
 
-  /** get, call, all, race, run, runSync: the four guards, and nothing that runs inside a creation (DESIGN.md §3.3). */
+  /** get, call, attempt, all, race, settle, run, runSync: the four guards, and nothing that runs inside a creation (DESIGN.md §3.3). */
   private assertBodyShaped(op: string): void {
     this.assertBodyGuards(op);
     this.assertNotUnderCreation(op);

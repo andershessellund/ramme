@@ -32,6 +32,7 @@ const expected = new Map([
     'Fiber',
     'Task',
     'AllResult',
+    'SettleResult',
     'PoolOptions',
     'Pool',
     'Context',
@@ -48,8 +49,10 @@ const expected = new Map([
     'releaseAll',
     'fork',
     'call',
+    'attempt',
     'all',
     'race',
+    'settle',
     'pool',
     'child',
     'join',
@@ -98,12 +101,12 @@ const expected = new Map([
 const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
-  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'all', 'race', 'pool', 'child',
+  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'pool', 'child',
   'join', 'result', 'interrupted', 'never', 'managed',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, outcomes
-  'Fiber', 'Task', 'task', 'AllResult', 'Outcome', 'ContextKey',
+  'Fiber', 'Task', 'task', 'AllResult', 'SettleResult', 'Outcome', 'ContextKey',
   // pools
   'PoolOptions', 'Pool',
   // errors

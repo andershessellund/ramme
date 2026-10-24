@@ -11,10 +11,10 @@
 //
 // - `own`, `release`, `releaseAll`, `fork`, `pool`, `child`, `current` and
 //   `signal` materialise the value's (pending or live) node and act on it.
-// - The body-shaped ones, `lookup`, `call`, `all`, `race`, `join`, `result`,
-//   `interrupted`, `never`, `managed` and `runSync`, throw
-//   `CreationViolationError` first, before touching any node (DESIGN.md §3.2,
-//   §3.5, I16): a refused call never creates the value's node.
+// - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
+//   `settle`, `join`, `result`, `interrupted`, `never`, `managed` and
+//   `runSync`, throw `CreationViolationError` first, before touching any node
+//   (DESIGN.md §3.2, §3.5, I16): a refused call never creates the value's node.
 //
 // Outside any node every one of them throws `NoCurrentNodeError`; when no
 // context storage is registered the message names `import 'ramme/node'`.
@@ -32,6 +32,7 @@ import type {
   Pool,
   PoolOptions,
   Release,
+  SettleResult,
   Task,
 } from './context.js';
 import { NO_STORAGE_MESSAGE, currentCreation, currentFrame, hasStorage } from './context-storage.js';
@@ -131,6 +132,16 @@ export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
 }
 
 /**
+ * `call`, resolving with the child's outcome: its failure is delivered as a value and consumed, never
+ * thrown. A `freeze` or `restore` caller that is itself interrupted freezes here as on `call`, so `aborted` is
+ * the child's own abort (its `timeoutMs`, its `signal`, an explicit abort); an `observe` caller never freezes,
+ * and a `restore` child can hand it its own interruption as `aborted` (DESIGN.md §4.5).
+ */
+export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+  return requireBodyShaped('attempt').attempt(t, ...args);
+}
+
+/**
  * Run the tasks as subscribers of a fresh child and await every one: the
  * tuple of their values, or an `AggregateError` of every real failure (DESIGN.md §4.8).
  * `const T` keeps an array literal a tuple.
@@ -142,6 +153,16 @@ export function all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts
 /** The first success among the tasks; the rest are aborted and awaited (DESIGN.md §4.8). */
 export function race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T> {
   return requireBodyShaped('race').race(tasks, opts);
+}
+
+/**
+ * `all` that resolves with every outcome instead of rejecting: run the tasks as subscribers of a fresh child,
+ * wait for every one (as `all` does; neither aborts a sibling), and resolve with the tuple of their outcomes in
+ * order. Failures and aborts are values; it never rejects on a member's account (DESIGN.md §4.8). `const T`
+ * keeps an array literal a tuple.
+ */
+export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<SettleResult<T>> {
+  return requireBodyShaped('settle').settle(tasks, opts);
 }
 
 /** An unsubscribed pool on the current node; its forks report to `onFailure` (DESIGN.md §4.10). */

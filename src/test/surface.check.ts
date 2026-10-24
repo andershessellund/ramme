@@ -15,8 +15,8 @@
 // dist/index.d.ts with its expected list name by name.
 // ---------------------------------------------------------------------------
 
-import { all, current } from 'ramme';
-import type { Context, Task } from 'ramme';
+import { all, attempt, current, settle } from 'ramme';
+import type { Context, Outcome, SettleResult, Task } from 'ramme';
 import * as ramme from 'ramme';
 
 type Equal<X, Y> = (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2 ? true : false;
@@ -30,6 +30,31 @@ export function d58(ctx: Context, a: Task<[number], number>, b: Task<[string], s
   type _Free = Expect<Equal<typeof _viaFree, Promise<[number, string]>>>;
   type _Method = Expect<Equal<typeof _viaMethod, Promise<[number, string]>>>;
   type _Current = Expect<Equal<typeof _viaCurrent, Promise<[string, number]>>>;
+}
+
+/** `attempt` resolves with the outcome, free, as a method and on a task (DESIGN.md §4.5). */
+export function attemptTypes(ctx: Context, a: Task<[number], number>): void {
+  const _viaFree = attempt(a, 1);
+  const _viaMethod = ctx.attempt(a, 1);
+  const _viaTask = a.attempt(1);
+  const _inline = attempt(async (s: string) => s.length, 'x');
+  type _Free = Expect<Equal<typeof _viaFree, Promise<Outcome<number>>>>;
+  type _Method = Expect<Equal<typeof _viaMethod, Promise<Outcome<number>>>>;
+  type _Task = Expect<Equal<typeof _viaTask, Promise<Outcome<number>>>>;
+  type _Inline = Expect<Equal<typeof _inline, Promise<Outcome<number>>>>;
+  // @ts-expect-error -- the arguments are the task's
+  void attempt(a, 'not a number');
+}
+
+/** `settle` infers the tuple of outcomes, free and as a method; `SettleResult` names it (DESIGN.md §4.8). */
+export function settleTypes(ctx: Context, a: Task<[number], number>, b: Task<[string], string>): void {
+  const _viaFree = settle([a.bind(1), b.bind('x')]);
+  const _viaMethod = ctx.settle([b.bind('x'), a.bind(1)], { timeoutMs: 100 });
+  const _empty = settle([]);
+  type _Free = Expect<Equal<typeof _viaFree, Promise<[Outcome<number>, Outcome<string>]>>>;
+  type _Method = Expect<Equal<typeof _viaMethod, Promise<[Outcome<string>, Outcome<number>]>>>;
+  type _Empty = Expect<Equal<typeof _empty, Promise<[]>>>;
+  type _Named = Expect<Equal<SettleResult<[Task<[], number>]>, [Outcome<number>]>>;
 }
 
 /** I27: a task is an object, never a callable bare promise. */

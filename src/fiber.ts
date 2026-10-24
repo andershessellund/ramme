@@ -4,13 +4,14 @@
 // A task is a body plus options. It is an object, not a function, so it can
 // never be invoked as a bare promise (I27): each `fork`/`call` runs the body
 // in a new fiber, a child of the current node. `t.fork(...args)` is
-// `fork(t, ...args)` and `t.call(...args)` is `call(t, ...args)`: the same
-// free functions of ambient.ts, so `t.call()` in a creation frame throws
-// `CreationViolationError` before touching any node, as `call` does (DESIGN.md §3.5).
+// `fork(t, ...args)`, `t.call(...args)` is `call(t, ...args)` and
+// `t.attempt(...args)` is `attempt(t, ...args)`: the same free functions of
+// ambient.ts, so `t.call()` in a creation frame throws `CreationViolationError`
+// before touching any node, as `call` does (DESIGN.md §3.5).
 // ---------------------------------------------------------------------------
 
-import { call, fork } from './ambient.js';
-import type { Body, Fiber, Task, TaskOptions } from './context.js';
+import { attempt, call, fork } from './ambient.js';
+import type { Body, Fiber, Outcome, Task, TaskOptions } from './context.js';
 import { TASK } from './internal-context.js';
 import type { TaskLike } from './internal-context.js';
 
@@ -33,12 +34,17 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
     return call<T, A>(this, ...args);
   }
 
+  /** `call`, resolving with the outcome instead of throwing the failure (DESIGN.md §4.5). */
+  attempt(...args: A): Promise<Outcome<T>> {
+    return attempt<T, A>(this, ...args);
+  }
+
   /** Per-use overrides: the options merged over the definition's, and the name if given. */
   with(o: TaskOptions): Task<A, T> {
     return new TaskImpl(this.body, { ...this.opts, ...o }, o.name ?? this.name);
   }
 
-  /** Partial application: a task of no arguments, which is what `all`, `race` and pools take. */
+  /** Partial application: a task of no arguments, which is what `all`, `race`, `settle` and pools take. */
   bind(...args: A): Task<[], T> {
     const body = this.body;
     return new TaskImpl<[], T>(() => body(...args), this.opts, this.name);

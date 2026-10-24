@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.10).
+// Public types of the node tree (DESIGN.md §2.1, §4.5, §4.7, §4.8, §4.10).
 //
 // Types only: the one implementation of every interface here is `NodeImpl`
 // (node-impl.ts); tasks are `TaskImpl` (fiber.ts).
@@ -106,15 +106,22 @@ export interface Task<A extends unknown[], T> {
   fork(...args: A): Fiber<T>;
   /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
   call(...args: A): Promise<T>;
+  /** `call`, resolving with the outcome: a failure is delivered as a value, never thrown (DESIGN.md §4.5). */
+  attempt(...args: A): Promise<Outcome<T>>;
   /** Per-use option overrides. */
   with(opts: TaskOptions): Task<A, T>;
-  /** Partial application; what `all`, `race` and pools take. */
+  /** Partial application; what `all`, `race`, `settle` and pools take. */
   bind(...args: A): Task<[], T>;
 }
 
 /** The tuple of the tasks' values, in order; `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>`. */
 export type AllResult<T extends readonly Task<[], unknown>[]> = {
   -readonly [K in keyof T]: T[K] extends Task<[], infer U> ? Awaited<U> : never;
+};
+
+/** The tuple of the tasks' outcomes, in order; `settle([a.bind(1), b.bind('x')])` is `Promise<[Outcome<A>, Outcome<B>]>` (DESIGN.md §4.8). */
+export type SettleResult<T extends readonly Task<[], unknown>[]> = {
+  -readonly [K in keyof T]: T[K] extends Task<[], infer U> ? Outcome<Awaited<U>> : never;
 };
 
 export interface PoolOptions extends NodeOptions {
@@ -166,9 +173,17 @@ export interface Context {
   // --- running bodies in a child of THIS node (DESIGN.md §4.5) ---
   fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Fiber<T>;
   call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
+  /**
+   * `call` with the outcome delivered as a value: the child's failure is consumed, never thrown. An interrupted
+   * `freeze` or `restore` caller freezes here as on `call`, so `aborted` describes the child's own abort; an
+   * `observe` caller does not, and a `restore` child can report its interruption as `aborted` (DESIGN.md §4.5).
+   */
+  attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
   /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>` (DESIGN.md §4.8). */
   all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>>;
   race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T>;
+  /** `all` resolving with every outcome instead of rejecting: waits for every task, as `all` does, and resolves with their outcomes in order; never rejects on a member's account (DESIGN.md §4.8). */
+  settle<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<SettleResult<T>>;
   pool(opts: PoolOptions): Pool;
   child(opts?: NodeOptions): Context;
 

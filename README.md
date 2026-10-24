@@ -170,6 +170,30 @@ shutdown. Import the adapter before anything else.
 | `FiberNotAwaitableError` | `await fiber`: use `join(fiber)` or `result(fiber)`. |
 | `FiberAbortedError` | `join` / `call` / `all` / `race` of work that was interrupted, by code that is not itself interrupted (top level, a platform callback, or a body whose own node was not aborted). |
 
+To branch on how work ended instead of catching, `attempt` is `call` that
+resolves with the outcome, and `settle` is `all` that resolves with every
+task's outcome instead of rejecting (both wait for every task, and neither
+cancels the others when one fails):
+
+```ts
+const r = await attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
+if (r.status === 'failure') throw r.error;                             // a real failure stays a failure
+const prices = r.status === 'success' ? r.value : cachedPrices(sku);   // 'aborted': the 500 ms ran out
+
+const [user, orders] = await settle([fetchUser.bind(id), fetchOrders.bind(id)]);
+if (orders.status === 'failure') log(orders.error);                    // all would have rejected; user is still here
+```
+
+`aborted` means the task's own abort (its `timeoutMs` or `signal`, or an
+explicit abort), the abort of the context it runs in (`ctx.attempt(…)`), or,
+for a `settle` member, `settle`'s own `timeoutMs` or `signal`: a body that
+is itself interrupted stops at `attempt` or `settle` as at `call`. The
+exception is a shutdown-aware body (`interrupt: 'observe'`, DESIGN.md §4.3),
+which is never stopped there and can be handed its own interruption as
+`aborted`; it checks `signal().aborted` before falling back. A failure
+delivered as a value is yours to look at; ignore `status` and the error is
+gone, which is why `call` stays the default.
+
 ## Documentation
 
 - [DESIGN.md](DESIGN.md): the model, the guarantees, and how each mechanism

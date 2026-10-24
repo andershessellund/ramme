@@ -72,7 +72,7 @@ package.json names exactly those files). One of them is required (§6, D9′).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task`, `fork`, `call`, `join`, `result`, `all`, `race`, `lookup`, `own`, `release`, `signal()` | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()` | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | `inject` in constructors; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
@@ -137,6 +137,7 @@ Nodes differ in three independent bits, plus a `kind` tag (`context`,
 | `createRootContext(opts)` | context | root | no | the only free constructor; carries `RootScope`; `[Symbol.dispose]` throws |
 | `child(opts)` | context | explicit / yes | no | |
 | `call(t, …)` / `t.call(…)` | fiber, joined | explicit / yes | yes | starts synchronously; lends the current node (§4.9) |
+| `attempt(t, …)` / `t.attempt(…)` | fiber, joined | explicit / yes | yes | as `call`; resolves with the outcome (§4.5) |
 | `fork(t, …)` / `t.fork(…)` | fiber | explicit / yes | yes | starts in a microtask, or after placement in creation |
 | `own(fork(t, …))` | fiber | explicit / **no** | yes | an owned fiber (§2.6 C5) |
 | `pool(opts)` | pool | explicit / no | no | its forks are its subscribers (§4.10) |
@@ -307,7 +308,8 @@ body's own interruption into it (a `freeze` or `restore` body stops at its
 next managed await instead), so a `catch` sees errors only: a foreign
 operation's `AbortError` when it was handed `signal()`, and
 `FiberAbortedError` when the body awaits other work that was aborted
-(§4.12).
+(§4.12). To branch on how other work ended rather than catch it, `attempt`
+and `settle` deliver the outcome as a value (§4.5, §4.8).
 
 ### 2.7 Lifecycle operations and use after release
 
@@ -496,14 +498,14 @@ never on a node that already caches the key (D7).
 ### 3.5 Creation is pure
 
 During creation: `inject` reads are tracked and `lookup` throws; the
-value's own node is current (§3.3); `call`, `all`, `race`, `run`,
-`runSync`, `join`, `result`, `interrupted`, `never`, `managed` and entering
-any other node as current throw `CreationViolationError` (`release`,
-`releaseAll`, `close()` and `[Symbol.asyncDispose]()` do not); `fork` on a
-live node passed in from outside is allowed (it starts in a microtask); a
-creation
-ends when its factory returns, so a continuation the factory scheduled runs
-with no creation frame. A late read on a value's node that *creates* a value
+value's own node is current (§3.3); `call`, `attempt`, `all`, `race`,
+`settle`, `run`, `runSync`, `join`, `result`, `interrupted`, `never`,
+`managed` and entering any other node as current throw
+`CreationViolationError` (`release`, `releaseAll`, `close()` and
+`[Symbol.asyncDispose]()` do not); `fork` on a live node passed in from
+outside is allowed (it starts in a microtask); a creation ends when its
+factory returns, so a continuation the factory scheduled runs with no
+creation frame. A late read on a value's node that *creates* a value
 (after construction) warns once per key per root in development mode
 (§4.4, D4′).
 
@@ -542,18 +544,19 @@ suspended function is garbage-collectable (A2). A frozen body counts as
 settled. Between delivery and the next managed await the body is running
 plain code, and everything it does is legitimate (I8).
 
-A managed await is an await on a promise returned by `call`, `all`,
-`race`, `release`, `releaseAll`, `join`, `result`, `interrupted`, `never`,
-`managed(p)`, `close()` or `[Symbol.asyncDispose]()`. Everything else is
-bare: `fetch`, timers, driver promises; `managed(p)` makes one freeze.
-`never()` returns a promise that never settles: a `freeze` or `restore`
-body awaiting it is parked until its node is delivered, which freezes it;
-anywhere else it waits forever. `interrupted()` resolves with the current
-node's abort reason when that node is delivered (at once if it already
-was), and `ctx.interrupted()` with `ctx`'s; a `freeze` or `restore` body
-awaiting its own node's delivery is frozen by that delivery instead, so the
-resolving form is for `observe` bodies (§4.3), release fibers, top-level
-code and a body waiting on another node.
+A managed await is an await on a promise returned by `call`, `attempt`,
+`all`, `race`, `settle`, `release`, `releaseAll`, `join`, `result`,
+`interrupted`, `never`, `managed(p)`, `close()` or
+`[Symbol.asyncDispose]()`. Everything else is bare: `fetch`, timers, driver
+promises; `managed(p)` makes one freeze. `never()` returns a promise that
+never settles: a `freeze` or `restore` body awaiting it is parked until its
+node is delivered, which freezes it; anywhere else it waits forever.
+`interrupted()` resolves with the current node's abort reason when that node
+is delivered (at once if it already was), and `ctx.interrupted()` with
+`ctx`'s; a `freeze` or `restore` body awaiting its own node's delivery is
+frozen by that delivery instead, so the resolving form is for `observe`
+bodies (§4.3), release fibers, top-level code and a body waiting on another
+node.
 
 The freeze decision is made for **the awaiting body's node**, `current()`
 when the promise is made, whichever node the method was called on. With no
@@ -568,19 +571,19 @@ not-yet-awaited managed promise does not freeze the body at delivery, and
 freezes it the moment it is awaited. The node is fixed when the promise is
 made, so **a managed promise is awaited only by the body that made it**. The
 supported shapes are a direct `await` (or `return p` from an async
-function); ramme's own `all`/`race`, where the body awaits one promise over
-a group fiber that handles its members; and a `Promise.all` that fulfils,
-when every member is a managed promise whose resume step (below) consumes
-nothing unless it throws (`join`, `call`, `close()`, `release(x)`). Other
-shapes can resume a body while one of its managed promises is still pending
-(a later delivery then counts a running body frozen and releases its node
-under it), lose a failure a member consumed, or cut another body's await
-without freezing it. Unsupported in a `freeze` body: `Promise.race`,
-`Promise.any`, `Promise.allSettled`, a `Promise.all` that rejects, a
-`result(f)` member of any combinator, any combinator with a bare member, a
-`.then`/`.catch`/`.finally` attached to a managed promise without awaiting
-it at once, and a managed promise awaited by another body. Development mode
-reports them when they misfire (§4.4).
+function); ramme's own `all`/`race`/`settle`, where the body awaits one
+promise over a group fiber that handles its members; and a `Promise.all`
+that fulfils, when every member is a managed promise whose resume step
+(below) consumes nothing unless it throws (`join`, `call`, `close()`,
+`release(x)`). Other shapes can resume a body while one of its managed
+promises is still pending (a later delivery then counts a running body
+frozen and releases its node under it), lose a failure a member consumed, or
+cut another body's await without freezing it. Unsupported in a `freeze`
+body: `Promise.race`, `Promise.any`, `Promise.allSettled`, a `Promise.all`
+that rejects, a `result(f)`, `attempt` or `settle` member of any combinator,
+any combinator with a bare member, a `.then`/`.catch`/`.finally` attached to
+a managed promise without awaiting it at once, and a managed promise awaited
+by another body. Development mode reports them when they misfire (§4.4).
 
 A managed promise wraps a **source**, an internal promise that never
 rejects (a node's completion, the end of an entry's release, a node's
@@ -630,7 +633,7 @@ when a managed promise is awaited by a body other than the one that made
 it; and a warning when a failure handler awaits a managed promise whose
 creating body was frozen on it, which never settles (§4.7).
 
-### 4.5 Tasks and the two kinds of function (D8′)
+### 4.5 Tasks and the two kinds of function (D8′, D31)
 
 ```ts
 async function parse(req: Request): Promise<Order> { … }           // a function: shares the caller's node
@@ -638,22 +641,24 @@ const handle = task(async (req: Request, res: Response) => { … });  // a task:
 
 await parse(req);                   // plain call, same node
 await handle.call(req, res);        // new child node, joined, lends the current node
+await handle.attempt(req, res);     // the same, resolving with the outcome instead of throwing
 handle.fork(req, res);              // new child node, concurrent
 await call(async () => { … });      // inline task: block scope for temporaries
 fork(async () => { … });            // inline task: ad-hoc concurrency
 ```
 
 `task(body, opts)` returns a `Task`: `name`, `fork(...args)`,
-`call(...args)`, `with(opts)` (the same task with per-use option overrides)
-and `bind(...args)` (fixes the whole argument list, giving the `Task<[], T>`
-that `all` and `race` take; arguments later passed to its `fork` or `call`
-are ignored). A `Task` is an object, not a function: invoking it is a
-`TypeError` at compile time and at runtime. Options (`TaskOptions` =
-`NodeOptions` + `onFailure`) live at the definition. Anything that should be
-a node (handlers, jobs, workers, sessions; anything whose temporaries must
-be released on return, or that must be separately interruptible or visible)
-is a task; everything else is a function. A function that acquires
-temporaries either releases them before returning or is a task.
+`call(...args)`, `attempt(...args)`, `with(opts)` (the same task with
+per-use option overrides) and `bind(...args)` (fixes the whole argument
+list, giving the `Task<[], T>` that `all`, `race` and `settle` take;
+arguments later passed to its `fork`, `call` or `attempt` are ignored). A
+`Task` is an object, not a function: invoking it is a `TypeError` at compile
+time and at runtime. Options (`TaskOptions` = `NodeOptions` + `onFailure`)
+live at the definition. Anything that should be a node (handlers, jobs,
+workers, sessions; anything whose temporaries must be released on return, or
+that must be separately interruptible or visible) is a task; everything else
+is a function. A function that acquires temporaries either releases them
+before returning or is a task.
 
 A `Fiber<T>` is a node with a body yielding an outcome. It is not thenable:
 `await fiber`, `Promise.resolve(fiber)` and `Promise.all([fiber])` reject
@@ -661,9 +666,43 @@ with `FiberNotAwaitableError`; use `join(f)` (the value, or the failure
 thrown) or `result(f)` (the outcome; never rejects). A body that returns a
 fiber fails with `FiberNotAwaitableError`.
 
+**`attempt`** is `call` with `result`'s resume step, as `call` is `fork`
+plus `join`. `attempt(t, …args)`, `ctx.attempt(t, …args)` and
+`t.attempt(…args)` make the child `call` makes, start it synchronously and
+lend the current node until it completes (§4.6, §4.9), and resolve with its
+`Outcome<T>` instead of its value: a `failure` is delivered as a value and
+consumed on resume, never thrown, and surfaces nowhere else. As for `call`,
+the child runs as a `'join'` fiber whatever its task's `onFailure`. The await
+is managed: a `freeze` or `restore` caller that is itself interrupted
+freezes on it as on `call` and never sees an outcome. So `aborted` reports
+the child's own delivery: its `timeoutMs` or `signal`, an explicit abort of
+it, or the abort of a receiver that is not the awaiting body. The exception
+is a `restore` child, which hears every delivery on its subscription path
+(§4.3): an `observe` caller is never frozen, so its own interruption reaches
+such a child and comes back as `aborted` with the caller's reason, and so
+does an `observe` ancestor's, which a `freeze` caller below it does not
+hear. An `observe` body that falls back on `aborted` checks
+`signal().aborted` first. `attempt` emits `join:enter` and `join:leave` on
+the awaiting body's node, as `result` does (§5). It is the shape of a
+deadline with a fallback, where a real failure is rethrown, as the `catch`
+it replaces would:
+
+```ts
+const r = await attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
+if (r.status === 'failure') throw r.error;                             // a real failure stays a failure
+const prices = r.status === 'success' ? r.value : cachedPrices(sku);   // 'aborted': the 500 ms ran out
+```
+
+`result(fork(t))` reads the same outcome but starts the body a microtask
+later and lends nothing, so a forgotten await goes unnoticed. An outcome
+nobody inspects is a failure dropped silently, which is why `call` stays the
+default (D31).
+
 ### 4.6 Start semantics (D22)
 
-- `call` starts the body synchronously, with the child current.
+- `call` and `attempt` start the body synchronously, with the child
+  current; so do `all`, `race` and `settle` for their group fiber, whose
+  members are forks.
 - `fork` **never** runs any part of the body in the forker's frame: it
   starts in a microtask, or after placement when forked during creation.
   The body sees its own node as current from its first line, never a
@@ -697,58 +736,84 @@ delivery neither cuts them nor counts the parent frozen. Its `call`s lend
 nothing (§4.9). While the parent's body is lent, the handler may still use
 `get`, `fork`, `child`, `pool` and `runSync` through the parent, and `own`,
 `release`, `releaseAll`, `abort`, `close` and the `Symbol` methods, which no
-lent node refuses; `call`, `all`, `race`, `run`, `join`, `result`,
-`interrupted`, `never` and `managed` through it throw `UnawaitedCallError`.
-Through any other node only that node's own body guards apply (§4.9). A
-promise the handler returns holds the parent open until it settles, and a
-rejection, like a synchronous throw, is collected with the parent's release
-failures (§4.12). While that hold lasts and the parent's stacks are
-otherwise empty, the parent's release loop takes only node entries: a fork,
-`call`, `child` or pool the handler attaches is released as soon as it is
-attached, and passive entries and values attached meanwhile wait until the
-hold settles. A node entry can therefore be released before a passive entry
-attached above it, the one exception to C4's order. A handler that awaits
-the completion of its parent or of an ancestor holds nothing from then on,
-so `onFailure: () => app.close()` shuts the app down instead of waiting for
-itself.
+lent node refuses; `call`, `attempt`, `all`, `race`, `settle`, `run`,
+`join`, `result`, `interrupted`, `never` and `managed` through it throw
+`UnawaitedCallError`. Through any other node only that node's own body
+guards apply (§4.9). A promise the handler returns holds the parent open
+until it settles, and a rejection, like a synchronous throw, is collected
+with the parent's release failures (§4.12). While that hold lasts and the
+parent's stacks are otherwise empty, the parent's release loop takes only
+node entries: a fork, `call`, `child` or pool the handler attaches is
+released as soon as it is attached, and passive entries and values attached
+meanwhile wait until the hold settles. A node entry can therefore be
+released before a passive entry attached above it, the one exception to C4's
+order. A handler that awaits the completion of its parent or of an ancestor
+holds nothing from then on, so `onFailure: () => app.close()` shuts the app
+down instead of waiting for itself.
 
-### 4.8 `all` and `race` (D28)
+### 4.8 `all`, `race` and `settle` (D28, D31)
 
-Both run the tasks as subscribers of a fresh child fiber (a `call`, so they
-lend the current node): `all([fetchUser.bind(id), fetchOrders.bind(id)])`
-resolves with the tuple of values in order, and rejects with an
-`AggregateError` of **every** real failure; `aborted` members are excluded
-from it, and an aborted member with no failure rejects with
-`FiberAbortedError`. `race` resolves with the first `success`, aborts and
-awaits the rest; with no success it rejects with an `AggregateError` of the
-failures (or `FiberAbortedError` if every member was aborted); `race([])` is
-a `TypeError`. Members always run as `'join'` fibers of the group, whatever
-their own destination.
+All three run the tasks as subscribers of a fresh child fiber, the *group*
+(a `call`, so they lend the current node; `opts` apply to the group):
+`all([fetchUser.bind(id), fetchOrders.bind(id)])` resolves with the tuple of
+values in order, and rejects with an `AggregateError` of **every** real
+failure; `aborted` members are excluded from it, and an aborted member with
+no failure rejects with `FiberAbortedError`. `race` resolves with the first
+`success`, aborts and awaits the rest; with no success it rejects with an
+`AggregateError` of the failures (or `FiberAbortedError` if every member was
+aborted); `race([])` is a `TypeError`. Members always run as `'join'` fibers
+of the group, whatever their own destination.
+
+`settle` is `all` that resolves with every member's outcome instead of
+rejecting. `settle([fetchUser.bind(id), fetchOrders.bind(id)])` waits for
+every member as `all` does, aborting none on a sibling's account (D28), and
+resolves with the tuple of their outcomes in order (`SettleResult`:
+`[Outcome<User>, Outcome<Order[]>]`); `settle([])` resolves `[]`. Failures
+and aborts are values, so a member never rejects the `settle`: each
+member's failure is held, unconsumed, by the group's parent (the receiver)
+rather than by the group, whose outcome stays its own, until `settle`'s
+resume step consumes it and delivers it as that member's outcome. A caller
+that is interrupted freezes on `settle` as on `all` and consumes nothing, so
+the failures surface from the receiver's completion (§4.12). When the group
+itself is delivered (its own `timeoutMs` or `signal`), it forwards to the
+members still running as any node does (§4.1): a `freeze` or `restore`
+member's outcome is then `aborted`, and an `observe` member's is what its
+body settles with (§4.3). When the group was aborted before its body ran,
+no member runs and every outcome is `aborted` with the group's reason.
+Either way the tuple resolves: the caller is alive. A member's `aborted` is
+thus its own delivery or the group's, or, as for `attempt` (§4.5), an
+`observe` caller's or ancestor's interruption reaching a `restore` member or
+group. `settle` rejects only with a failure of the group's own, such as a
+value provided through `opts.providers` whose release threw, and then hands
+the resumed caller every failure once, in the shape `all` rejects with: the
+group's error alone, or a `SuppressedError` of it over an `AggregateError`
+of the members' failures, which are consumed with it.
 
 ### 4.9 Lending: unawaited calls are detected (D11)
 
 `call` **lends** the current node to the child until the call settles (the
-child completes, its releases included). The body-shaped operations on a
-node check its **body guards**: the node is not complete
-(`NodeCompletedError`), not pending (`PendingNodeError`), no creation is
-current (`CreationViolationError`), and the node is not lent
-(`UnawaitedCallError`); `fork`, `child` and `pool`, which a pending node
-and a creation allow, check completion and lending only. While lent,
-`lookup`/`get`, `call`, `fork`, `child`, `pool`, `all`, `race`, `join`,
-`result`, `interrupted`, `never`, `managed`, `run` and `runSync` throw
+child completes, its releases included); so do `attempt`, and `all`, `race`
+and `settle`, which are calls. The body-shaped operations on a node check
+its **body guards**: the node is not complete (`NodeCompletedError`), not
+pending (`PendingNodeError`), no creation is current
+(`CreationViolationError`), and the node is not lent (`UnawaitedCallError`);
+`fork`, `child` and `pool`, which a pending node and a creation allow, check
+completion and lending only. While lent, `lookup`/`get`, `call`, `attempt`,
+`fork`, `child`, `pool`, `all`, `race`, `settle`, `join`, `result`,
+`interrupted`, `never`, `managed`, `run` and `runSync` throw
 `UnawaitedCallError` naming the child (`.child`); a managed await also
-checks the lending of the awaiting body's node, whichever node receives
-it. `own`, `release`, `releaseAll`, `abort`, `close` and the `Symbol`
-methods do not check lending.
+checks the lending of the awaiting body's node, whichever node receives it.
+`own`, `release`, `releaseAll`, `abort`, `close` and the `Symbol` methods do
+not check lending.
 
 `call` lends `current()`, never the receiver: `otherCtx.call(fn)` from body
 `Y` lends `Y`, and a top-level `await app.call(main)` lends nothing, so a
 platform callback can `app.fork(...)` while it runs. A `call` from a failure
 handler lends nothing either: the handler is not its parent's body (§4.7).
 `Promise.all([call(a), call(b)])` throws on the second call, unless `a`
-completed synchronously inside the first (use `all`). A forgotten `await` on
-a plain function call is invisible to ramme and left to
-`no-floating-promises`.
+completed synchronously inside the first (use `all`, or `settle` for the
+outcomes). A forgotten `await` on a plain function call is invisible to
+ramme and left to `no-floating-promises`.
 
 ### 4.10 Pools (D15)
 
@@ -810,12 +875,17 @@ does.
 
 At completion a node collects its own failure, every unconsumed subscriber
 failure (fibers, child contexts, pools and value nodes alike; a release
-fiber's failure is collected only as its entry's release failure), every
+fiber's failure is collected only as its entry's release failure; a
+`settle` member's is held by the group's parent instead, §4.8), every
 owned-fiber failure and every early-release failure that no resumed awaiter
 received. A fiber's final outcome then goes to *its* destination; a
 context's or pool's `close()` and `asyncDispose()` reject with it. A failure
-is consumed at most once: by the resume step (§4.2) of a `join`, `result`,
-`asyncDispose` or `close`, or by the parent surfacing it. Nothing ramme
+is consumed at most once: by the resume step (§4.2) of a `join` (or `call`),
+`result`, `attempt`, `settle`, `asyncDispose` or `close`, or by the parent
+surfacing it. `result`, `attempt` and `settle` deliver a failure as a value
+(`{ status: 'failure', error }`) instead of throwing it, and an `aborted`
+outcome as a value instead of `FiberAbortedError`; the consumption is the
+same, so an outcome nobody inspects is a failure dropped (D31). Nothing ramme
 produces is an unhandled rejection.
 
 | Error | Thrown when |
@@ -827,7 +897,7 @@ produces is an unhandled rejection.
 | `AlreadyOwnedError` | a second release for one object on one node; `own(node)` of an already-owned node |
 | `UnawaitedCallError` | body-shaped use of a lent node (§4.9); `.child` is the call fiber |
 | `FiberNotAwaitableError` | awaiting a fiber; a body returning a fiber |
-| `FiberAbortedError` | `join`/`call`/`all`/`race`/`[Symbol.asyncDispose]()` of an aborted fiber by an awaiter that is not frozen (`asyncDispose` aborts first, §2.7); `.reason` |
+| `FiberAbortedError` | `join`/`call`/`all`/`race`/`[Symbol.asyncDispose]()` of an aborted fiber by an awaiter that is not frozen (`asyncDispose` aborts first, §2.7); `.reason`. `result`, `attempt` and `settle` report `aborted` as an outcome instead |
 | `PoolClosedError`, `PoolFullError` | pool intake after the signal or `close()`; at capacity with `whenFull: 'reject'` |
 | `CreationViolationError` | `lookup` or a body-shaped operation during creation; `inject` outside creation; `get(ContextKey)` |
 | `FactoryReturnedUndefinedError` | a factory or provider returned `undefined` (a `CreationViolationError`) |
@@ -864,7 +934,7 @@ owner), `kind` (`context` | `fiber` | `pool` | `release` | `value`, or
 | `entry:registered` / `entry:released` | `entryName`, `stack`; `error` on a failed release |
 | `node:complete` | `outcome`; always a node's last event |
 | `node:stalled` | `sinceMs` (§4.4) |
-| `join:enter` / `join:leave` | `joinedId`, `outcome`: a `join` or `result` waits on a fiber; emitted on the awaiting body's node, not on the receiver of `n.join(f)` (on the receiver when no body awaits); a frozen awaiter emits no `join:leave` |
+| `join:enter` / `join:leave` | `joinedId`, `outcome`: a `join`, `result` or `attempt` waits on a fiber; emitted on the awaiting body's node, not on the receiver of `n.join(f)` (on the receiver when no body awaits); a frozen awaiter emits no `join:leave` |
 
 Release fibers are nodes and emit these events too, so the stream covers
 shutdown. A receiver is a sink: it runs synchronously in the emitting frame
@@ -919,7 +989,7 @@ forker's node nor a finished creation.
 | `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, pin), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed) |
 | `stack.ts` | `Entry`, `Stack`: the two stacks, fixed positions, LIFO release order |
 | `managed.ts` | `ManagedPromise`: the freeze decision and the resume step |
-| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, lending, placement hooks, lifecycle, `fork`/`call`/`all`/`race`, awaits, events |
+| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, lending, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, awaits, events |
 | `pool.ts` | the pool's concurrency queue and intake rules |
 | `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, decided markers, placement by view, the value node's creation and placement |
 | `fiber.ts` | `task()` |

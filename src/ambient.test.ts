@@ -11,6 +11,7 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import './node.js';
 import {
   all,
+  attempt,
   call,
   child,
   current,
@@ -27,6 +28,7 @@ import {
   releaseAll,
   result,
   runSync,
+  settle,
   signal,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
@@ -588,8 +590,11 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
           lookup: () => lookup(K),
           call: () => call(() => 1),
           'task.call': () => task(() => 1).call(),
+          attempt: () => attempt(() => 1),
+          'task.attempt': () => task(() => 1).attempt(),
           all: () => all([]),
           race: () => race([task(() => 1)]),
+          settle: () => settle([]),
           join: () => join(f),
           result: () => result(f),
           interrupted: () => interrupted(),
@@ -610,10 +615,10 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
       },
     });
     expect(root.get(V)).toEqual({ made: 'v' });
-    expect(Object.keys(errors)).toHaveLength(11);
+    expect(Object.keys(errors)).toHaveLength(14);
     for (const [op, e] of Object.entries(errors)) {
       expect(e, op).toBeInstanceOf(CreationViolationError);
-      const name = op === 'task.call' ? 'call' : op;
+      const name = op.replace(/^task\./, '');
       expect((e as Error).message, op).toBe(name === 'lookup' ? 'lookup() during creation; use inject()' : `${name}() during creation`);
     }
     expect(peeked).toBeUndefined();
