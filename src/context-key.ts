@@ -1,4 +1,5 @@
-import { Scope } from './scope.js';
+import { isScope } from './scope.js';
+import type { Scope } from './scope.js';
 
 // --- Marker constants ---
 const CLASS_MARKER = 'class' as const;
@@ -94,13 +95,63 @@ export function createInjectionKey<T>(
 }
 
 // --- Scope ---
+// A key's scope is registered (`setScope`, `createInjectionKey`'s option) or declared: a class or function key's
+// `scope` property, read through the prototype chain like any static (D32).
 
+/** `scope` as JavaScript reads it on a class or function key: own or inherited. `undefined` for a token. */
+function scopeProperty(key: InjectionKey<unknown>): unknown {
+  return typeof key === 'function' ? (key as { scope?: unknown }).scope : undefined;
+}
+
+/** For messages: a value that is not a Scope, named without calling any of its code. */
+function describeValue(v: unknown): string {
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'symbol') return v.toString();
+  return typeof v === 'object' && v !== null ? 'an object' : String(v);
+}
+
+/**
+ * The key's declared scope (D32): its `scope` property when that is a Scope made by `createScope`. `undefined`
+ * (`static scope?: Scope` with no initializer emits one) and a function (a static method named `scope`) are not
+ * declarations. Anything else is a TypeError, at every read: nothing is memoized.
+ */
+function declaredScope(key: InjectionKey<unknown>): Scope | undefined {
+  const v = scopeProperty(key);
+  if (v === undefined || typeof v === 'function') return undefined;
+  if (isScope(v)) return v;
+  const name = getKeyDescription(key);
+  throw new TypeError(
+    `${name}.scope is ${describeValue(v)}, not a Scope made by createScope(): declare a lifetime with ` +
+      `\`static readonly scope = SomeScope\`; if ${name}'s scope property means something else, ` +
+      `register its scope with setScope(${name}, scope) instead (D32)`,
+  );
+}
+
+/**
+ * Register `key`'s scope: the form for keys you do not own (a third-party class, a function), including one whose
+ * unrelated static `scope` member would otherwise be refused. A registered scope wins over the key's `scope`
+ * property. A key that already declares a scope (`static readonly scope = …`, own or inherited) is a TypeError:
+ * two declarations (D32).
+ */
 export function setScope<T>(key: InjectionKey<T>, scope: Scope): void {
+  const v = scopeProperty(key as InjectionKey<unknown>);
+  if (isScope(v)) {
+    const name = getKeyDescription(key);
+    throw new TypeError(
+      `setScope(${name}, '${scope.name}'): ${name} already declares its scope ('${v.name}') through its scope property; ` +
+        'a key has one declaration: change that property instead (D32)',
+    );
+  }
   scopeMap.set(key as object, scope);
 }
 
+/**
+ * The key's scope: the registered one (`setScope`, `createInjectionKey`'s option), else its declaration, else
+ * `undefined`. Throws TypeError when nothing is registered and the key's `scope` property is neither a declaration
+ * nor ignored (D32).
+ */
 export function getKeyScope<T>(key: InjectionKey<T>): Scope | undefined {
-  return scopeMap.get(key as object);
+  return scopeMap.get(key as object) ?? declaredScope(key as InjectionKey<unknown>);
 }
 
 // --- Dependencies ---

@@ -1,18 +1,41 @@
-import { describe, it, expect } from 'vitest';
-import { createInjectionKey, setScope, setDependencies } from './context-key.js';
-import {
-  classProvider,
-  valueProvider,
-  aliasProvider,
-  factoryProvider,
-  resourceProvider,
-} from './provider-util.js';
-import { createContext, createRootContext } from './create-context.js';
-import { inject, lookup, create, RegisterResource, ContextRefKey } from './inject.js';
-import { Dispose } from './resource.js';
+// di.test.ts — ported from the pre-redesign context.test.ts suites
+// (129 tests; the 21 dropped ones are context type properties (1), the
+// probabilistic memo (1), context.create() (7), create() dep tracking (2),
+// createRefCountedKey (6), refCountedProvider (4)) plus push-context.test.ts's
+// captureAutoScoped suite (4), with `ctx.run` instead of the removed enterSync/leaveSync pair.
+//
+// Mechanical substitutions: `createContext({ parent: p, … })` →
+// `p.child({ … })`; `inject(RegisterResource)({ [Dispose]: f })` →
+// `own({ [Symbol.dispose]: f })` or `own(() => f())`; `ctx.dispose()` (sync) →
+// `ctx.abort()`, observed synchronously (DESIGN.md §2.4); `await ctx.dispose()` →
+// `await ctx.close()`; `ctx.runSync(fn, { providers, scopes })` →
+// `using c = ctx.child({ providers, scopes }); c.run(fn)` (DESIGN.md §4.11).
+//
+// FLIP marks a port whose expectation the redesign reversed; each is annotated
+// with the DESIGN.md section that reversed it. The flip that release fibers exist
+// without a receiver while events do not is a lifecycle-events flip and is in
+// node-topic.test.ts. The flip that `lookup` is refused in a factory had no old
+// test (nothing read through `lookup` in a factory), so it is one added case.
+// One more change follows from the substitutions and is annotated
+// `(DESIGN.md §2.6)`: there is no bare detach, so the old `unregister()`
+// becomes `release(x)`, which runs the release now.
+//
+// `lookup` and `own` are the free functions of ambient.ts.
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import './node.js';
-import { createScope, SelfScope, RootScope } from './scope.js';
-import { createRefCountedKey, refCountedProvider } from './ref-count.js';
+import { createInjectionKey, setDependencies, setScope } from './context-key.js';
+import type { Context } from './context.js';
+import { createRootContext } from './create-context.js';
+import { ContextKey, inject } from './inject.js';
+import { aliasProvider, classProvider, factoryProvider, valueProvider } from './provider-util.js';
+import { CreationViolationError, NoCurrentNodeError, PendingNodeError, PlacementError } from './resource.js';
+import { RootScope, SelfScope, createScope } from './scope.js';
+import { lookup, own } from './ambient.js';
+import { here, impl, tick } from './test/util.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('Context', () => {
   const KEY_A = createInjectionKey<string>('A');
@@ -73,14 +96,8 @@ describe('Context', () => {
   it('should detect circular dependencies', () => {
     const context = createRootContext({
       providers: [
-        {
-          key: KEY_A,
-          provide: () => inject(KEY_B),
-        },
-        {
-          key: KEY_B,
-          provide: () => inject(KEY_A),
-        },
+        { key: KEY_A, provide: () => inject(KEY_B) },
+        { key: KEY_B, provide: () => inject(KEY_A) },
       ],
     });
 
@@ -91,12 +108,7 @@ describe('Context', () => {
 
   it('should detect self-referencing circular dependency', () => {
     const context = createRootContext({
-      providers: [
-        {
-          key: KEY_A,
-          provide: () => inject(KEY_A),
-        },
-      ],
+      providers: [{ key: KEY_A, provide: () => inject(KEY_A) }],
     });
 
     expect(() => {
@@ -108,18 +120,9 @@ describe('Context', () => {
     const KEY_C = createInjectionKey<string>('C');
     const context = createRootContext({
       providers: [
-        {
-          key: KEY_A,
-          provide: () => inject(KEY_B),
-        },
-        {
-          key: KEY_B,
-          provide: () => inject(KEY_C),
-        },
-        {
-          key: KEY_C,
-          provide: () => inject(KEY_A),
-        },
+        { key: KEY_A, provide: () => inject(KEY_B) },
+        { key: KEY_B, provide: () => inject(KEY_C) },
+        { key: KEY_C, provide: () => inject(KEY_A) },
       ],
     });
 
@@ -132,8 +135,7 @@ describe('Context', () => {
     const parent = createRootContext({
       providers: [valueProvider(KEY_A, 'parent-a')],
     });
-    const child = createContext({
-      parent,
+    const child = parent.child({
       providers: [valueProvider(KEY_B, 'child-b')],
     });
 
@@ -145,8 +147,7 @@ describe('Context', () => {
     const parent = createRootContext({
       providers: [valueProvider(KEY_A, 'parent-a')],
     });
-    const child = createContext({
-      parent,
+    const child = parent.child({
       providers: [valueProvider(KEY_A, 'child-a')],
     });
 
@@ -225,7 +226,7 @@ describe('Context', () => {
       class Logger {}
 
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       const logger = child.get(Logger);
 
@@ -242,8 +243,7 @@ describe('Context', () => {
       }
 
       const root = createRootContext();
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [valueProvider(Database, new Database())],
       });
 
@@ -269,7 +269,7 @@ describe('Context', () => {
       }
 
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       const repo = child.get(UserRepo);
 
@@ -283,7 +283,7 @@ describe('Context', () => {
       const createLogger = () => (msg: string) => `[LOG] ${msg}`;
 
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       const logger = child.get(createLogger);
 
@@ -299,8 +299,7 @@ describe('Context', () => {
       }
 
       const root = createRootContext();
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [valueProvider(REQUEST, { url: '/api/users' })],
       });
 
@@ -324,11 +323,10 @@ describe('Context', () => {
       }
 
       const root = createRootContext();
-      const tenant = createContext({
-        parent: root,
+      const tenant = root.child({
         providers: [valueProvider(TENANT_ID, 'tenant-1')],
       });
-      const request = createContext({ parent: tenant });
+      const request = tenant.child();
 
       const svc = request.get(TenantService);
 
@@ -355,17 +353,15 @@ describe('Execution Context', () => {
     });
   });
 
-  it('should resolve child context providers via runSync', () => {
+  it('should resolve child context providers via a child and run', () => {
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
 
     const ctx = createRootContext();
 
-    ctx.runSync(
-      () => {
-        expect(lookup(REQUEST)).toEqual({ url: '/api/test' });
-      },
-      { providers: [valueProvider(REQUEST, { url: '/api/test' })] },
-    );
+    using c = ctx.child({ providers: [valueProvider(REQUEST, { url: '/api/test' })] });
+    c.run(() => {
+      expect(lookup(REQUEST)).toEqual({ url: '/api/test' });
+    });
   });
 
   it('child context providers win over parent (child-wins)', () => {
@@ -375,40 +371,35 @@ describe('Execution Context', () => {
       providers: [valueProvider(KEY, 'parent')],
     });
 
-    // runSync providers override the parent context's providers
-    ctx.runSync(
-      () => {
-        expect(lookup(KEY)).toBe('child');
-      },
-      { providers: [valueProvider(KEY, 'child')] },
-    );
+    // the child's providers override the parent context's providers
+    using c = ctx.child({ providers: [valueProvider(KEY, 'child')] });
+    c.run(() => {
+      expect(lookup(KEY)).toBe('child');
+    });
   });
 
-  it('inject() should throw outside any context', () => {
+  it('lookup() and inject() throw outside any context', () => {
     const KEY = createInjectionKey<string>('KEY');
-    expect(() => lookup(KEY)).toThrow(/outside/i);
+    expect(() => lookup(KEY)).toThrow(NoCurrentNodeError);
+    expect(() => inject(KEY)).toThrow(CreationViolationError);
   });
 
-  it('nested runSync should inherit parent EC', () => {
+  it('nested children inherit the parent chain', () => {
     const OUTER = createInjectionKey<string>('OUTER');
     const INNER = createInjectionKey<string>('INNER');
 
     const ctx = createRootContext();
 
-    ctx.runSync(
-      (outerCtx) => {
-        outerCtx.runSync(
-          () => {
-            // Inner EC can see its own provider
-            expect(lookup(INNER)).toBe('inner-val');
-            // Inner EC can see outer EC's provider via parent chain
-            expect(lookup(OUTER)).toBe('outer-val');
-          },
-          { providers: [valueProvider(INNER, 'inner-val')] },
-        );
-      },
-      { providers: [valueProvider(OUTER, 'outer-val')] },
-    );
+    using outer = ctx.child({ providers: [valueProvider(OUTER, 'outer-val')] });
+    outer.run(() => {
+      using inner = here().child({ providers: [valueProvider(INNER, 'inner-val')] });
+      inner.run(() => {
+        // Inner can see its own provider
+        expect(lookup(INNER)).toBe('inner-val');
+        // Inner can see outer's provider via the parent chain
+        expect(lookup(OUTER)).toBe('outer-val');
+      });
+    });
   });
 
   it('should auto-scope class with only structural deps into structural context', () => {
@@ -420,13 +411,14 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
+    let logger: Logger | undefined;
     ctx.run(() => {
-      const logger = lookup(Logger);
+      logger = lookup(Logger);
       expect(logger).toBeInstanceOf(Logger);
     });
 
     // Logger had no deps — auto-scoped to structural root
-    expect(ctx.get(Logger)).toBeInstanceOf(Logger);
+    expect(ctx.get(Logger)).toBe(logger);
   });
 
   it('should auto-scope class depending on structural dep to structural context', () => {
@@ -438,18 +430,19 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
+    let repo: UserRepo | undefined;
     ctx.run(() => {
-      const repo = lookup(UserRepo);
+      repo = lookup(UserRepo);
       expect(repo).toBeInstanceOf(UserRepo);
       expect(repo.db).toBeInstanceOf(Database);
     });
 
-    // Both auto-scoped to structural root
-    expect(ctx.get(UserRepo)).toBeInstanceOf(UserRepo);
-    expect(ctx.get(Database)).toBeInstanceOf(Database);
+    // Both auto-scoped to structural root: the same instances are served there
+    expect(ctx.get(UserRepo)).toBe(repo);
+    expect(ctx.get(Database)).toBe(repo!.db);
   });
 
-  it('should store in execution context when depending on EC provider', () => {
+  it('should store in the child when depending on a child provider', () => {
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
 
     class RequestHandler {
@@ -458,22 +451,19 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
-    let handler: RequestHandler;
-    ctx.runSync(
-      () => {
-        handler = lookup(RequestHandler);
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { url: '/test' })] });
+      c.run(() => {
+        const handler = lookup(RequestHandler);
         expect(handler.request.url).toBe('/test');
-      },
-      { providers: [valueProvider(REQUEST, { url: '/test' })] },
-    );
+      });
+    }
 
-    // RequestHandler should NOT be in structural context — trying to
-    // create it there would fail because REQUEST has no structural provider.
-    // Instead, verify that the structural injector doesn't have it cached.
+    // RequestHandler is not on the root: creating it there fails because REQUEST has no root provider.
     expect(() => ctx.get(RequestHandler)).toThrow();
   });
 
-  it('should store in EC when mixing structural and EC deps', () => {
+  it('should store in the child when mixing structural and child deps', () => {
     class Database {}
 
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
@@ -485,24 +475,23 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
-    let handler: RequestHandler;
-    ctx.runSync(
-      () => {
+    let handler: RequestHandler | undefined;
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { url: '/api' })] });
+      c.run(() => {
         handler = lookup(RequestHandler);
         expect(handler.db).toBeInstanceOf(Database);
         expect(handler.request.url).toBe('/api');
-      },
-      { providers: [valueProvider(REQUEST, { url: '/api' })] },
-    );
+      });
+    }
 
-    // Database should be auto-scoped to structural root (pure structural dep)
+    // Database should be auto-scoped to the root (pure structural dep)
     expect(ctx.get(Database)).toBe(handler!.db);
-    // RequestHandler depends on EC provider — should NOT be in structural.
-    // Trying to create it structurally fails because REQUEST has no structural provider.
+    // RequestHandler depends on a child provider — it is not on the root.
     expect(() => ctx.get(RequestHandler)).toThrow();
   });
 
-  it('each runSync should get independent EC-scoped instances', () => {
+  it('each child gets independent child-scoped instances', () => {
     const REQUEST = createInjectionKey<{ id: number }>('REQUEST');
 
     class RequestHandler {
@@ -511,29 +500,28 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
-    let handler1: RequestHandler;
-    let handler2: RequestHandler;
+    let handler1: RequestHandler | undefined;
+    let handler2: RequestHandler | undefined;
 
-    ctx.runSync(
-      () => {
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { id: 1 })] });
+      c.run(() => {
         handler1 = lookup(RequestHandler);
-      },
-      { providers: [valueProvider(REQUEST, { id: 1 })] },
-    );
-
-    ctx.runSync(
-      () => {
+      });
+    }
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { id: 2 })] });
+      c.run(() => {
         handler2 = lookup(RequestHandler);
-      },
-      { providers: [valueProvider(REQUEST, { id: 2 })] },
-    );
+      });
+    }
 
-    expect(handler1!).not.toBe(handler2!);
+    expect(handler1).not.toBe(handler2);
     expect(handler1!.request.id).toBe(1);
     expect(handler2!.request.id).toBe(2);
   });
 
-  it('default-factory class auto-created in EC should share structural deps', () => {
+  it('default-factory class auto-created in a child should share structural deps', () => {
     class SharedService {
       value = 'shared';
     }
@@ -551,18 +539,20 @@ describe('Execution Context', () => {
 
     const ctx = createRootContext();
 
-    ctx.runSync(
-      () => {
+    let shared: SharedService | undefined;
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, 'req-1')] });
+      c.run(() => {
         const a = lookup(HandlerA);
         const b = lookup(HandlerB);
         // SharedService is purely structural — should be same instance
         expect(a.shared).toBe(b.shared);
-      },
-      { providers: [valueProvider(REQUEST, 'req-1')] },
-    );
+        shared = a.shared;
+      });
+    }
 
-    // SharedService should be auto-scoped to structural root
-    expect(ctx.get(SharedService)).toBeInstanceOf(SharedService);
+    // SharedService should be auto-scoped to the structural root: the child's instance is the root's
+    expect(ctx.get(SharedService)).toBe(shared);
   });
 });
 
@@ -579,17 +569,15 @@ describe('Context.runSync', () => {
     });
   });
 
-  it('should resolve child providers via runSync', () => {
+  it('should resolve child providers via runSync: providers go on a child (DESIGN.md §4.11)', () => {
     const REQUEST = createInjectionKey<{ url: string }>('REQUEST');
 
     const ctx = createRootContext();
 
-    ctx.runSync(
-      () => {
-        expect(lookup(REQUEST)).toEqual({ url: '/api/test' });
-      },
-      { providers: [valueProvider(REQUEST, { url: '/api/test' })] },
-    );
+    using c = ctx.child({ providers: [valueProvider(REQUEST, { url: '/api/test' })] });
+    c.runSync(() => {
+      expect(lookup(REQUEST)).toEqual({ url: '/api/test' });
+    });
   });
 
   it('child providers win over parent (child-wins)', () => {
@@ -599,12 +587,10 @@ describe('Context.runSync', () => {
       providers: [valueProvider(KEY, 'parent')],
     });
 
-    ctx.runSync(
-      () => {
-        expect(lookup(KEY)).toBe('child');
-      },
-      { providers: [valueProvider(KEY, 'child')] },
-    );
+    using c = ctx.child({ providers: [valueProvider(KEY, 'child')] });
+    c.runSync(() => {
+      expect(lookup(KEY)).toBe('child');
+    });
   });
 
   it('nested runSync should inherit parent', () => {
@@ -613,18 +599,14 @@ describe('Context.runSync', () => {
 
     const ctx = createRootContext();
 
-    ctx.runSync(
-      (outerCtx) => {
-        outerCtx.runSync(
-          () => {
-            expect(lookup(INNER)).toBe('inner-val');
-            expect(lookup(OUTER)).toBe('outer-val');
-          },
-          { providers: [valueProvider(INNER, 'inner-val')] },
-        );
-      },
-      { providers: [valueProvider(OUTER, 'outer-val')] },
-    );
+    using outer = ctx.child({ providers: [valueProvider(OUTER, 'outer-val')] });
+    outer.runSync(() => {
+      using inner = here().child({ providers: [valueProvider(INNER, 'inner-val')] });
+      inner.runSync(() => {
+        expect(lookup(INNER)).toBe('inner-val');
+        expect(lookup(OUTER)).toBe('outer-val');
+      });
+    });
   });
 
   it('should auto-scope class with only structural deps into structural context', () => {
@@ -636,13 +618,14 @@ describe('Context.runSync', () => {
 
     const ctx = createRootContext();
 
+    let logger: Logger | undefined;
     ctx.runSync(() => {
-      const logger = lookup(Logger);
+      logger = lookup(Logger);
       expect(logger).toBeInstanceOf(Logger);
     });
 
-    // Logger had no deps — auto-scoped to structural root
-    expect(ctx.get(Logger)).toBeInstanceOf(Logger);
+    // Logger had no deps — auto-scoped to the structural root, so it outlives the runSync child
+    expect(ctx.get(Logger)).toBe(logger);
   });
 
   it('should store in child context when depending on child provider', () => {
@@ -654,16 +637,15 @@ describe('Context.runSync', () => {
 
     const ctx = createRootContext();
 
-    let handler: RequestHandler;
-    ctx.runSync(
-      () => {
-        handler = lookup(RequestHandler);
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { url: '/test' })] });
+      c.runSync(() => {
+        const handler = lookup(RequestHandler);
         expect(handler.request.url).toBe('/test');
-      },
-      { providers: [valueProvider(REQUEST, { url: '/test' })] },
-    );
+      });
+    }
 
-    // RequestHandler depends on EC provider — should NOT be in structural
+    // RequestHandler depends on a child provider — it is not on the root
     expect(() => ctx.get(RequestHandler)).toThrow();
   });
 
@@ -676,48 +658,45 @@ describe('Context.runSync', () => {
 
     const ctx = createRootContext();
 
-    let handler1: RequestHandler;
-    let handler2: RequestHandler;
+    let handler1: RequestHandler | undefined;
+    let handler2: RequestHandler | undefined;
 
-    ctx.runSync(
-      () => {
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { id: 1 })] });
+      c.runSync(() => {
         handler1 = lookup(RequestHandler);
-      },
-      { providers: [valueProvider(REQUEST, { id: 1 })] },
-    );
-
-    ctx.runSync(
-      () => {
+      });
+    }
+    {
+      using c = ctx.child({ providers: [valueProvider(REQUEST, { id: 2 })] });
+      c.runSync(() => {
         handler2 = lookup(RequestHandler);
-      },
-      { providers: [valueProvider(REQUEST, { id: 2 })] },
-    );
+      });
+    }
 
-    expect(handler1!).not.toBe(handler2!);
+    expect(handler1).not.toBe(handler2);
     expect(handler1!.request.id).toBe(1);
     expect(handler2!.request.id).toBe(2);
   });
 
-  it('runSync from within enterSync should see entered context as grandparent', async () => {
+  it('runSync from within ctx.run should see the entered context as grandparent', async () => {
+    // The removed enterSync/leaveSync pair is replaced by `ctx.run(fn)`: the entered context is the one
+    // `run` makes current.
     const OUTER = createInjectionKey<string>('OUTER');
     const INNER = createInjectionKey<string>('INNER');
 
     const ctx = createRootContext();
 
-    const outerCtx = createContext({ parent: ctx, providers: [valueProvider(OUTER, 'async-val')] });
-    outerCtx.enterSync();
-    try {
-      outerCtx.runSync(
-        () => {
-          expect(lookup(INNER)).toBe('sync-val');
-          expect(lookup(OUTER)).toBe('async-val');
-        },
-        { providers: [valueProvider(INNER, 'sync-val')] },
-      );
-    } finally {
-      outerCtx.leaveSync();
-      await outerCtx.dispose();
-    }
+    const outerCtx = ctx.child({ providers: [valueProvider(OUTER, 'async-val')] });
+    outerCtx.run(() => {
+      using inner = here().child({ providers: [valueProvider(INNER, 'sync-val')] });
+      inner.runSync(() => {
+        expect(impl(here()).parent?.parent).toBe(impl(outerCtx));
+        expect(lookup(INNER)).toBe('sync-val');
+        expect(lookup(OUTER)).toBe('async-val');
+      });
+    });
+    await outerCtx.close();
   });
 
   it('should return the value from the callback', () => {
@@ -738,19 +717,19 @@ describe('Disposal', () => {
 
       const KEY_A = createInjectionKey('A', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('A') });
+          own({ [Symbol.dispose]: () => void order.push('A') });
           return 'a';
         },
       });
       const KEY_B = createInjectionKey('B', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('B') });
+          own({ [Symbol.dispose]: () => void order.push('B') });
           return 'b';
         },
       });
       const KEY_C = createInjectionKey('C', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('C') });
+          own({ [Symbol.dispose]: () => void order.push('C') });
           return 'c';
         },
       });
@@ -759,63 +738,65 @@ describe('Disposal', () => {
       ctx.get(KEY_A);
       ctx.get(KEY_B);
       ctx.get(KEY_C);
-      ctx.dispose();
+      ctx.abort();
 
       expect(order).toEqual(['C', 'B', 'A']);
+      expect(ctx.state).toBe('complete'); // synchronous releases complete inside abort() (DESIGN.md §2.4)
     });
 
-    it('should run multiple RegisterResource callbacks in reverse registration order', () => {
+    it('should run multiple own() releases in reverse registration order', () => {
       const order: string[] = [];
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          register({ [Dispose]: () => void order.push('onDispose-1') });
-          register({ [Dispose]: () => void order.push('onDispose-2') });
+          own(() => void order.push('onDispose-1'));
+          own(() => void order.push('onDispose-2'));
           return 'value';
         },
       });
 
       const ctx = createRootContext();
       ctx.get(KEY);
-      ctx.dispose();
+      ctx.abort();
 
       expect(order).toEqual(['onDispose-2', 'onDispose-1']);
     });
 
-    it('should allow unregistering resources', () => {
+    it('should allow releasing resources early (DESIGN.md §2.6: release(x) runs the release now)', () => {
       const order: string[] = [];
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          register({ [Dispose]: () => void order.push('kept') });
-          const { unregister } = register({ [Dispose]: () => void order.push('removed') });
-          unregister();
+          own(() => void order.push('kept'));
+          const removed = own(() => void order.push('removed'));
+          // There is no bare detach (DESIGN.md §2.6): an entry nobody owns is a leak. The old unregister()
+          // becomes release(x), which runs the release now, exactly once (C7), in a release fiber.
+          void here().release(removed);
           return 'value';
         },
       });
 
       const ctx = createRootContext();
       ctx.get(KEY);
-      ctx.dispose();
+      expect(order).toEqual(['removed']);
+      ctx.abort();
 
-      expect(order).toEqual(['kept']);
+      expect(order).toEqual(['removed', 'kept']);
     });
 
-    it('should dispose children before parent values', async () => {
+    it('should dispose children before parent values', () => {
       const order: string[] = [];
 
       const PARENT_KEY = createInjectionKey('PARENT_KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('parent') });
+          own({ [Symbol.dispose]: () => void order.push('parent') });
           return 'parent';
         },
       });
 
       const CHILD_KEY = createInjectionKey('CHILD_KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('child') });
+          own({ [Symbol.dispose]: () => void order.push('child') });
           return 'child';
         },
       });
@@ -823,39 +804,40 @@ describe('Disposal', () => {
       const parent = createRootContext();
       parent.get(PARENT_KEY);
 
-      const child = createContext({ parent });
+      const child = parent.child();
       child.get(CHILD_KEY);
 
-      await parent.dispose();
+      parent.abort(); // the child entry (explicit) completes synchronously too (DESIGN.md §2.4)
 
       expect(order).toEqual(['child', 'parent']);
+      expect(child.state).toBe('complete');
     });
 
-    it('should dispose multiple children in reverse creation order', async () => {
+    it('should dispose multiple children in reverse creation order', () => {
       const order: string[] = [];
 
       const KEY_1 = createInjectionKey('KEY_1', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('child-1') });
+          own({ [Symbol.dispose]: () => void order.push('child-1') });
           return 'c1';
         },
       });
       const KEY_2 = createInjectionKey('KEY_2', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('child-2') });
+          own({ [Symbol.dispose]: () => void order.push('child-2') });
           return 'c2';
         },
       });
 
       const parent = createRootContext();
 
-      const child1 = createContext({ parent });
+      const child1 = parent.child();
       child1.get(KEY_1);
 
-      const child2 = createContext({ parent });
+      const child2 = parent.child();
       child2.get(KEY_2);
 
-      await parent.dispose();
+      parent.abort();
 
       expect(order).toEqual(['child-2', 'child-1']);
     });
@@ -865,15 +847,15 @@ describe('Disposal', () => {
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('disposed') });
+          own({ [Symbol.dispose]: () => void order.push('disposed') });
           return 'value';
         },
       });
 
       const ctx = createRootContext();
       ctx.get(KEY);
-      await ctx.dispose();
-      await ctx.dispose();
+      await ctx.close();
+      await ctx.close();
 
       expect(order).toEqual(['disposed']);
     });
@@ -883,7 +865,7 @@ describe('Disposal', () => {
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('disposed') });
+          own({ [Symbol.dispose]: () => void order.push('disposed') });
           return 'value';
         },
       });
@@ -903,13 +885,23 @@ describe('Disposal', () => {
 
       const KEY_A = createInjectionKey('A', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('A') });
+          own({
+            [Symbol.asyncDispose]: async () => {
+              await tick();
+              order.push('A');
+            },
+          });
           return 'a';
         },
       });
       const KEY_B = createInjectionKey('B', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('B') });
+          own({
+            [Symbol.asyncDispose]: async () => {
+              await tick();
+              order.push('B');
+            },
+          });
           return 'b';
         },
       });
@@ -917,7 +909,7 @@ describe('Disposal', () => {
       const ctx = createRootContext();
       ctx.get(KEY_A);
       ctx.get(KEY_B);
-      await ctx.dispose();
+      await ctx.close();
 
       expect(order).toEqual(['B', 'A']);
     });
@@ -927,15 +919,15 @@ describe('Disposal', () => {
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('disposed') });
+          own({ [Symbol.asyncDispose]: async () => void order.push('disposed') });
           return 'value';
         },
       });
 
       const ctx = createRootContext();
       ctx.get(KEY);
-      await ctx.dispose();
-      await ctx.dispose();
+      await ctx.close();
+      await ctx.close();
 
       expect(order).toEqual(['disposed']);
     });
@@ -945,7 +937,7 @@ describe('Disposal', () => {
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('disposed') });
+          own({ [Symbol.asyncDispose]: async () => void order.push('disposed') });
           return 'value';
         },
       });
@@ -963,13 +955,13 @@ describe('Disposal', () => {
 
       const P_KEY = createInjectionKey('P', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('parent') });
+          own({ [Symbol.asyncDispose]: async () => void order.push('parent') });
           return 'p';
         },
       });
       const C_KEY = createInjectionKey('C', {
         factory: () => {
-          inject(RegisterResource)({ [Dispose]: () => void order.push('child') });
+          own({ [Symbol.asyncDispose]: async () => void order.push('child') });
           return 'c';
         },
       });
@@ -977,33 +969,55 @@ describe('Disposal', () => {
       const parent = createRootContext();
       parent.get(P_KEY);
 
-      const child = createContext({ parent });
+      const child = parent.child();
       child.get(C_KEY);
 
-      await parent.dispose();
+      await parent.close();
 
       expect(order).toEqual(['child', 'parent']);
     });
   });
 
-  describe('RegisterResource', () => {
-    it('should throw when injecting RegisterResource outside creation context', () => {
-      expect(() => lookup(RegisterResource)).toThrow(/creation/i);
+  describe('own() in creation (was RegisterResource)', () => {
+    it('own() with no current node throws NoCurrentNodeError', () => {
+      // FLIP (DESIGN.md §2.6): own() is no longer creation-only; outside any node there is nothing to attach to.
+      expect(() => own(() => {})).toThrow(NoCurrentNodeError);
     });
 
-    it('should throw when injecting RegisterResource from execution context', () => {
+    it('own() in an execution context attaches to the current node', async () => {
+      // FLIP (DESIGN.md §2.6): in a body (here: ctx.run), own() attaches to the current node.
       const ctx = createRootContext();
+      let released = false;
 
       ctx.run(() => {
-        expect(() => lookup(RegisterResource)).toThrow(/creation/i);
+        own(() => {
+          released = true;
+        });
       });
+
+      expect(impl(ctx).explicit.size).toBe(1);
+      expect(released).toBe(false);
+      await ctx.close();
+      expect(released).toBe(true);
     });
 
-    it('should allow injecting RegisterResource during factory execution', () => {
+    it('lookup() inside a factory throws CreationViolationError', () => {
+      // FLIP (DESIGN.md §3.2): lookup used to read untracked during creation; a creation-time read is now
+      // inject() (tracked) or nothing.
+      const KEY = createInjectionKey<string>('KEY');
+      const V = createInjectionKey<string>('V', { factory: () => lookup(KEY) });
+      const ctx = createRootContext({ providers: [valueProvider(KEY, 'k')] });
+      expect(() => ctx.get(V)).toThrow(CreationViolationError);
+      expect(() => ctx.get(V)).toThrow(/use inject\(\)/);
+      expect(impl(ctx).cache.has(V)).toBe(false);
+    });
+
+    it('should allow own() during factory execution', () => {
+      const resource = { [Symbol.dispose]() {} };
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          expect(typeof register).toBe('function');
+          expect(own(resource)).toBe(resource); // every overload returns what it attached
+          expect(impl(here()).explicit.size).toBe(1); // on the value's own node (DESIGN.md §2.6)
           return 'value';
         },
       });
@@ -1012,24 +1026,25 @@ describe('Disposal', () => {
       ctx.get(KEY);
     });
 
-    it('should allow injecting RegisterResource during class construction', () => {
+    it('should allow own() during class construction', () => {
       class MyService {
-        registerFn = inject(RegisterResource);
+        resource = own({ [Symbol.dispose]() {} });
+        node = inject(ContextKey);
       }
 
       const ctx = createRootContext();
       const svc = ctx.get(MyService);
-      expect(typeof svc.registerFn).toBe('function');
+      expect(typeof svc.resource[Symbol.dispose]).toBe('function');
+      expect(impl(svc.node).explicit.find(svc.resource)).toBeDefined();
     });
 
-    it('should call RegisterResource callbacks on context dispose', async () => {
+    it('should run own() releases on context dispose', async () => {
       let disposed = false;
 
       class MyService {
         constructor() {
-          const register = inject(RegisterResource);
-          register({
-            [Dispose]: () => {
+          own({
+            [Symbol.dispose]: () => {
               disposed = true;
             },
           });
@@ -1040,27 +1055,20 @@ describe('Disposal', () => {
       ctx.get(MyService);
       expect(disposed).toBe(false);
 
-      await ctx.dispose();
+      await ctx.close();
       expect(disposed).toBe(true);
     });
 
-    it('should allow unregistering after creation (post-flush)', async () => {
+    it('should allow releasing early after creation (DESIGN.md §2.6: release(x) runs the release now)', async () => {
       const order: string[] = [];
 
-      let handle: { unregister(): void };
+      let node: Context | undefined;
+      let removed: object | undefined;
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          register({
-            [Dispose]: () => {
-              order.push('kept');
-            },
-          });
-          handle = register({
-            [Dispose]: () => {
-              order.push('removed');
-            },
-          });
+          own(() => void order.push('kept'));
+          removed = own(() => void order.push('removed'));
+          node = here();
           return 'value';
         },
       });
@@ -1068,58 +1076,50 @@ describe('Disposal', () => {
       const ctx = createRootContext();
       ctx.get(KEY);
 
-      // Unregister after creation (callbacks already flushed to context)
-      handle!.unregister();
+      // after creation, through the value's (now placed) node
+      await node!.release(removed!);
+      expect(order).toEqual(['removed']);
 
-      await ctx.dispose();
-      expect(order).toEqual(['kept']);
+      await ctx.close();
+      expect(order).toEqual(['removed', 'kept']);
     });
   });
 
-  describe('execution context auto-disposal', () => {
-    it('runSync should auto-dispose EC values', () => {
+  describe('child auto-disposal (was execution context auto-disposal)', () => {
+    it('a child disposes its values when its using block ends', () => {
       const order: string[] = [];
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          register({
-            [Dispose]: () => {
-              order.push('ec-disposed');
-            },
-          });
+          own(() => void order.push('ec-disposed'));
           return 'value';
         },
       });
 
       const ctx = createRootContext();
 
-      ctx.runSync(
-        () => {
-          lookup(KEY);
-        },
-        {
+      {
+        using c = ctx.child({
           providers: [
             {
               key: KEY,
               provide: () => {
-                const register = inject(RegisterResource);
-                register({
-                  [Dispose]: () => {
-                    order.push('ec-disposed');
-                  },
-                });
+                own(() => void order.push('ec-disposed'));
                 return 'provided-value';
               },
             },
           ],
-        },
-      );
+        });
+        c.run(() => {
+          lookup(KEY);
+        });
+        expect(order).toEqual([]);
+      }
 
-      expect(order).toEqual(['ec-disposed']);
+      expect(order).toEqual(['ec-disposed']); // synchronous (DESIGN.md §2.4, §4.11)
     });
 
-    it('runSync should auto-dispose class instances', () => {
+    it('a child disposes class instances placed on it', () => {
       const order: string[] = [];
 
       const REQUEST = createInjectionKey<string>('REQUEST');
@@ -1127,37 +1127,29 @@ describe('Disposal', () => {
       class Handler {
         request = inject(REQUEST);
         constructor() {
-          const register = inject(RegisterResource);
-          register({
-            [Dispose]: () => {
-              order.push('handler-disposed');
-            },
-          });
+          own(() => void order.push('handler-disposed'));
         }
       }
 
       const ctx = createRootContext();
 
-      ctx.runSync(
-        () => {
+      {
+        using c = ctx.child({ providers: [valueProvider(REQUEST, '/test')] });
+        c.run(() => {
           lookup(Handler);
-        },
-        { providers: [valueProvider(REQUEST, '/test')] },
-      );
+        });
+      }
 
       expect(order).toEqual(['handler-disposed']);
     });
 
-    it('runSync should dispose even if callback throws', () => {
+    it('a child disposes even if the callback throws', () => {
       let disposed = false;
 
       const KEY = createInjectionKey('KEY', {
         factory: () => {
-          const register = inject(RegisterResource);
-          register({
-            [Dispose]: () => {
-              disposed = true;
-            },
+          own(() => {
+            disposed = true;
           });
           return 'value';
         },
@@ -1165,39 +1157,27 @@ describe('Disposal', () => {
 
       const ctx = createRootContext();
 
-      expect(() =>
-        ctx.runSync(
-          () => {
-            lookup(KEY);
-            throw new Error('boom');
-          },
-          {
-            providers: [
-              {
-                key: KEY,
-                provide: () => {
-                  const register = inject(RegisterResource);
-                  register({
-                    [Dispose]: () => {
-                      disposed = true;
-                    },
-                  });
-                  return 'value';
-                },
+      expect(() => {
+        using c = ctx.child({
+          providers: [
+            {
+              key: KEY,
+              provide: () => {
+                own(() => {
+                  disposed = true;
+                });
+                return 'value';
               },
-            ],
-          },
-        ),
-      ).toThrow('boom');
+            },
+          ],
+        });
+        c.run(() => {
+          lookup(KEY);
+          throw new Error('boom');
+        });
+      }).toThrow('boom');
 
       expect(disposed).toBe(true);
-    });
-  });
-
-  describe('context type properties', () => {
-    it('createContext should return a Context with dispose()', () => {
-      const ctx = createRootContext();
-      expect(typeof ctx.dispose).toBe('function');
     });
   });
 
@@ -1209,13 +1189,18 @@ describe('Disposal', () => {
         scope: appScope,
       });
 
-      const root = createRootContext({ scopes: [appScope] });
-      const child = createContext({ parent: root });
+      // The owner is not the root, so auto-hoisting (which would land on the root) is told apart from scope placement.
+      const root = createRootContext();
+      const owner = root.child({ scopes: [appScope] });
+      const child = owner.child();
 
-      // Resolving from child should still place the value on root (which owns the scope)
+      // Resolving from child should still place the value on the owner of the scope
       expect(child.get(CONFIG)).toBe('default-config');
-      // Root should now have it cached
-      expect(root.get(CONFIG)).toBe('default-config');
+      // The owner should now have it cached, under the key's scope, not auto-hoisted
+      expect(owner.get(CONFIG)).toBe('default-config');
+      expect(impl(owner).cache.get(CONFIG)?.scope).toBe(appScope);
+      expect(impl(owner).cache.get(CONFIG)?.autoHoisted).toBe(false);
+      expect(impl(root).cache.has(CONFIG)).toBe(false);
     });
 
     it('should place scoped class key on the scoped context', () => {
@@ -1226,13 +1211,19 @@ describe('Disposal', () => {
       }
       setScope(AppService, appScope);
 
-      const root = createRootContext({ scopes: [appScope] });
-      const child = createContext({ parent: root });
+      // The owner is not the root: an auto-hoisted AppService (no dependencies) would land on the root.
+      const root = createRootContext();
+      const owner = root.child({ scopes: [appScope] });
+      const child = owner.child();
 
       const fromChild = child.get(AppService);
       expect(fromChild.name).toBe('app-service');
-      // Same instance from root
-      expect(root.get(AppService)).toBe(fromChild);
+      // Same instance from the owner, stored there under the scope
+      expect(owner.get(AppService)).toBe(fromChild);
+      expect(impl(owner).cache.get(AppService)?.value).toBe(fromChild);
+      expect(impl(owner).cache.get(AppService)?.scope).toBe(appScope);
+      expect(impl(owner).cache.get(AppService)?.autoHoisted).toBe(false);
+      expect(impl(root).cache.has(AppService)).toBe(false);
     });
 
     it('should throw when scope is not found in context chain', () => {
@@ -1249,18 +1240,21 @@ describe('Disposal', () => {
 
     it('should find nearest scope in parent chain', () => {
       const requestScope = createScope('request');
+      let n = 0;
       const REQUEST_ID = createInjectionKey<string>('REQUEST_ID', {
-        factory: () => 'req-1',
+        factory: () => `req-${++n}`,
         scope: requestScope,
       });
 
       const root = createRootContext({ scopes: [requestScope] });
-      const mid = createContext({ parent: root, scopes: [requestScope] });
-      const child = createContext({ parent: mid });
+      const mid = root.child({ scopes: [requestScope] });
+      const child = mid.child();
 
       // Should resolve to mid (nearest scope owner)
-      child.get(REQUEST_ID);
+      expect(child.get(REQUEST_ID)).toBe('req-1');
       expect(mid.get(REQUEST_ID)).toBe('req-1');
+      expect(impl(mid).cache.has(REQUEST_ID)).toBe(true);
+      expect(impl(root).cache.has(REQUEST_ID)).toBe(false);
     });
 
     it('should use setScope to assign scope to a key', () => {
@@ -1269,10 +1263,17 @@ describe('Disposal', () => {
       setScope(KEY, appScope);
 
       const root = createRootContext({ scopes: [appScope] });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       expect(child.get(KEY)).toBe(42);
       expect(root.get(KEY)).toBe(42);
+      // stored at the scope owner under the key's scope, not auto-hoisted
+      expect(impl(root).cache.get(KEY)?.scope).toBe(appScope);
+      expect(impl(root).cache.get(KEY)?.autoHoisted).toBe(false);
+      // a nested owner of the scope stores its own (DESIGN.md §3.1); an unscoped key would hit the root's
+      const owner = root.child({ scopes: [appScope] });
+      expect(owner.child().get(KEY)).toBe(42);
+      expect(impl(owner).cache.get(KEY)?.scope).toBe(appScope);
     });
 
     it('should support setScope after key creation', () => {
@@ -1282,9 +1283,11 @@ describe('Disposal', () => {
 
       const root = createRootContext({ scopes: [appScope] });
       expect(root.get(KEY)).toBe('scoped-value');
+      expect(impl(root).cache.get(KEY)?.scope).toBe(appScope);
+      expect(impl(root).cache.get(KEY)?.autoHoisted).toBe(false);
     });
 
-    it('should support scope on execution context', () => {
+    it('should support scope on a child (was: on an execution context)', () => {
       const requestScope = createScope('request');
       const REQUEST_ID = createInjectionKey<string>('REQUEST_ID', {
         factory: () => 'auto-id',
@@ -1293,12 +1296,10 @@ describe('Disposal', () => {
 
       const root = createRootContext();
 
-      root.runSync(
-        () => {
-          expect(lookup(REQUEST_ID)).toBe('auto-id');
-        },
-        { scopes: [requestScope] },
-      );
+      using c = root.child({ scopes: [requestScope] });
+      c.run(() => {
+        expect(lookup(REQUEST_ID)).toBe('auto-id');
+      });
     });
 
     it('should work with explicit provider on scoped context', () => {
@@ -1309,7 +1310,7 @@ describe('Disposal', () => {
         scopes: [appScope],
         providers: [valueProvider(CONFIG, 'provided-config')],
       });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       expect(child.get(CONFIG)).toBe('provided-config');
     });
@@ -1325,7 +1326,7 @@ describe('Disposal', () => {
       const DB_KEY = createInjectionKey<string>('DB', { factory: () => 'db-val', scope: dbScope });
 
       const root = createRootContext({ scopes: [appScope, dbScope] });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       expect(child.get(APP_KEY)).toBe('app-val');
       expect(child.get(DB_KEY)).toBe('db-val');
@@ -1341,7 +1342,7 @@ describe('Disposal', () => {
       });
 
       const root = createRootContext({ scopes: [appScope] });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       expect(child.get(MAIN)).toBe('main[dep-val]');
     });
@@ -1451,7 +1452,7 @@ describe('Disposal', () => {
       setDependencies(Service, Logger);
 
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       const service = child.get(Service);
       expect(service.logger).toBeInstanceOf(Logger);
@@ -1529,46 +1530,77 @@ describe('Disposal', () => {
         providers: [valueProvider(key, 'original')],
       });
       ctx.get(key);
-      expect(() => ctx.addProvider({ key, provide: () => 'replacement' })).toThrow(
-        /already been resolved/,
-      );
+      expect(() => ctx.addProvider({ key, provide: () => 'replacement' })).toThrow(PlacementError);
+      expect(() => ctx.addProvider({ key, provide: () => 'replacement' })).toThrow(/decided/);
     });
 
-    it('should throw when adding provider at child after key resolved at ancestor', () => {
+    it('allows adding a provider at a fresh child after the key resolved at an ancestor', () => {
+      // FLIP (DESIGN.md §3.4): a fresh child has no decisions, so providing there is allowed. The ancestor's
+      // answer is unchanged; the child answers for itself.
       const key = createInjectionKey<string>('Root');
       const root = createRootContext({
         providers: [valueProvider(key, 'root-value')],
       });
       root.get(key); // resolve at root
-      const child = createContext({ parent: root });
-      expect(() => child.addProvider({ key, provide: () => 'child-value' })).toThrow(
-        /already been resolved/,
-      );
+      const child = root.child();
+      expect(() => child.addProvider({ key, provide: () => 'child-value' })).not.toThrow();
+      expect(child.get(key)).toBe('child-value');
+      expect(root.get(key)).toBe('root-value');
     });
 
-    it('should throw when adding provider at root after auto-scope stored at child', () => {
+    it('allows adding a provider at the root after an auto-scoped value was stored at a child', () => {
+      // FLIP (DESIGN.md §3.4): the root never answered for UserRepo (the child did), so it may provide it,
+      // and root.get(UserRepo) builds a distinct root instance instead of the order-dependent "No provider found".
       class Database {}
       class UserRepo {
         db = inject(Database);
       }
       const root = createRootContext();
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [classProvider(Database)],
       });
-      child.get(UserRepo); // auto-scopes to child, memoizes not-found at root
-      expect(() => root.addProvider({ key: UserRepo, provide: () => new UserRepo() })).toThrow(
-        /already been resolved/,
-      );
+      const atChild = child.get(UserRepo); // auto-scoped to child; the root is not decided
+      expect(() => root.addProvider({ key: UserRepo, provide: () => new UserRepo() })).not.toThrow();
+      const atRoot = root.get(UserRepo);
+      expect(atRoot).not.toBe(atChild);
+      expect(atRoot.db).not.toBe(atChild.db);
+      expect(child.get(UserRepo)).toBe(atChild); // the child's answer is unchanged (I19)
+    });
+
+    it('a scoped key that is not provided marks the whole walk, so a later provider above the scope owner is refused (I19)', () => {
+      const σ = createScope('request');
+      const key = createInjectionKey<string>('ScopedMissing', { scope: σ });
+      const root = createRootContext();
+      const T = root.child({ scopes: [σ] });
+      const R = T.child();
+      expect(R.get(key, { optional: true })).toBeUndefined(); // the provider search walked R..root
+      // A scoped key may be provided at or above its scope owner; doing so now would change R's answer.
+      expect(() => root.addProvider(valueProvider(key, 'late'))).toThrow(PlacementError);
+      expect(() => T.addProvider(valueProvider(key, 'late'))).toThrow(PlacementError);
+      expect(R.get(key, { optional: true })).toBeUndefined(); // unchanged
+    });
+
+    it('classProvider resolves constructor arguments declared with setDependencies, in both forms', () => {
+      const Url = createInjectionKey<string>('Url');
+      class Client {
+        constructor(readonly url: string) {}
+      }
+      setDependencies(Client, Url);
+      const Api = createInjectionKey<Client>('Api');
+      const root = createRootContext({
+        providers: [valueProvider(Url, 'https://x'), classProvider(Client), classProvider(Api, Client)],
+      });
+      expect(root.get(Client).url).toBe('https://x');
+      expect(root.get(Api).url).toBe('https://x');
+      expect(root.get(Api)).not.toBe(root.get(Client)); // two providers, two instances
     });
 
     it('should throw when adding provider after optional lookup returns undefined', () => {
       const key = createInjectionKey<string>('Missing');
       const ctx = createRootContext();
       expect(ctx.get(key, { optional: true })).toBeUndefined();
-      expect(() => ctx.addProvider({ key, provide: () => 'late' })).toThrow(
-        /already been resolved/,
-      );
+      expect(() => ctx.addProvider({ key, provide: () => 'late' })).toThrow(PlacementError);
+      expect(() => ctx.addProvider({ key, provide: () => 'late' })).toThrow(/decided/);
     });
 
     it('should allow addProvider for unrelated keys after other keys resolved', () => {
@@ -1590,8 +1622,7 @@ describe('Disposal', () => {
       });
       root.get(key); // resolve at root
       // New child created with its own provider — this is fine
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [valueProvider(key, 'child-value')],
       });
       expect(child.get(key)).toBe('child-value');
@@ -1610,30 +1641,10 @@ describe('Disposal', () => {
     it('should return same value from child after parent resolves', () => {
       class Service {}
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
       const fromChild = child.get(Service);
       const fromRoot = root.get(Service);
       expect(fromChild).toBe(fromRoot);
-    });
-
-    it('should cache resolutions probabilistically after misses', () => {
-      // Create a deep hierarchy and resolve many keys to trigger caching
-      const keys = Array.from({ length: 20 }, (_, i) => createInjectionKey<number>(`K${i}`));
-      const root = createRootContext({
-        providers: keys.map((key, i) => valueProvider(key, i)),
-      });
-      const child = createContext({ parent: root });
-
-      // Resolve all keys — some will be cached at child via probabilistic memoization
-      for (const key of keys) {
-        const val = child.get(key);
-        expect(typeof val).toBe('number');
-      }
-
-      // Re-resolve — should still return correct values (whether from cache or walk)
-      for (let i = 0; i < keys.length; i++) {
-        expect(child.get(keys[i])).toBe(i);
-      }
     });
   });
 
@@ -1658,11 +1669,13 @@ describe('Disposal', () => {
           factory: () => inject(SELF_KEY),
         });
 
+        // root.create(WRAPPER) is removed: two sibling children each resolve WRAPPER. A SelfScope
+        // dependency pins its value at the requester (DESIGN.md §3.4), so each child builds its own WRAPPER.
         const root = createRootContext();
-        const c1 = root.create(WRAPPER);
-        const c2 = root.create(WRAPPER);
-        expect(c1.value).toBe(1);
-        expect(c2.value).toBe(2);
+        const c1 = root.child().get(WRAPPER);
+        const c2 = root.child().get(WRAPPER);
+        expect(c1).toBe(1);
+        expect(c2).toBe(2);
       });
 
       it('should cache within the same creation', () => {
@@ -1680,32 +1693,36 @@ describe('Disposal', () => {
         });
 
         const root = createRootContext();
-        const result = root.create(WRAPPER);
-        expect(result.value).toBe('1-1');
+        expect(root.child().get(WRAPPER)).toBe('1-1');
       });
 
-      it('should wire disposal to the outer creation context', async () => {
+      it("should wire disposal to the outer value's node", async () => {
         let disposed = false;
         const SELF_KEY = createInjectionKey<string>('SelfKey', {
           factory: () => {
-            inject(RegisterResource)({
-              [Dispose]: () => {
-                disposed = true;
-              },
+            own(() => {
+              disposed = true;
             });
             return 'val';
           },
           scope: SelfScope,
         });
+        let wrapperNode: Context | undefined;
         const WRAPPER = createInjectionKey<string>('Wrapper', {
-          factory: () => inject(SELF_KEY),
+          factory: () => {
+            wrapperNode = inject(ContextKey);
+            return inject(SELF_KEY);
+          },
         });
 
+        // own() in the SelfScope factory lands on the wrapper's node, released when its child closes.
         const root = createRootContext();
-        const created = root.create(WRAPPER);
-        expect(created.value).toBe('val');
+        const c = root.child();
+        expect(c.get(WRAPPER)).toBe('val');
+        expect(impl(wrapperNode!).explicit.size).toBe(1);
+        expect(impl(wrapperNode!).parent).toBe(impl(c));
         expect(disposed).toBe(false);
-        await created.dispose();
+        await c.close();
         expect(disposed).toBe(true);
       });
     });
@@ -1719,8 +1736,8 @@ describe('Disposal', () => {
         });
 
         const root = createRootContext();
-        const child1 = createContext({ parent: root, scopes: [SelfScope] });
-        const child2 = createContext({ parent: root, scopes: [SelfScope] });
+        const child1 = root.child({ scopes: [SelfScope] });
+        const child2 = root.child({ scopes: [SelfScope] });
 
         expect(child1.get(KEY)).toBe(1);
         expect(child2.get(KEY)).toBe(2);
@@ -1737,11 +1754,11 @@ describe('Disposal', () => {
         setScope(KEY, SelfScope);
 
         const root = createRootContext();
-        const child = createContext({ parent: root, scopes: [SelfScope] });
+        const child = root.child({ scopes: [SelfScope] });
 
         expect(child.get(KEY)).toBe(1);
         // Different SelfScope boundary → different instance
-        const child2 = createContext({ parent: root, scopes: [SelfScope] });
+        const child2 = root.child({ scopes: [SelfScope] });
         expect(child2.get(KEY)).toBe(2);
       });
 
@@ -1752,8 +1769,8 @@ describe('Disposal', () => {
         setScope(MyService, SelfScope);
 
         const root = createRootContext();
-        const child1 = createContext({ parent: root, scopes: [SelfScope] });
-        const child2 = createContext({ parent: root, scopes: [SelfScope] });
+        const child1 = root.child({ scopes: [SelfScope] });
+        const child2 = root.child({ scopes: [SelfScope] });
 
         const s1 = child1.get(MyService);
         const s2 = child2.get(MyService);
@@ -1766,10 +1783,8 @@ describe('Disposal', () => {
         let disposed = false;
         const KEY = createInjectionKey<string>('SelfKey', {
           factory: () => {
-            inject(RegisterResource)({
-              [Dispose]: () => {
-                disposed = true;
-              },
+            own(() => {
+              disposed = true;
             });
             return 'val';
           },
@@ -1777,11 +1792,11 @@ describe('Disposal', () => {
         });
 
         const root = createRootContext();
-        const child = createContext({ parent: root, scopes: [SelfScope] });
+        const child = root.child({ scopes: [SelfScope] });
         expect(child.get(KEY)).toBe('val');
         expect(disposed).toBe(false);
 
-        await child.dispose();
+        await child.close();
         expect(disposed).toBe(true);
       });
 
@@ -1793,7 +1808,7 @@ describe('Disposal', () => {
         });
 
         const root = createRootContext({ scopes: [SelfScope] });
-        const child = createContext({ parent: root, scopes: [SelfScope] });
+        const child = root.child({ scopes: [SelfScope] });
 
         expect(child.get(KEY)).toBe(1);
         // Root should get its own instance — child's SelfScope boundary caught it
@@ -1811,10 +1826,10 @@ describe('Disposal', () => {
         scopes: [requestScope],
         providers: [valueProvider(CONFIG, 'root-config', { scope: requestScope })],
       });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
-      // Provider is on root with scope=requestScope, root owns requestScope
-      // Value should be stored on root (the scope owner)
+      // Provider is on root with scope=requestScope, root owns requestScope:
+      // the value is stored on root (the scope owner)
       expect(child.get(CONFIG)).toBe('root-config');
       expect(root.get(CONFIG)).toBe('root-config');
     });
@@ -1829,8 +1844,8 @@ describe('Disposal', () => {
       });
 
       const root = createRootContext({ scopes: [appScope, requestScope] });
-      const mid = createContext({ parent: root, scopes: [requestScope] });
-      const child = createContext({ parent: mid });
+      const mid = root.child({ scopes: [requestScope] });
+      const child = mid.child();
 
       // Provider has scope=requestScope, overriding key's appScope
       mid.addProvider(factoryProvider(KEY, () => 'overridden', { scope: requestScope }));
@@ -1859,14 +1874,15 @@ describe('Disposal', () => {
         providers: [factoryProvider(KEY, () => ++counter, { scope: SelfScope })],
       });
 
-      // SelfScope on provider: each creation gets its own instance
+      // SelfScope on provider: each creation gets its own instance. root.create(WRAPPER) is removed:
+      // two sibling children each resolve WRAPPER, pinned at its requester (DESIGN.md §3.4).
       const WRAPPER = createInjectionKey<number>('Wrapper', {
         factory: () => inject(KEY),
       });
-      const c1 = root.create(WRAPPER);
-      const c2 = root.create(WRAPPER);
-      expect(c1.value).toBe(1);
-      expect(c2.value).toBe(2);
+      const c1 = root.child().get(WRAPPER);
+      const c2 = root.child().get(WRAPPER);
+      expect(c1).toBe(1);
+      expect(c2).toBe(2);
     });
 
     it('should support SelfScope on provider scope (scoped context)', () => {
@@ -1877,8 +1893,8 @@ describe('Disposal', () => {
         providers: [factoryProvider(KEY, () => ++counter, { scope: SelfScope })],
       });
 
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
+      const child1 = root.child({ scopes: [SelfScope] });
+      const child2 = root.child({ scopes: [SelfScope] });
       expect(child1.get(KEY)).toBe(1);
       expect(child2.get(KEY)).toBe(2);
     });
@@ -1908,420 +1924,11 @@ describe('Disposal', () => {
         scopes: [appScope],
         providers: [classProvider(MyService, MyService, { scope: appScope })],
       });
-      const child = createContext({ parent: root });
+      const child = root.child();
 
       const fromChild = child.get(MyService);
       expect(fromChild.name).toBe('service');
       expect(root.get(MyService)).toBe(fromChild); // same instance, stored at root
-    });
-  });
-
-  describe('context.create()', () => {
-    it('should create a value in a child context', () => {
-      const KEY = createInjectionKey<string>('KEY', { factory: () => 'created' });
-
-      const root = createRootContext();
-      const result = root.create(KEY);
-
-      expect(result.value).toBe('created');
-    });
-
-    it('should dispose the child context', async () => {
-      let disposed = false;
-      const KEY = createInjectionKey<string>('KEY', {
-        factory: () => {
-          inject(RegisterResource)({
-            [Dispose]: () => {
-              disposed = true;
-            },
-          });
-          return 'value';
-        },
-      });
-
-      const root = createRootContext();
-      const result = root.create(KEY);
-      expect(result.value).toBe('value');
-      expect(disposed).toBe(false);
-
-      await result.dispose();
-      expect(disposed).toBe(true);
-    });
-
-    it('should support Symbol.asyncDispose', async () => {
-      let disposed = false;
-      const KEY = createInjectionKey<string>('KEY', {
-        factory: () => {
-          inject(RegisterResource)({
-            [Dispose]: () => {
-              disposed = true;
-            },
-          });
-          return 'val';
-        },
-      });
-
-      const root = createRootContext();
-      {
-        await using result = root.create(KEY);
-        expect(result.value).toBe('val');
-      }
-      expect(disposed).toBe(true);
-    });
-
-    it('should reuse existing values from parent', () => {
-      let depCreated = 0;
-      const DEP = createInjectionKey<string>('DEP', {
-        factory: () => {
-          depCreated++;
-          return 'dep-val';
-        },
-      });
-      const MAIN = createInjectionKey<string>('MAIN', {
-        factory: () => `main[${inject(DEP)}]`,
-      });
-
-      const root = createRootContext();
-      // Pre-resolve DEP on root
-      expect(root.get(DEP)).toBe('dep-val');
-      expect(depCreated).toBe(1);
-
-      // create() should reuse the existing DEP, not create a new one
-      const result = root.create(MAIN);
-      expect(result.value).toBe('main[dep-val]');
-      expect(depCreated).toBe(1); // not incremented
-    });
-
-    it('should create independent instances', async () => {
-      let counter = 0;
-      const KEY = createInjectionKey<number>('Counter', { factory: () => ++counter });
-
-      const root = createRootContext();
-      const r1 = root.create(KEY);
-      const r2 = root.create(KEY);
-
-      expect(r1.value).toBe(1);
-      expect(r2.value).toBe(2);
-
-      await r1.dispose();
-      await r2.dispose();
-    });
-
-    it('should not affect parent when child is disposed', async () => {
-      const KEY = createInjectionKey<string>('KEY', { factory: () => 'val' });
-
-      const root = createRootContext();
-      const parentValue = root.get(KEY);
-      expect(parentValue).toBe('val');
-
-      const created = root.create(KEY);
-      expect(created.value).toBe('val'); // fresh instance in child
-
-      await created.dispose();
-
-      // Parent's value should still work
-      expect(root.get(KEY)).toBe('val');
-    });
-
-    it('should auto-hoist deps normally (no child boundary)', async () => {
-      let depDisposed = false;
-      const DEP = createInjectionKey<string>('DEP', {
-        factory: () => {
-          inject(RegisterResource)({
-            [Dispose]: () => {
-              depDisposed = true;
-            },
-          });
-          return 'dep';
-        },
-      });
-      const MAIN = createInjectionKey<string>('MAIN', {
-        factory: () => `main[${inject(DEP)}]`,
-      });
-
-      const root = createRootContext();
-      const result = root.create(MAIN);
-      expect(result.value).toBe('main[dep]');
-
-      // DEP was auto-hoisted to root — not isolated in a child boundary
-      await result.dispose();
-      expect(depDisposed).toBe(false); // DEP still alive on root
-
-      await root.dispose();
-      expect(depDisposed).toBe(true); // DEP disposed with root
-    });
-  });
-
-  describe('create() dep tracking', () => {
-    it('should track deps from create() for auto-hoisting', () => {
-      // DEP lives at `middle`. A factory that calls create(VALUE_KEY)
-      // where VALUE_KEY depends on DEP should auto-hoist to middle (not root).
-      const middleScope = createScope('middle');
-      const DEP = createInjectionKey<string>('DEP', {
-        factory: () => 'dep-val',
-        scope: middleScope,
-      });
-      const OWNER = createInjectionKey<string>('OWNER', {
-        factory: () => {
-          const handle = create(
-            createInjectionKey<string>('Inner', {
-              factory: () => `inner[${inject(DEP)}]`,
-            }),
-          );
-          return `owner[${handle.value}]`;
-        },
-      });
-
-      const root = createRootContext();
-      const middle = createContext({ parent: root, scopes: [middleScope] });
-
-      const val = middle.get(OWNER);
-      expect(val).toBe('owner[inner[dep-val]]');
-
-      // OWNER should be stored at middle (not root) because create()
-      // resolved DEP which lives at middle — the tracker saw it.
-      // Verify by checking that root does NOT have OWNER cached.
-      const _root2child = createContext({ parent: root });
-      // This would resolve OWNER again, getting a different value if root
-      // doesn't have it. But since OWNER has no scope, it auto-hoists.
-      // The key test: middle.get(OWNER) should return the same value.
-      expect(middle.get(OWNER)).toBe('owner[inner[dep-val]]');
-    });
-
-    it('should track deps recursively through nested create()', () => {
-      const appScope = createScope('app');
-      const DEP = createInjectionKey<string>('DEP', {
-        factory: () => 'deep-dep',
-        scope: appScope,
-      });
-      const INNER = createInjectionKey<string>('Inner', {
-        factory: () => inject(DEP),
-      });
-      const MIDDLE = createInjectionKey<string>('Middle', {
-        factory: () => {
-          const result = create(INNER);
-          return `mid[${result.value}]`;
-        },
-      });
-      const OUTER = createInjectionKey<string>('Outer', {
-        factory: () => {
-          const result = create(MIDDLE);
-          return `out[${result.value}]`;
-        },
-      });
-
-      const root = createRootContext();
-      const app = createContext({ parent: root, scopes: [appScope] });
-
-      const val = app.get(OUTER);
-      expect(val).toBe('out[mid[deep-dep]]');
-    });
-  });
-
-  describe('createRefCountedKey', () => {
-    it('should share the same value across multiple consumers', () => {
-      let counter = 0;
-      const WS = createRefCountedKey<number>('WS', {
-        factory: () => ++counter,
-      });
-
-      const root = createRootContext();
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      // Both should get the same underlying value
-      expect(child1.get(WS)).toBe(1);
-      expect(child2.get(WS)).toBe(1);
-      expect(counter).toBe(1); // factory called once
-    });
-
-    it('should dispose when all consumers are disposed', async () => {
-      let disposed = false;
-      const WS = createRefCountedKey<string>('WS', {
-        factory: () => {
-          inject(RegisterResource)({
-            [Dispose]: () => {
-              disposed = true;
-            },
-          });
-          return 'connection';
-        },
-      });
-
-      const root = createRootContext();
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      child1.get(WS);
-      child2.get(WS);
-
-      // Dispose first consumer — value should survive
-      await child1.dispose();
-      expect(disposed).toBe(false);
-
-      // Dispose second consumer — refCount hits 0, value disposed
-      await child2.dispose();
-      await new Promise((r) => setTimeout(r, 10));
-      expect(disposed).toBe(true);
-    });
-
-    it('should scope the holder to the specified scope', () => {
-      const appScope = createScope('app');
-      let counter = 0;
-      const WS = createRefCountedKey<number>('WS', {
-        factory: () => ++counter,
-        scope: appScope,
-      });
-
-      const root = createRootContext({ scopes: [appScope] });
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      // Both share the same value — holder lives at root (scope owner)
-      expect(child1.get(WS)).toBe(1);
-      expect(child2.get(WS)).toBe(1);
-    });
-
-    it('should be transparent to the consumer', () => {
-      const WS = createRefCountedKey<string>('WS', {
-        factory: () => 'ws-value',
-      });
-
-      const root = createRootContext();
-      const child = createContext({ parent: root, scopes: [SelfScope] });
-      // Consumer just calls get() — no knowledge of ref counting
-      expect(child.get(WS)).toBe('ws-value');
-    });
-
-    it('should create separate refs per SelfScope (each consumer gets own ref)', () => {
-      const WS = createRefCountedKey<string>('WS', {
-        factory: () => 'ws',
-      });
-
-      const root = createRootContext();
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      // Each child has its own SelfScope boundary, but they share the underlying value
-      expect(child1.get(WS)).toBe('ws');
-      expect(child2.get(WS)).toBe('ws');
-    });
-
-    it('should recreate after full disposal and new consumer appears', async () => {
-      let counter = 0;
-      const WS = createRefCountedKey<number>('WS', {
-        factory: () => ++counter,
-      });
-
-      const root = createRootContext();
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      expect(child1.get(WS)).toBe(1);
-
-      await child1.dispose();
-      await new Promise((r) => setTimeout(r, 10));
-
-      // New consumer should get a fresh instance
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-      expect(child2.get(WS)).toBe(2);
-
-      await child2.dispose();
-    });
-  });
-
-  describe('refCountedProvider', () => {
-    it('should make an existing key ref-counted via provider', () => {
-      let counter = 0;
-      const KEY = createInjectionKey<number>('MyKey');
-
-      const root = createRootContext({
-        providers: [
-          refCountedProvider(KEY, {
-            factory: () => ++counter,
-          }),
-        ],
-      });
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      expect(child1.get(KEY)).toBe(1);
-      expect(child2.get(KEY)).toBe(1); // shared
-      expect(counter).toBe(1);
-    });
-
-    it('should dispose when all consumers are gone', async () => {
-      let disposed = false;
-      const KEY = createInjectionKey<string>('MyKey');
-
-      const root = createRootContext({
-        providers: [
-          refCountedProvider(KEY, {
-            factory: () => {
-              inject(RegisterResource)({
-                [Dispose]: () => {
-                  disposed = true;
-                },
-              });
-              return 'value';
-            },
-          }),
-        ],
-      });
-
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      child1.get(KEY);
-      child2.get(KEY);
-
-      await child1.dispose();
-      expect(disposed).toBe(false);
-
-      await child2.dispose();
-      await new Promise((r) => setTimeout(r, 10));
-      expect(disposed).toBe(true);
-    });
-
-    it('should respect scope option on provider', () => {
-      const appScope = createScope('app');
-      let counter = 0;
-      const KEY = createInjectionKey<number>('Scoped');
-
-      const root = createRootContext({
-        scopes: [appScope],
-        providers: [
-          refCountedProvider(KEY, {
-            factory: () => ++counter,
-            scope: appScope,
-          }),
-        ],
-      });
-
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      expect(child1.get(KEY)).toBe(1);
-      expect(child2.get(KEY)).toBe(1);
-    });
-
-    it('should use key scope as fallback when provider scope not specified', () => {
-      const appScope = createScope('app');
-      let counter = 0;
-      const KEY = createInjectionKey<number>('FallbackScope', { scope: appScope });
-
-      const root = createRootContext({
-        scopes: [appScope],
-        providers: [
-          refCountedProvider(KEY, {
-            factory: () => ++counter,
-          }),
-        ],
-      });
-
-      const child1 = createContext({ parent: root, scopes: [SelfScope] });
-      const child2 = createContext({ parent: root, scopes: [SelfScope] });
-
-      expect(child1.get(KEY)).toBe(1);
-      expect(child2.get(KEY)).toBe(1);
     });
   });
 
@@ -2331,8 +1938,7 @@ describe('Disposal', () => {
       const root = createRootContext({
         providers: [valueProvider(KEY, 'root')],
       });
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [valueProvider(KEY, 'child')],
       });
 
@@ -2358,15 +1964,14 @@ describe('Disposal', () => {
       expect(() => root.get(KEY, { skipSelf: true })).toThrow(/no parent context/i);
     });
 
-    it('inject with skipSelf during creation resolves from parent provider', async () => {
+    it('inject with skipSelf during creation resolves from parent provider', () => {
       const HttpClient = createInjectionKey<{ name: string }>('HttpClient');
 
       const root = createRootContext({
         providers: [factoryProvider(HttpClient, () => ({ name: 'base' }))],
       });
 
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [
           factoryProvider(HttpClient, () => {
             const parent = inject(HttpClient, { skipSelf: true });
@@ -2379,7 +1984,7 @@ describe('Disposal', () => {
       expect(root.get(HttpClient)).toEqual({ name: 'base' });
     });
 
-    it('inject with skipSelf during creation returns undefined when optional and no parent value', async () => {
+    it('inject with skipSelf during creation returns undefined when optional and no parent value', () => {
       const KEY = createInjectionKey<string>('Optional');
 
       const root = createRootContext({
@@ -2394,21 +1999,22 @@ describe('Disposal', () => {
       expect(root.get(KEY)).toBe('root-default');
     });
 
-    it('inject with skipSelf in execution context skips current context', () => {
+    it('lookup with skipSelf in a runSync skips the current node', () => {
       const KEY = createInjectionKey<string>('Val');
       const root = createRootContext({
         providers: [valueProvider(KEY, 'root')],
       });
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [valueProvider(KEY, 'child')],
       });
 
+      // runSync's node is a child of `child`: skipping it resolves from `child`, past the node's own provider.
       const result = child.runSync(() => {
-        return lookup(KEY, { skipSelf: true });
+        here().addProvider(valueProvider(KEY, 'self'));
+        return { self: lookup(KEY), skipped: lookup(KEY, { skipSelf: true }) };
       });
 
-      expect(result).toBe('child');
+      expect(result).toEqual({ self: 'self', skipped: 'child' });
     });
 
     it('decorator pattern: multiple levels of wrapping', () => {
@@ -2418,8 +2024,7 @@ describe('Disposal', () => {
         providers: [factoryProvider(Service, () => ({ trace: () => 'base' }))],
       });
 
-      const mid = createContext({
-        parent: root,
+      const mid = root.child({
         providers: [
           factoryProvider(Service, () => {
             const parent = inject(Service, { skipSelf: true });
@@ -2428,8 +2033,7 @@ describe('Disposal', () => {
         ],
       });
 
-      const leaf = createContext({
-        parent: mid,
+      const leaf = mid.child({
         providers: [
           factoryProvider(Service, () => {
             const parent = inject(Service, { skipSelf: true });
@@ -2444,207 +2048,247 @@ describe('Disposal', () => {
     });
   });
 
-  describe('resourceProvider', () => {
+  describe('own(v, release) in a factoryProvider (was resourceProvider)', () => {
+    // resourceProvider(k, v, r) → factoryProvider(k, () => own(v, release)); attached values are objects.
     it('should provide the value and register a resource', async () => {
-      const KEY = createInjectionKey<string>('Conn');
+      const KEY = createInjectionKey<{ name: string }>('Conn');
+      const conn = { name: 'my-connection' };
       let disposed = false;
 
       const ctx = createRootContext({
         providers: [
-          resourceProvider(KEY, 'my-connection', {
-            [Dispose]: () => {
+          factoryProvider(KEY, () =>
+            own(conn, () => {
               disposed = true;
-            },
-          }),
+            }),
+          ),
         ],
       });
 
-      expect(ctx.get(KEY)).toBe('my-connection');
+      expect(ctx.get(KEY)).toBe(conn);
       expect(disposed).toBe(false);
 
-      await ctx.dispose();
+      await ctx.close();
       expect(disposed).toBe(true);
     });
 
     it('should dispose resources in reverse registration order', async () => {
-      const A = createInjectionKey<string>('A');
-      const B = createInjectionKey<string>('B');
+      const A = createInjectionKey<{ v: string }>('A');
+      const B = createInjectionKey<{ v: string }>('B');
       const order: string[] = [];
 
       const ctx = createRootContext({
         providers: [
-          resourceProvider(A, 'a', {
-            [Dispose]: () => {
-              order.push('A');
-            },
-          }),
-          resourceProvider(B, 'b', {
-            [Dispose]: () => {
-              order.push('B');
-            },
-          }),
+          factoryProvider(A, () => own({ v: 'a' }, () => void order.push('A'))),
+          factoryProvider(B, () => own({ v: 'b' }, () => void order.push('B'))),
         ],
       });
 
       ctx.get(A);
       ctx.get(B);
-      await ctx.dispose();
+      await ctx.close();
 
       expect(order).toEqual(['B', 'A']);
     });
 
     it('should work with child contexts', async () => {
-      const KEY = createInjectionKey<string>('Lease');
+      const KEY = createInjectionKey<{ v: string }>('Lease');
       let released = false;
 
       const root = createRootContext();
-      const child = createContext({
-        parent: root,
+      const child = root.child({
         providers: [
-          resourceProvider(KEY, 'leased-resource', {
-            [Dispose]: () => {
+          factoryProvider(KEY, () =>
+            own({ v: 'leased-resource' }, () => {
               released = true;
-            },
-          }),
+            }),
+          ),
         ],
       });
 
-      expect(child.get(KEY)).toBe('leased-resource');
-      await child.dispose();
+      expect(child.get(KEY).v).toBe('leased-resource');
+      await child.close();
       expect(released).toBe(true);
     });
 
     it('should support scope option', () => {
-      const KEY = createInjectionKey<string>('Scoped');
+      const KEY = createInjectionKey<{ v: string }>('Scoped');
       const myScope = createScope('test-scope');
 
       const root = createRootContext();
-      const child = createContext({
-        parent: root,
-        providers: [resourceProvider(KEY, 'val', { [Dispose]: () => {} }, { scope: myScope })],
+      const child = root.child({
+        providers: [factoryProvider(KEY, () => own({ v: 'val' }, () => {}), { scope: myScope })],
         scopes: [myScope],
       });
 
-      expect(child.get(KEY)).toBe('val');
+      expect(child.get(KEY).v).toBe('val');
     });
   });
 
-  describe('ContextRef', () => {
-    it('should return a pre-resolved ref for explicitly scoped keys', () => {
+  describe('ContextKey / current() in creation (was ContextRef)', () => {
+    it('is the live value node, placed on the scope owner, for explicitly scoped keys', () => {
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
       }
       setScope(MyService, RootScope);
 
       const root = createRootContext();
       const svc = root.get(MyService);
-      expect(svc.ref.isResolved).toBe(true);
-      expect(svc.ref.context).toBe(root);
+      expect(impl(svc.ctx).kind).toBe('value');
+      expect(svc.ctx.state).toBe('running');
+      expect(impl(svc.ctx).parent).toBe(impl(root));
+      // placed by its scope, not auto-hoisted to the same root
+      expect(impl(root).cache.get(MyService)?.scope).toBe(RootScope);
+      expect(impl(root).cache.get(MyService)?.autoHoisted).toBe(false);
+      expect(impl(root).cache.get(MyService)?.valueNode).toBe(impl(svc.ctx));
     });
 
-    it('should return a pre-resolved ref when provided via a provider', () => {
+    it('is the live value node when provided via a provider', () => {
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
       }
 
       const root = createRootContext({
         providers: [classProvider(MyService, MyService)],
       });
       const svc = root.get(MyService);
-      expect(svc.ref.isResolved).toBe(true);
-      expect(svc.ref.context).toBe(root);
+      expect(svc.ctx.state).toBe('running');
+      expect(impl(svc.ctx).parent).toBe(impl(root));
     });
 
-    it('should return the scoped context, not the requesting context', () => {
+    it('sits under the scoped context, not the requesting context', () => {
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
       }
       setScope(MyService, RootScope);
 
       const root = createRootContext();
-      const child = createContext({ parent: root });
+      const child = root.child();
       const svc = child.get(MyService);
-      expect(svc.ref.context).toBe(root);
+      expect(impl(svc.ctx).parent).toBe(impl(root));
+      expect(impl(root).cache.get(MyService)?.scope).toBe(RootScope);
+      expect(impl(root).cache.get(MyService)?.autoHoisted).toBe(false);
+      // a non-root owner of a scope: auto-hoisting would land on the root instead
+      const appScope = createScope('app');
+      class AppService {
+        ctx = inject(ContextKey);
+      }
+      setScope(AppService, appScope);
+      const owner = root.child({ scopes: [appScope] });
+      const app = owner.child().get(AppService);
+      expect(impl(app.ctx).parent).toBe(impl(owner));
+      expect(impl(owner).cache.get(AppService)?.scope).toBe(appScope);
+      expect(impl(root).cache.has(AppService)).toBe(false);
     });
 
-    it('should be available for auto-hoisted values (resolved after factory)', () => {
+    it('is available for auto-hoisted values (placed after the factory)', () => {
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
       }
 
       const root = createRootContext();
       const svc = root.get(MyService);
-      // After creation completes, the ref is resolved
-      expect(svc.ref.isResolved).toBe(true);
-      expect(svc.ref.context).toBe(root);
+      // After creation completes, the node is placed
+      expect(svc.ctx.state).toBe('running');
+      expect(impl(svc.ctx).parent).toBe(impl(root));
     });
 
-    it('should throw when reading .context during auto-hoisted factory body', () => {
-      let threwDuringCreation = false;
+    it('throws PendingNodeError when used for get() during the auto-hoisted factory body', () => {
+      // FLIP (DESIGN.md §3.3): reading inject(ContextKey) in an auto-hoisted factory is allowed — it is the
+      // pending node — and get() on it throws PendingNodeError (was: ContextRef.context threw).
+
+      const ConfigKey = createInjectionKey<string>('Config', { factory: () => 'hello' });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let caught: unknown;
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
         constructor() {
           try {
-            // Reading .context during factory should throw for auto-hoisted
-            void this.ref.context;
-          } catch {
-            threwDuringCreation = true;
+            // the pending node cannot resolve before placement (DESIGN.md §3.3)
+            this.ctx.get(ConfigKey);
+          } catch (e) {
+            caught = e;
           }
         }
       }
 
       const root = createRootContext();
       const svc = root.get(MyService);
-      expect(threwDuringCreation).toBe(true);
-      // After creation, it's resolved
-      expect(svc.ref.isResolved).toBe(true);
+      expect(caught).toBeInstanceOf(PendingNodeError);
+      // After creation, it's placed
+      expect(svc.ctx.state).toBe('running');
+      expect(svc.ctx.get(ConfigKey)).toBe('hello');
     });
 
-    it('should fire whenResolved callback for auto-hoisted values', () => {
-      let resolvedCtx: unknown;
+    it('a constructor fork runs after placement (was whenResolved)', async () => {
+      let seen: { state: string; parent: unknown } | undefined;
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
         constructor() {
-          this.ref.whenResolved((ctx) => { resolvedCtx = ctx; });
+          const n = here();
+          n.own(
+            n.fork(async () => {
+              seen = { state: this.ctx.state, parent: impl(this.ctx).parent };
+            }),
+          );
         }
       }
 
       const root = createRootContext();
       root.get(MyService);
-      expect(resolvedCtx).toBe(root);
+      expect(seen).toBeUndefined(); // never in the creation frame (I20)
+      await tick();
+      expect(seen).toEqual({ state: 'running', parent: impl(root) });
+      await root.close();
     });
 
-    it('should throw when used with lookup() outside creation', () => {
-      expect(() => lookup(ContextRefKey)).toThrow(/creation/i);
+    it('throws CreationViolationError when read outside creation (DESIGN.md §4.12)', () => {
+      expect(() => inject(ContextKey)).toThrow(CreationViolationError);
+      const root = createRootContext();
+      expect(() => root.get(ContextKey)).toThrow(CreationViolationError);
     });
 
-    it('should throw when used with lookup() inside execution context', () => {
+    it('throws CreationViolationError when looked up inside an execution context (DESIGN.md §4.12)', () => {
       const root = createRootContext();
       root.run(() => {
-        expect(() => lookup(ContextRefKey)).toThrow(/creation/i);
+        expect(() => lookup(ContextKey)).toThrow(CreationViolationError);
       });
     });
 
-    it('should work in factory functions with explicit scope', () => {
-      const MyKey = createInjectionKey<{ ref: unknown }>('MyKey', {
+    it('works in factory functions with explicit scope', () => {
+      const MyKey = createInjectionKey<{ ctx: Context }>('MyKey', {
         scope: RootScope,
-        factory: () => ({ ref: inject(ContextRefKey) }),
+        factory: () => ({ ctx: inject(ContextKey) }),
       });
 
       const root = createRootContext();
       const val = root.get(MyKey);
-      expect((val.ref as any).context).toBe(root);
+      expect(impl(val.ctx).parent).toBe(impl(root));
+      expect(impl(root).cache.get(MyKey)?.scope).toBe(RootScope);
+      expect(impl(root).cache.get(MyKey)?.autoHoisted).toBe(false);
+      // with a non-root owner of the key's scope, the value sits under that owner
+      const appScope = createScope('app');
+      const AppKey = createInjectionKey<{ ctx: Context }>('AppKey', {
+        scope: appScope,
+        factory: () => ({ ctx: inject(ContextKey) }),
+      });
+      const owner = root.child({ scopes: [appScope] });
+      const app = owner.child().get(AppKey);
+      expect(impl(app.ctx).parent).toBe(impl(owner));
+      expect(impl(owner).cache.get(AppKey)?.scope).toBe(appScope);
+      expect(impl(root).cache.has(AppKey)).toBe(false);
     });
 
-    it('should return a functional context (can call get)', () => {
+    it('is a functional context after creation (#ctx.get)', () => {
       const ConfigKey = createInjectionKey<string>('Config', {
         factory: () => 'hello',
       });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
         getConfig() {
-          return this.ref.context.get(ConfigKey);
+          return this.ctx.get(ConfigKey);
         }
       }
       setScope(MyService, RootScope);
@@ -2652,20 +2296,110 @@ describe('Disposal', () => {
       const root = createRootContext();
       const svc = root.get(MyService);
       expect(svc.getConfig()).toBe('hello');
+      expect(svc.getConfig()).toBe('hello');
+      // a late read on a value's node that creates a value is reported, once per key (DESIGN.md §3.5, §4.4)
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toMatch(/late read/);
     });
 
-    it('should work with custom scopes', () => {
+    it('works with custom scopes', () => {
       const myScope = createScope('my-scope');
 
       class MyService {
-        ref = inject(ContextRefKey);
+        ctx = inject(ContextKey);
       }
       setScope(MyService, myScope);
 
       const root = createRootContext();
-      const child = createContext({ parent: root, scopes: [myScope] });
+      const child = root.child({ scopes: [myScope] });
       const svc = child.get(MyService);
-      expect(svc.ref.context).toBe(child);
+      expect(impl(svc.ctx).parent).toBe(impl(child));
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// push-context.test.ts › captureAutoScoped (4), with ctx.run instead of the removed enter/leave pair
+// ---------------------------------------------------------------------------
+
+describe('captureAutoScoped', () => {
+  class AutoScopedService {
+    readonly id = Math.random();
+  }
+
+  it('without capture, auto-scoped values are placed on the parent context', async () => {
+    const suite = createRootContext();
+    const test = suite.child();
+
+    const svc = test.run(() => lookup(AutoScopedService));
+    await test.close();
+
+    // The value was placed on suite — still served there
+    expect(suite.run(() => lookup(AutoScopedService))).toBe(svc);
+    await suite.close();
+  });
+
+  it('with capture, auto-scoped values stay within the boundary', async () => {
+    const suite = createRootContext();
+    const test = suite.child({ captureAutoScoped: true });
+
+    const svc = test.run(() => lookup(AutoScopedService));
+    expect(svc).toBeInstanceOf(AutoScopedService);
+    expect(impl(test).cache.has(AutoScopedService)).toBe(true);
+    expect(impl(suite).cache.has(AutoScopedService)).toBe(false);
+
+    await test.close();
+
+    // FLIP (DESIGN.md §3.3, §3.4): the negative memo at the boundary's parent is gone, so the suite builds a fresh
+    // instance of its own instead of throwing.
+    const fresh = suite.run(() => lookup(AutoScopedService));
+    expect(fresh).toBeInstanceOf(AutoScopedService);
+    expect(fresh).not.toBe(svc);
+    await suite.close();
+  });
+
+  it('each captured context gets a fresh auto-scoped instance', async () => {
+    const suite = createRootContext();
+
+    const test1 = suite.child({ captureAutoScoped: true });
+    const svc1 = test1.run(() => lookup(AutoScopedService));
+    await test1.close();
+
+    const test2 = suite.child({ captureAutoScoped: true });
+    const svc2 = test2.run(() => lookup(AutoScopedService));
+    expect(svc2).not.toBe(svc1); // fresh instance
+    await test2.close();
+
+    await suite.close();
+  });
+
+  it('auto-scoped values with deps on suite providers are captured', async () => {
+    class Database {
+      readonly name = 'test-db';
+    }
+
+    class UserRepo {
+      db = inject(Database);
+    }
+
+    const suite = createRootContext();
+    suite.addProvider(valueProvider(Database, new Database()));
+
+    const test = suite.child({ captureAutoScoped: true });
+    const repo = test.run(() => lookup(UserRepo));
+    expect(repo).toBeInstanceOf(UserRepo);
+    expect(repo.db.name).toBe('test-db');
+    expect(impl(test).cache.has(UserRepo)).toBe(true);
+
+    await test.close();
+
+    // FLIP (DESIGN.md §3.3, §3.4): UserRepo was captured; the suite builds its own instead of throwing.
+    const fresh = suite.run(() => lookup(UserRepo));
+    expect(fresh).not.toBe(repo);
+    // Database is still served (it was explicitly provided at suite level)
+    expect(fresh.db).toBe(repo.db);
+    expect(suite.run(() => lookup(Database)).name).toBe('test-db');
+
+    await suite.close();
   });
 });

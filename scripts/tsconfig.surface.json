@@ -1,0 +1,21 @@
+{
+  // The surface probe compiled against the build output: no `paths`, so 'ramme' is the
+  // package's own name and resolves through package.json "exports" to dist/index.d.ts. rootDir and
+  // outDir are moved off src/ and dist/: under the inherited ones, tsc would map dist/index.d.ts back
+  // to src/index.ts (a self-reference into the project's own outDir) and check the sources again.
+  // Nothing is emitted.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "outDir": "../node_modules/.cache/surface-check",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    // Check every declaration file the probe reaches, as a consumer without skipLibCheck would: a type
+    // stripped by stripInternal but still named by another declaration fails here.
+    "skipLibCheck": false
+  },
+  "files": ["../src/test/surface.check.ts"],
+  "include": []
+}

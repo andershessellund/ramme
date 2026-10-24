@@ -1,45 +1,30 @@
 /**
- * Node.js context storage registration for ramme.
+ * Node.js context storage for ramme (also Bun, Deno and Cloudflare Workers
+ * with `nodejs_compat`).
  *
- * Import this module once in your bootstrap/setup code to enable
- * context tracking across async boundaries via AsyncLocalStorage.
+ * Import this module once at startup. The current node reaches across
+ * `await` only through the platform's async context (law 3); without an
+ * adapter every ambient operation throws `NoCurrentNodeError`.
  *
  * Usage:
- *   import 'ramme/node';             // register ALS storage
- *   import { createContext, inject } from 'ramme'; // everything else
+ *   import 'ramme/node';
+ *   import { createRootContext, task } from 'ramme';
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { registerContextStorage } from './context-storage.js';
-import type { ContextStorage } from './context-storage.js';
-import type { ContextImpl } from './context-impl.js';
+import type { Frame } from './context-storage.js';
 
-const als = new AsyncLocalStorage<ContextImpl[]>();
+const als = new AsyncLocalStorage<Frame>();
 
 /**
- * Sync fallback stack — used when not inside an ALS.run() scope.
- * This covers the initial setup phase before any fiber starts, and
- * contexts pushed via enterSync at the top level.
+ * The context at import, where no variable is set. Source reactions are registered under it,
+ * outside the awaiting body's async context, so a frozen node is collectable (A2).
  */
-const syncStack: ContextImpl[] = [];
+const detached = AsyncLocalStorage.snapshot();
 
-function getStack(): ContextImpl[] {
-  return als.getStore() ?? syncStack;
-}
-
-const nodeStorage: ContextStorage = {
-  current() {
-    const stack = getStack();
-    return stack[stack.length - 1];
-  },
-  enterSync(ctx) {
-    getStack().push(ctx);
-  },
-  leaveSync() {
-    getStack().pop();
-  },
-  runAsync(ctx, fn) {
-    return als.run([ctx], fn);
-  },
-};
-
-registerContextStorage(nodeStorage);
+registerContextStorage({
+  get: () => als.getStore(),
+  run: (frame, fn) => als.run(frame, fn),
+  snapshot: () => AsyncLocalStorage.snapshot(),
+  runDetached: (fn) => detached(fn),
+});
