@@ -1,8 +1,9 @@
 // attempt-settle.test.ts — outcomes as values (DESIGN.md §4.5, §4.8, §4.12, D31). `attempt` is `call`
 // with `result`'s resume step: it starts synchronously, lends the current node (D11, D22), resolves with
 // the child's outcome and consumes its failure on resume (D13); an interrupted `freeze` or `restore` caller
-// freezes on it, so `aborted` describes the child, while an `observe` caller can be handed its own
-// interruption by a `restore` child. `settle` is `all` resolving with outcomes instead of rejecting: as in
+// freezes on it, so `aborted` describes the child, except that a `restore` child also hears an `observe`
+// caller's interruption, or an `observe` ancestor's that a `freeze` caller below it does not, and hands it
+// back as `aborted`. `settle` is `all` resolving with outcomes instead of rejecting: as in
 // `all`, every member is waited for and none is aborted on a sibling's account; its members' failures wait
 // on the group's parent for the caller's resume step, so a frozen caller consumes nothing.
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -258,6 +259,30 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await expect(p).rejects.toBe(err);
     expect(P.outcome).toEqual({ status: 'failure', error: err });
     await expect(root.close()).resolves.toBeUndefined();
+  });
+
+  it('as for call, a stored ctx.attempt first awaited after its receiver completed is handed a failure the receiver has already reported (DESIGN.md §4.5, §4.12)', async () => {
+    const err = new Error('boom');
+    const seen: Record<string, unknown> = {};
+    for (const via of ['attempt', 'call'] as const) {
+      const root = createRootContext();
+      const ctx = root.child({ name: via });
+      const failing = async (): Promise<never> => {
+        await tick();
+        throw err;
+      };
+      const p: Promise<unknown> = via === 'attempt' ? ctx.attempt(failing) : ctx.call(failing); // stored, not awaited
+      await tick(2); // the child has failed; its record waits on ctx
+      ctx.abort(); // nothing left to release: ctx completes inside abort(), surfacing the record
+      expect(impl(ctx).outcome, via).toEqual({ status: 'failure', error: err });
+      try {
+        seen[via] = await p;
+      } catch (e) {
+        seen[via] = { thrown: e };
+      }
+      await expect(root.close(), via).rejects.toBe(err); // reported by the receiver as well
+    }
+    expect(seen).toEqual({ attempt: { status: 'failure', error: err }, call: { thrown: err } });
   });
 
   it('lending: body-shaped use during an unawaited attempt throws UnawaitedCallError naming the child; a second attempt is pointed at settle(); own is allowed (D11)', async () => {
@@ -599,6 +624,41 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
+  it("a frozen caller's members' failures surface from the receiver, not lost: a group on another node runs on after its caller froze, and a member failing then reaches the receiver's completion (I11, D31)", async () => {
+    const t = trace();
+    const err = new Error('member failed after its caller froze');
+    const root = createRootContext();
+    const other = root.child({ name: 'other' });
+    const gate = deferred();
+    let Y!: NodeImpl;
+    let group!: NodeImpl;
+    const y = root.fork(
+      task(async () => {
+        Y = here();
+        const r = await other.settle([
+          task(async () => {
+            group = here().parent!;
+            await gate.promise; // bare: the member outlives the caller's freeze
+            throw err;
+          }),
+        ]);
+        t.push(`resumed with ${r.length} outcomes`);
+      }, link),
+    );
+    await tick();
+    expect(group.parent).toBe(impl(other)); // the group is other's child, not Y's: Y's abort does not reach it
+    y.abort('caller interrupted');
+    expect(Y.frozen).toBe(true);
+    expect(group.state).toBe('running');
+    gate.resolve();
+    await within(group.completion);
+    expect(group.outcome?.status).toBe('success'); // the member's failure is not the group's (D31)
+    await expect(other.close()).rejects.toBe(err); // surfaced once, from the receiver: nobody resumed to consume it
+    expect(Y.outcome).toEqual({ status: 'aborted', reason: 'caller interrupted' });
+    expect(t.log).toEqual([]);
+    await expect(root.close()).resolves.toBeUndefined();
+  });
+
   it("a failure of the group's own (a value provided through opts whose release throws) rejects settle with every failure once, in all's shape: the members' are consumed with it, so a caller that catches it recovers", async () => {
     const K = createInjectionKey<{ v: number }>('K');
     const releaseErr = new Error('release failed');
@@ -646,6 +706,83 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
       expect((s.suppressed as AggregateError).errors, name).toEqual([memberErr]);
     }
     expect(caught['settle, no member failed']).toBe(releaseErr);
+    await expect(root.close()).resolves.toBeUndefined();
+  });
+
+  it("a member whose fork throws (an invalid option on its task) is a failure of the group's own: settle rejects with it over the failures of the members already forked, consumed with it, so a caller that catches it recovers, as with all", async () => {
+    const memberErr = new Error('member failed');
+    const root = createRootContext();
+    // Member 0 fails synchronously in its start microtask, before the group's body exit is handled; member 1's
+    // timeoutMs is refused when its node is built, in the group's body (DESIGN.md §2.1).
+    const members = () => [
+      task(() => {
+        throw memberErr;
+      }),
+      task(async () => 1, { timeoutMs: -1 }),
+      task(async () => 2),
+    ];
+    const caught: Record<string, unknown> = {};
+    let caller!: NodeImpl;
+    const out = await root.call(async () => {
+      caller = here();
+      for (const [name, run] of [
+        ['settle', () => settle(members())],
+        ['all', () => all(members())],
+      ] as const)
+        try {
+          await run();
+        } catch (e) {
+          caught[name] = e;
+        }
+      return 'recovered';
+    });
+    expect(out).toBe('recovered'); // the forked member's failure does not surface past the caller's catch (D31)
+    expect(caller.outcome?.status).toBe('success');
+    expect(caller.unconsumed.size).toBe(0);
+    const s = caught.settle as SuppressedErrorLike;
+    expect(s.name).toBe('SuppressedError');
+    expect(s.error).toBeInstanceOf(TypeError);
+    expect((s.error as Error).message).toMatch(/^timeoutMs must be/);
+    expect(s.suppressed).toBeInstanceOf(AggregateError);
+    expect((s.suppressed as AggregateError).errors).toEqual([memberErr]);
+    expect((s.suppressed as AggregateError).message).toBe('1 of 3 tasks failed');
+    expect((caught.all as SuppressedErrorLike).name).toBe('SuppressedError'); // all hands over both errors too
+    await expect(root.close()).resolves.toBeUndefined();
+  });
+
+  it('a group delivered at birth whose member fork throws still reports the members it forked: a forked member that failed is a failure outcome, one never forked is aborted with the group\'s reason, and nothing surfaces from the receiver', async () => {
+    const memberErr = new Error('observe member failed');
+    const root = createRootContext();
+    const gate = deferred();
+    let F!: NodeImpl;
+    const f = root.fork(
+      task(async () => {
+        F = here();
+        await gate.promise; // bare: F stays running after its delivery
+      }, link),
+    );
+    await tick();
+    f.abort('stop'); // F is delivered but running, so a freeze group forked on it is delivered at birth (DESIGN.md §4.3)
+    expect(F.state).toBe('running');
+    const out = await within(
+      F.settle([
+        task(
+          async () => {
+            await tick(); // an observe member is not delivered at birth and runs on (DESIGN.md §4.3)
+            throw memberErr;
+          },
+          { interrupt: 'observe' },
+        ),
+        task(async () => 1, { timeoutMs: -1 }),
+      ]),
+    ); // top level: nothing freezes, the resume step runs
+    expect(out).toEqual([
+      { status: 'failure', error: memberErr },
+      { status: 'aborted', reason: 'stop' },
+    ]);
+    gate.resolve();
+    await within(F.completion);
+    expect(F.outcome).toEqual({ status: 'aborted', reason: 'stop' }); // the member's failure was delivered, not left on F
     await expect(root.close()).resolves.toBeUndefined();
   });
 

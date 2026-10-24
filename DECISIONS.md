@@ -890,31 +890,39 @@ members' failures attached and consumed, in the shape `all` rejects with.
 `try { await call(t.with({ timeoutMs })) } catch (e) { if (e instanceof
 FiberAbortedError) … else throw e }`: a catch that must rethrow what it did
 not mean to handle, around an `instanceof` test. With the outcome as a
-value, `aborted` is a branch, and for a `freeze` or `restore` caller a
-precise one: its own interruption freezes it (D13) instead of arriving as an
-outcome, so `aborted` describes the child (its `timeoutMs`, its `signal`, an
-explicit abort). An `observe` caller is never frozen, so a `restore` child,
-which hears every delivery on its subscription path (D20), hands it its own
-interruption as `aborted`; such a body sees its interruption by design
-(DESIGN.md §4.3) and checks `signal()` before it falls back. The outcome is
-the one `result` already reports, decided by state (D24), so nothing new is
-classified. `attempt` keeps what `call` has and `result(fork(t))` lacks: the
-body starts synchronously (D22) and the current node is lent (D11), so an
-unawaited `attempt` is caught as an unawaited `call` is. `settle` is the form for several tasks, and the
-structured replacement for `Promise.allSettled`, which is unsupported in
-`freeze` bodies because it consumes a member's failure that a frozen body
-never sees (D13): the group freezes as a whole, and nothing is consumed
-before the caller resumes. The members' failures wait on the group's parent
-because the group completes before its caller resumes: held on the group,
-they would be folded into the group's outcome at its completion, so the
-group would report its members' failures as its own; consumed by the
-group's body, they would be lost whenever the caller froze while the group
-ran on (I11). On the parent they are what a joinable failure is, delivered
-by one resume step or surfaced once from the parent's completion. When the
-group fails on its own account, the resumed caller is still handed them,
-with the group's error: left held on the receiver, they would surface from
-the caller's completion after its `catch` had already handled the
-rejection, which `all` never does.
+value, `aborted` is a branch. For a `freeze` or `restore` caller it
+describes the child (its `timeoutMs`, its `signal`, an explicit abort),
+because the caller's own interruption freezes it (D13) instead of arriving
+as an outcome. A `restore` child (or `settle` member or group) is the
+exception: it hears every delivery on its subscription path (D20), including
+one its caller does not hear, so an `observe` ancestor's interruption, which
+that ancestor does not forward to a `freeze` caller below it, comes back to
+the unfrozen caller as `aborted`, and so does an `observe` caller's own,
+since it is never frozen. The `observe` body sees its interruption by design
+(DESIGN.md §4.3) and checks `signal()` before it falls back; the `freeze`
+caller's `signal()` has not fired, so a deadline fallback that can run below
+an `observe` region tests the reason instead: the child's `timeoutMs`
+delivers a `TimeoutError` `DOMException`, which an ancestor's interruption
+carries only when it was itself a deadline. The outcome is the one `result`
+already reports, decided by state (D24), so nothing new is classified.
+`attempt` keeps what `call` has and `result(fork(t))` lacks: the body starts
+synchronously (D22) and the current node is lent (D11), so an unawaited
+`attempt` is caught as an unawaited `call` is. `settle` is the form for
+several tasks, and the structured replacement for `Promise.allSettled`,
+which is unsupported in `freeze` bodies because it consumes a member's
+failure that a frozen body never sees (D13): the group freezes as a whole,
+and nothing is consumed before the caller resumes. The members' failures
+wait on the group's parent because the group completes before its caller
+resumes: held on the group, they would be folded into the group's outcome at
+its completion, so the group would report its members' failures as its own;
+consumed by the group's body, they would be lost whenever the caller froze
+while the group ran on (I11), which a group on another node (`ctx.settle`)
+does. On the parent they are what a joinable failure is, delivered by one
+resume step or surfaced once from the parent's completion. When the group
+fails on its own account (a member's fork that threw is one), the resumed
+caller is still handed them, with the group's error: left held on the
+receiver, they would surface from the caller's completion after its `catch`
+had already handled the rejection, which `all` never does.
 **Rejected:** `result(fork(t))` as the idiom, which loses the synchronous
 start and the lending; making `call` itself resolve with an outcome, which
 hides every failure by default, so the forgotten check is silent where a
@@ -926,9 +934,11 @@ members' failures on the group, or consuming them in its body (above).
 attempt(t)` with no look at `status` is the failure mode outcomes-as-values
 invite, which is why `call` stays the default and `attempt` is opt-in. A
 lint rule requiring that the result of `attempt` or `settle` be used is a
-follow-up, not yet written. Two more names in tier 1; `attempt` emits
-`join:enter`/`join:leave`, which `call` does not. DESIGN.md §4.5, §4.8,
-§4.12.
+follow-up, not yet written. A `restore` child inside an `observe` region
+can hand a caller that was not interrupted the region's shutdown as
+`aborted`, which only its reason tells apart from the child's deadline. Two
+more names in tier 1; `attempt` emits `join:enter`/`join:leave`, which
+`call` does not. DESIGN.md §4.5, §4.8, §4.12.
 
 ### D15. Pool intake stops at the signal
 

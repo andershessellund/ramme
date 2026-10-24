@@ -188,11 +188,15 @@ if (orders.status === 'failure') log(orders.error);                    // all wo
 explicit abort), the abort of the context it runs in (`ctx.attempt(…)`), or,
 for a `settle` member, `settle`'s own `timeoutMs` or `signal`: a body that
 is itself interrupted stops at `attempt` or `settle` as at `call`. The
-exception is a shutdown-aware body (`interrupt: 'observe'`, DESIGN.md §4.3),
-which is never stopped there and can be handed its own interruption as
-`aborted`; it checks `signal().aborted` before falling back. A failure
-delivered as a value is yours to look at; ignore `status` and the error is
-gone, which is why `call` stays the default.
+exception is a task declared `interrupt: 'restore'` inside a shutdown-aware
+body (`interrupt: 'observe'`, DESIGN.md §4.3), whether that body is the
+caller or encloses it: the body's shutdown reaches the task without stopping
+the caller, and comes back as `aborted`. A shutdown-aware caller sees its
+own shutdown in `signal().aborted`; a caller inside one does not, so a
+deadline fallback there checks that the reason is a `TimeoutError`
+`DOMException`, which is what `timeoutMs` delivers. A failure delivered as a
+value is yours to look at; ignore `status` and the error is gone, which is
+why `call` stays the default.
 
 ## Documentation
 

@@ -134,8 +134,11 @@ export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
 /**
  * `call`, resolving with the child's outcome: its failure is delivered as a value and consumed, never
  * thrown. A `freeze` or `restore` caller that is itself interrupted freezes here as on `call`, so `aborted` is
- * the child's own abort (its `timeoutMs`, its `signal`, an explicit abort); an `observe` caller never freezes,
- * and a `restore` child can hand it its own interruption as `aborted` (DESIGN.md §4.5).
+ * the child's own abort (its `timeoutMs`, its `signal`, an explicit abort). A `restore` child is the exception:
+ * it also hears an `observe` caller's interruption, and an `observe` ancestor's that a `freeze` caller below it
+ * does not, and reports either as `aborted`. The `observe` caller sees its own in `signal().aborted`; the
+ * `freeze` caller's signal has not fired, so a deadline fallback there tests the reason, the `TimeoutError`
+ * `DOMException` that `timeoutMs` delivers (DESIGN.md §4.5).
  */
 export function attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
   return requireBodyShaped('attempt').attempt(t, ...args);

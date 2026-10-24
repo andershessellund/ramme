@@ -175,8 +175,9 @@ export interface Context {
   call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
   /**
    * `call` with the outcome delivered as a value: the child's failure is consumed, never thrown. An interrupted
-   * `freeze` or `restore` caller freezes here as on `call`, so `aborted` describes the child's own abort; an
-   * `observe` caller does not, and a `restore` child can report its interruption as `aborted` (DESIGN.md §4.5).
+   * `freeze` or `restore` caller freezes here as on `call`, so `aborted` describes the child's own abort, unless
+   * the child is `restore`: it also hears an `observe` caller's interruption, and an `observe` ancestor's that a
+   * `freeze` caller below it does not, and reports either as `aborted` (DESIGN.md §4.5).
    */
   attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
   /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>` (DESIGN.md §4.8). */

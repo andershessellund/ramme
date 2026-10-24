@@ -1368,8 +1368,9 @@ export class NodeImpl implements Context {
   /**
    * `call` with `result`'s resume step instead of `join`'s (DESIGN.md §4.5, D31): the outcome as a value, a
    * failure consumed rather than thrown, and the join events on the awaiting body's node. A frozen caller never
-   * resumes, so for a `freeze` or `restore` caller `aborted` describes the child; an `observe` caller is never
-   * frozen, and a `restore` child delivered by its interruption reports that as `aborted`.
+   * resumes, so for a `freeze` or `restore` caller `aborted` describes the child, unless the child is `restore`:
+   * it hears every delivery on its subscription path, so an `observe` caller's interruption, or an `observe`
+   * ancestor's that a `freeze` caller below it never hears, reaches it and comes back as `aborted`.
    */
   attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
     this.assertBodyShaped('attempt');
@@ -1487,7 +1488,9 @@ export class NodeImpl implements Context {
     this.assertBodyShaped('settle');
     const members = tasks.map(asJoinMember);
     const name = opts?.name ?? 'settle';
-    let fibers: NodeImpl[] | undefined; // undefined: the group was aborted before its body ran (DESIGN.md §4.6)
+    // The members forked so far, in task order: none when the group was aborted before its body ran (DESIGN.md
+    // §4.6), and fewer than `members` when a member's fork threw (an invalid option on its task).
+    const fibers: NodeImpl[] = [];
     const group: TaskLike<[], void> = {
       [TASK]: true,
       name,
@@ -1497,40 +1500,36 @@ export class NodeImpl implements Context {
         // Before any member exists: their failures wait on the group's parent for the caller's resume step,
         // not on the group, so the group neither folds them into its own outcome nor consumes them (D13, D31).
         g.memberFailuresTo = g.parent;
-        fibers = members.map((m) => g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
+        // One at a time: a fork that throws leaves the members already running in `fibers`, so the resume step
+        // consumes their failures instead of leaving them on the receiver (I11, D31).
+        for (const m of members) fibers.push(g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
         // One managed await over never-rejecting sources (DESIGN.md §4.8, D13): the group freezes as a whole. No
         // member is aborted on a sibling's account: the group waits for every one.
         await managedFor(Promise.all(fibers.map((f) => f.completion)));
       },
     };
     return this.callTask<Outcome<unknown>[]>('settle', group, [], (g) => () => {
-      // The resume step (D13): every member has completed, since the group waited for its stack.
-      const ms = fibers;
-      if (g.outcome!.status === 'failure') {
-        // The group's own failure, never a member's. The caller is resumed, so it is handed every failure once,
-        // as `all` does: the members' are consumed with the group's, not left on the receiver to surface past the
-        // caller's catch (DESIGN.md §4.8, D31).
-        const errors: unknown[] = [];
-        for (const f of ms ?? [])
-          if (f.outcome!.status === 'failure') {
-            f.consumeFailure();
-            errors.push(f.outcome!.error);
-          }
+      // The resume step (D13): every forked member has completed, since the group waited for its stack. The
+      // caller is resumed, so every member failure is consumed here, whatever the group's outcome.
+      for (const f of fibers) f.consumeFailure();
+      const go = g.outcome!;
+      if (go.status === 'failure') {
+        // The group's own failure, never a member's. It is handed every failure once, as `all` does: the members'
+        // with the group's, not left on the receiver to surface past the caller's catch (DESIGN.md §4.8, D31).
+        const errors = fibers.flatMap((f) => (f.outcome!.status === 'failure' ? [f.outcome!.error] : []));
         if (errors.length === 0) return take<never>(g);
         g.consumeFailure();
         throw new SuppressedErrorCtor(
-          g.outcome!.error,
-          new AggregateError(errors, `${errors.length} of ${ms!.length} tasks failed`),
+          go.error,
+          new AggregateError(errors, `${errors.length} of ${members.length} tasks failed`),
           'settle() failed after its tasks failed',
         ); // the group's error over the members', in the shape `all` rejects with (DESIGN.md §4.12)
       }
-      if (ms === undefined) {
-        // Aborted before its body ran: no member was forked, and each reports the group's abort.
-        const reason = (g.outcome as { reason: unknown }).reason;
-        return members.map(() => ({ status: 'aborted', reason }) as const);
-      }
-      for (const f of ms) f.consumeFailure(); // delivered as values: the caller's now (DESIGN.md §4.12)
-      return ms.map((f) => f.outcome!);
+      // A member the group never forked reports the group's abort: every member when the group was aborted
+      // before its body ran, the rest after a fork that threw when the group was delivered at birth (DESIGN.md §4.3).
+      const reason = go.status === 'aborted' ? go.reason : undefined;
+      // Delivered as values: the caller's now (DESIGN.md §4.12).
+      return members.map((_, i): Outcome<unknown> => (i < fibers.length ? fibers[i].outcome! : { status: 'aborted', reason }));
     }) as unknown as Promise<SettleResult<T>>;
   }
 

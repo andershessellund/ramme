@@ -671,21 +671,28 @@ plus `join`. `attempt(t, …args)`, `ctx.attempt(t, …args)` and
 `t.attempt(…args)` make the child `call` makes, start it synchronously and
 lend the current node until it completes (§4.6, §4.9), and resolve with its
 `Outcome<T>` instead of its value: a `failure` is delivered as a value and
-consumed on resume, never thrown, and surfaces nowhere else. As for `call`,
-the child runs as a `'join'` fiber whatever its task's `onFailure`. The await
+consumed on resume, never thrown. As for `call`, the child runs as a
+`'join'` fiber whatever its task's `onFailure`, and a caller that first
+awaits a stored `attempt` after the receiver completed (a `ctx.attempt`, or
+top level) is handed a failure the receiver has already reported. The await
 is managed: a `freeze` or `restore` caller that is itself interrupted
-freezes on it as on `call` and never sees an outcome. So `aborted` reports
-the child's own delivery: its `timeoutMs` or `signal`, an explicit abort of
-it, or the abort of a receiver that is not the awaiting body. The exception
-is a `restore` child, which hears every delivery on its subscription path
-(§4.3): an `observe` caller is never frozen, so its own interruption reaches
-such a child and comes back as `aborted` with the caller's reason, and so
-does an `observe` ancestor's, which a `freeze` caller below it does not
-hear. An `observe` body that falls back on `aborted` checks
-`signal().aborted` first. `attempt` emits `join:enter` and `join:leave` on
-the awaiting body's node, as `result` does (§5). It is the shape of a
-deadline with a fallback, where a real failure is rethrown, as the `catch`
-it replaces would:
+freezes on it as on `call` and never sees an outcome; it consumes nothing,
+and the failure surfaces from the receiver's completion instead (§4.12). So
+`aborted` reports the child's own delivery: its `timeoutMs` or `signal`, an
+explicit abort of it, or the abort of a receiver that is not the awaiting
+body. The exception is a `restore` child, which hears every delivery on its
+subscription path (§4.3): an `observe` caller is never frozen, so its own
+interruption reaches such a child and comes back as `aborted` with the
+caller's reason, and so does an `observe` ancestor's, which a `freeze`
+caller below it does not hear. An `observe` body that falls back on
+`aborted` checks `signal().aborted` first; a `freeze` body below an
+`observe` ancestor, whose `signal()` has not fired, tells the child's
+deadline by its reason, the `TimeoutError` `DOMException` that `timeoutMs`
+delivers (an ancestor's interruption carries one only when it was itself a
+deadline). `attempt` emits `join:enter` and `join:leave` on the awaiting
+body's node, as `result` does (§5). It is the shape of a deadline with a
+fallback, where a real failure is rethrown, as the `catch` it replaces
+would:
 
 ```ts
 const r = await attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
@@ -778,16 +785,18 @@ the failures surface from the receiver's completion (§4.12). When the group
 itself is delivered (its own `timeoutMs` or `signal`), it forwards to the
 members still running as any node does (§4.1): a `freeze` or `restore`
 member's outcome is then `aborted`, and an `observe` member's is what its
-body settles with (§4.3). When the group was aborted before its body ran,
-no member runs and every outcome is `aborted` with the group's reason.
-Either way the tuple resolves: the caller is alive. A member's `aborted` is
-thus its own delivery or the group's, or, as for `attempt` (§4.5), an
-`observe` caller's or ancestor's interruption reaching a `restore` member or
-group. `settle` rejects only with a failure of the group's own, such as a
-value provided through `opts.providers` whose release threw, and then hands
-the resumed caller every failure once, in the shape `all` rejects with: the
-group's error alone, or a `SuppressedError` of it over an `AggregateError`
-of the members' failures, which are consumed with it.
+body settles with (§4.3). A member the group never forked reports `aborted`
+with the group's reason: every member, when the group was aborted before its
+body ran. Either way the tuple resolves: the caller is alive. A member's
+`aborted` is thus its own delivery or the group's, or, as for `attempt`
+(§4.5), an `observe` caller's or ancestor's interruption reaching a
+`restore` member or group. `settle` rejects only with a failure of the
+group's own, such as a value provided through `opts.providers` whose release
+threw, or a member's fork that threw (an invalid option on its task, refused
+when its node is built), and then hands the resumed caller every failure
+once, in the shape `all` rejects with: the group's error alone, or a
+`SuppressedError` of it over an `AggregateError` of the failures of the
+members it had forked, which are consumed with it.
 
 ### 4.9 Lending: unawaited calls are detected (D11)
 
