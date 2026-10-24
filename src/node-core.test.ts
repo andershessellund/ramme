@@ -25,6 +25,7 @@ import {
   NodeCompletedError,
   NotOwnedError,
   OwnerInterrupt,
+  PendingNodeError,
 } from './resource.js';
 import { RootScope } from './scope.js';
 import { deferred, events, here, impl, micro, tick, trace } from './test/util.js';
@@ -1675,5 +1676,99 @@ describe('NodeTopic receivers are sinks (DESIGN.md §4.7, §5)', () => {
     const reported = errors.mock.calls.map((c) => c[1]);
     expect(reported).toContain(rejected);
     expect(reported).toContain(thrown);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `parent` (DESIGN.md §2.1, D33). Value nodes and the unit-of-work idiom are in parent.test.ts.
+describe('parent (DESIGN.md §2.1, D33)', () => {
+  it("a root's parent is undefined", async () => {
+    const app = createRootContext();
+    expect(app.parent).toBeUndefined();
+    await app.close();
+  });
+
+  it('child, fork, call and pool children, and a pool’s forks, have the node they were made on as parent', async () => {
+    const app = createRootContext();
+    const c = app.child();
+    expect(c.parent).toBe(app);
+    expect(c.child().parent).toBe(c);
+    const p = app.pool({ name: 'p', onFailure: () => {} });
+    expect(p.parent).toBe(app);
+    const pf = p.fork(async () => {});
+    expect(pf.parent).toBe(p);
+    const seen: { fork?: unknown; forkBody?: unknown; call?: unknown; me?: Context } = {};
+    await app.call(async () => {
+      const me = here() as Context;
+      seen.me = me;
+      const f = here().fork(async () => {
+        seen.forkBody = here().parent; // a body reads its own node's parent the same way
+      });
+      seen.fork = f.parent;
+      await here().call(async () => {
+        seen.call = here().parent;
+      });
+      await here().join(f);
+    });
+    expect(seen.fork).toBe(seen.me);
+    expect(seen.forkBody).toBe(seen.me);
+    expect(seen.call).toBe(seen.me);
+    expect(seen.me!.parent).toBe(app); // app.call's own child
+    await app.close();
+  });
+
+  it('inside a release fiber, current().parent is the owner', async () => {
+    const app = createRootContext();
+    const N = app.child({ name: 'N' });
+    let seen: { kind: string; parent: unknown } | undefined;
+    N.own(() => {
+      const rf = here();
+      seen = { kind: rf.kind, parent: rf.parent };
+    });
+    await N.close();
+    expect(seen).toEqual({ kind: 'release', parent: N });
+    await app.close();
+  });
+
+  it("a pending value node refuses parent with PendingNodeError, as it refuses get and addProvider (DESIGN.md §3.3)", async () => {
+    const app = createRootContext();
+    let refused: unknown;
+    let pendingState: string | undefined;
+    const K = createInjectionKey<object>('K', {
+      factory: () => {
+        const n = here(); // materialises the auto-hoisted value's node: pending until placement
+        pendingState = n.state;
+        try {
+          void n.parent;
+        } catch (e) {
+          refused = e;
+        }
+        return { n };
+      },
+    });
+    const v = app.get(K) as { n: Context };
+    expect(pendingState).toBe('pending');
+    expect(refused).toBeInstanceOf(PendingNodeError);
+    expect(v.n.parent).toBe(app); // placed: the storage node
+    await app.close();
+  });
+
+  it('parent is readable after completion: the tree shape stays', async () => {
+    const app = createRootContext();
+    const c = app.child();
+    let f!: Fiber<unknown>;
+    await app.call(async () => {
+      f = here().fork(async () => 1);
+      await here().join(f);
+    });
+    c.abort();
+    expect(c.state).toBe('complete');
+    expect(c.parent).toBe(app);
+    expect(f.state).toBe('complete');
+    expect(f.parent?.parent).toBe(app);
+    await app.close();
+    expect(app.state).toBe('complete');
+    expect(app.parent).toBeUndefined();
+    expect(c.parent).toBe(app);
   });
 });

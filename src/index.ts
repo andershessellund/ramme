@@ -43,6 +43,7 @@ export {
   result,
   interrupted,
   never,
+  sleep,
   managed,
   runSync,
 } from './ambient.js';

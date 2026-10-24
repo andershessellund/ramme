@@ -227,7 +227,7 @@ class CreationStateImpl implements CreationState {
       // DESIGN.md §3.4: "my parent's answer" is relative to the requester, so an auto-hoisted value that reads it is
       // pinned there: placed at R and never served to another requester, whose parent may answer otherwise.
       this.tracker?.pin(this.requester);
-      const base = this.base.parent;
+      const base = this.base.up;
       if (base === undefined) {
         this.tracker?.track(key, { resolved: false });
         return undefined; // the caller turns this into the optional/throw decision
@@ -310,7 +310,7 @@ function runCreation<R>(cs: CreationState, produce: () => R): R {
  * progress in the same tree, not reached through its own frame chain, is a cycle, wherever the release sits.
  */
 function assertNotReentered(cs: CreationState, viaChain: boolean): void {
-  for (let c: NodeImpl | undefined = cs.requester; c; c = c.parent)
+  for (let c: NodeImpl | undefined = cs.requester; c; c = c.up)
     if (c.failedCreation === cs.key)
       throw new Error(
         `Circular dependency detected: ${chain(cs)} re-enters the failed creation of ${keyName(cs.key)} at ${describeNode(c)} ` +
@@ -347,7 +347,7 @@ function abandonCreation(cs: CreationState, error: unknown): void {
 function refuseUnownedJoinForks(cs: CreationState): void {
   for (const f of cs.nodeIfCreated?.creationForks ?? []) {
     if (f.state === 'complete' || f.body === undefined) continue; // settled at birth: nothing left to join
-    const p = f.parent!;
+    const p = f.up!;
     if (f.subscribed && f.body.destination === 'join' && !p.hasBody && p.kind !== 'pool')
       throw new TypeError(
         `fork(${f.name ?? 'anonymous'}) in the constructor of ${keyName(cs.key)} has the default 'join' destination ` +
@@ -391,7 +391,7 @@ function defaultProvider<T>(key: InjectionKey<T>): Provider<T> {
 /** Mark `keys` decided on every context from `from` up to and including `toInclusive` (DESIGN.md §3.4). */
 function markDecided(from: NodeImpl, toInclusive: NodeImpl, keys: Iterable<InjectionKey<unknown>>): void {
   const ks = [...keys];
-  for (let c: NodeImpl | undefined = from; c; c = c.parent) {
+  for (let c: NodeImpl | undefined = from; c; c = c.up) {
     for (const k of ks) c.decided.add(k);
     if (c === toInclusive) break;
   }
@@ -399,7 +399,7 @@ function markDecided(from: NodeImpl, toInclusive: NodeImpl, keys: Iterable<Injec
 
 /** The first provider for `key` from `C` upward. */
 function providerFrom<T>(C: NodeImpl, key: InjectionKey<T>): Provider<T> | undefined {
-  for (let c: NodeImpl | undefined = C; c; c = c.parent) {
+  for (let c: NodeImpl | undefined = C; c; c = c.up) {
     const p = c.providers?.get(key);
     if (p !== undefined) return p as Provider<T>;
   }
@@ -422,7 +422,7 @@ function effectiveScope(S: NodeImpl, d: InjectionKey<unknown>): Scope | undefine
  */
 function shadowBetween(R: NodeImpl, S: NodeImpl, deps: ReadonlySet<InjectionKey<unknown>>): boolean {
   let scopes: Map<InjectionKey<unknown>, Scope | undefined> | undefined;
-  for (let C = R; C !== S; C = C.parent!) {
+  for (let C = R; C !== S; C = C.up!) {
     if (C.providers !== undefined) for (const d of deps) if (C.providers.has(d)) return true;
     if (C.scopeSet !== undefined)
       for (const d of deps) {
@@ -463,7 +463,7 @@ function assertLive(hit: CacheEntry, key: InjectionKey<unknown>): void {
 
 /** Resolve `key` for requester `R`: the walk `NodeImpl.get` and `inject` share. */
 export function resolveFrom<T>(R: NodeImpl, key: InjectionKey<T>): ResolveResult<T> {
-  for (let C: NodeImpl | undefined = R; C; C = C.parent) {
+  for (let C: NodeImpl | undefined = R; C; C = C.up) {
     if (C.state === 'pending')
       throw new PendingNodeError(
         `resolution of ${keyName(key)} reached pending node ${describeNode(C)}: a value's node cannot resolve before placement`,
@@ -725,7 +725,7 @@ function scopedPlacementError(C: NodeImpl, p: Provider<unknown>, T: NodeImpl): P
 
 /** The nearest owner of `scope` from `c` upward, continuing at `S` from the pending node `n`, which has no parent yet. */
 function scopeOwnerVia(c: NodeImpl, scope: Scope, n: NodeImpl, S: NodeImpl): NodeImpl | undefined {
-  for (let x: NodeImpl | undefined = c; x !== undefined; x = x === n ? S : x.parent) if (x.scopeSet?.has(scope)) return x;
+  for (let x: NodeImpl | undefined = c; x !== undefined; x = x === n ? S : x.up) if (x.scopeSet?.has(scope)) return x;
   return undefined;
 }
 

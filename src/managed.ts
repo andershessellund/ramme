@@ -32,6 +32,13 @@
 // A failure handler is no body: every await made in its frame is
 // untargeted, whichever node made the wrapper, and is delivered when the
 // source settles (DESIGN.md §4.7).
+//
+// `sleep(ms)` is the managed await over a timer (DESIGN.md §4.2, D34). Its
+// target's delivery clears the timer, whether the sleep is awaited or only
+// stored, so no timer outlives an interruption; a target already applied
+// gets `never()`'s frozen await and no timer at all. A failure handler's
+// await of such a sleep waits on a timer of its own, to the same deadline,
+// so the delivery that clears the body's timer does not strand the handler.
 // ---------------------------------------------------------------------------
 
 import { NO_NODE, captureContext, currentFrame, hasStorage, peekCurrentNode, runDetached, runInFrame } from './context-storage.js';
@@ -157,7 +164,7 @@ function checkAwaiter(t: FreezeTarget): void {
   reportedForeign.add(t);
   console.warn(
     `ramme: a managed promise created in the body of ${describeTarget(t)} is awaited by ${describeTarget(cur)}. ` +
-      'Await a managed promise (join, result, call, managed(p), never(), interrupted(), close(), release(x)) only in the body that created it: ' +
+      'Await a managed promise (join, result, call, managed(p), never(), sleep(ms), interrupted(), close(), release(x)) only in the body that created it: ' +
       `a delivery to its creator cuts this await without freezing ${describeTarget(cur)}, which then never resumes, ` +
       'and counts the creator frozen although it is not suspended on it.',
   );
@@ -254,6 +261,11 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
   #watch: AwaitWatch | undefined;
   /** A cut-only `interrupted()`'s delivery source, read only by a failure handler's await (DESIGN.md §4.7). */
   #signalSource: Promise<S> | undefined = undefined;
+  /**
+   * A targeted `sleep(ms)`'s deadline (`Date.now()` based) and duration, read only by a failure handler's await,
+   * which waits on a timer of its own (DESIGN.md §4.7, D34). Two numbers, so a cut keeps them: nothing of the body.
+   */
+  #sleep: { readonly end: number; readonly ms: number } | undefined = undefined;
   readonly #cells: Cell[] = [];
   #cut = false;
   /** The creating body was counted frozen on this wrapper (a cut, or `then` after delivery). */
@@ -279,6 +291,16 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
   static cutOnlySignal<S>(target: FreezeTarget, source: Promise<S>): ManagedPromise<S, S> {
     const mp = new ManagedPromise<S, S>(target, undefined);
     mp.#signalSource = source;
+    return mp;
+  }
+
+  /**
+   * `sleep(ms)` with a freeze target (D34): `source` is the target's timer, which its delivery clears, or
+   * `undefined` when the target was already applied and no timer was armed (cut-only, as `never()`).
+   */
+  static sleep(target: FreezeTarget, source: Promise<void> | undefined, ms: number): ManagedPromise<void, void> {
+    const mp = new ManagedPromise<void, void>(target, source);
+    mp.#sleep = { end: Date.now() + ms, ms };
     return mp;
   }
 
@@ -340,7 +362,9 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
    * parent waits for it, so the await is untargeted whatever the wrapper's target: it arms no cut, takes
    * neither the applied path nor the cut-only one, and is delivered when the source settles. Its cell is
    * its own and never cut, so a delivery that cuts the creating body's await of the same wrapper leaves
-   * it. An await on a node's completion is reported to the run first.
+   * it. An await on a node's completion is reported to the run first. A targeted sleep's timer is the
+   * creating body's, which its delivery clears (D34), so the handler waits on a timer of its own, to the
+   * same deadline, whether the body's is armed, cleared or was never armed (the applied path).
    */
   thenAsHandler<R1 = T, R2 = never>(
     run: HandlerRun,
@@ -349,7 +373,8 @@ export class ManagedPromise<S, T = S> extends Promise<T> {
   ): Promise<R1 | R2> {
     const waitsFor = this.#waitsFor;
     if (waitsFor !== undefined) run.awaits(waitsFor);
-    const src = this.#source ?? this.#signalSource;
+    const sl = this.#sleep;
+    const src = sl !== undefined ? (timerUntil(sl.end, sl.ms) as Promise<unknown> as Promise<S>) : (this.#source ?? this.#signalSource);
     if (src === undefined) {
       // never(), or a wrapper the creating body was frozen on: its source and deliver step are gone (A2).
       if (this.#spent) warnSpentInHandler();
@@ -478,6 +503,53 @@ export function thenAsHandler(
 export function managedNever(): Promise<never> {
   const t = freezeTarget();
   return t !== undefined ? new ManagedPromise<never, never>(t, undefined) : neverPromise();
+}
+
+/** Run `fn` under `NO_NODE` (DESIGN.md §6): a timer ramme arms carries no node. */
+function outsideFrames<R>(fn: () => R): R {
+  return hasStorage() ? runInFrame(NO_NODE, fn) : fn();
+}
+
+/**
+ * The `sleep(ms)` shape (DESIGN.md §4.2, D34); `ms` is already checked. The freeze target is decided now, as for
+ * every managed await. A target already applied (a body running plain code after delivery, a fork born delivered)
+ * gets `never()`'s frozen await, and no timer is armed. Otherwise the timer is armed outside every frame and is not
+ * unref'd: a sleep keeps the process alive like any timer, so a top-level `await app.sleep(n)` resolves. With a
+ * target, a clear-only entry in its `onApplied` (it never counts the body frozen; the awaiter's own cut does) clears
+ * the timer at the target's delivery, awaited or only stored, and the timer removes that entry when it fires, so a
+ * long-lived node accumulates nothing (A2). A failure handler that awaits a targeted sleep waits on a timer of its
+ * own to the same deadline (`thenAsHandler`), which that delivery does not clear. Without a target (an `observe`
+ * body, a release fiber, a failure handler, a `run` frame on a bodiless node, top level) the sleep runs its full
+ * duration.
+ */
+export function managedSleep(ms: number): Promise<void> {
+  const t = freezeTarget();
+  if (t !== undefined && t.applied) return ManagedPromise.sleep(t, undefined, ms);
+  const { promise, resolve } = Promise.withResolvers<void>();
+  if (t === undefined) {
+    outsideFrames(() => setTimeout(resolve, ms));
+    return new ManagedPromise<void, void>(undefined, promise);
+  }
+  const clear = (): void => clearTimeout(timer);
+  const timer = outsideFrames(() =>
+    setTimeout(() => {
+      t.onApplied.delete(clear);
+      resolve();
+    }, ms),
+  );
+  t.onApplied.add(clear);
+  return ManagedPromise.sleep(t, promise, ms);
+}
+
+/**
+ * A failure handler's own wait for a targeted sleep (DESIGN.md §4.7, D34): resolves at `end`, and after at most `ms`
+ * however the wall clock moves. Armed outside every frame and not unref'd, like the sleep's own timer; nothing
+ * clears it. A module function, so the timer's closure shares no context with a target (A2).
+ */
+function timerUntil(end: number, ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  outsideFrames(() => setTimeout(resolve, Math.min(ms, Math.max(0, end - Date.now()))));
+  return promise;
 }
 
 /**

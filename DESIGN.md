@@ -72,8 +72,8 @@ package.json names exactly those files). One of them is required (§6, D9′).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()` | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
-| `inject` in constructors; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
+| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `signal()`, `sleep` | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
 ---
@@ -95,6 +95,7 @@ values that resolution placed on it; a state; and an outcome.
 | `state` | `pending` → `running` → `settling` → `releasing` → `complete` (`pending` only for a DI value's node before placement) |
 | `signal` | fires when the node is delivered (§4.1) |
 | `outcome` | `undefined` until settling, then `success` / `failure` / `aborted` (§4.12) |
+| `parent` | the resolution parent: `undefined` on a root (and on a value's node released unowned, §3.3); a value's storage node (§3.3); a release fiber's owner (§2.4); the node a `fork`, `call`, `child` or pool was made on. Readable in every state but `pending`, after completion included (tree shape does not change); `PendingNodeError` on a pending value node (§3.3; D33) |
 | `scopes` | the scopes this node carries (read-only) |
 
 Options (`NodeOptions`): `name`, `providers`, `scopes`, `interrupt`
@@ -248,6 +249,84 @@ const tx = own(await db.begin(), (tx) =>
 Released early (`release(tx)`) or at a successful completion it commits;
 under `aborted`/`failure` it rolls back.
 
+**The same as a DI service (D33).** A unit of work that a request's code
+shares is a value declared per request (§3.1). Its entries are on its own
+node, which settles `aborted` when its owner's turn aborts it (§2.4),
+whatever the request did, so that node's outcome answers the wrong
+question; its release reads the outcome of the node storing it, its
+`parent`:
+
+```ts
+// The pool hands out a lease synchronously and attaches it to `owner` before returning (below):
+//   acquire(owner: Context = current()): Lease   // takes an idle connection or throws; a factory cannot await (D26)
+export class UnitOfWork {
+  static readonly scope = RequestScope;
+  readonly #node = current();                     // this value's node; declared placement, so #node.parent is already the request node
+  readonly #lease = inject(DbPool).acquire();     // owned by this value's node; released after the release below (LIFO)
+  constructor() {
+    own(this, () => {
+      const o = this.#node.parent!.outcome;       // the request's outcome: fixed before its provided stack is released
+      if (o === undefined) return this.#node.signal.aborted ? this.rollback() : this.commit();   // done(), or this node aborted early (G1)
+      return o.status === 'success' ? this.commit() : this.rollback();
+    });
+  }
+  /** Commit now, while the request still runs. */
+  done(): Promise<void> { return this.#node.release(this); }
+  query(sql: string) { return this.#lease.conn.query(sql, signal()); }
+  async commit(): Promise<void> { … }
+  async rollback(): Promise<void> { … }
+}
+```
+
+*Precondition.* The node that carries `RequestScope` must be the request's
+fiber, so that its outcome is the request's result:
+`task(async (req) => …, { scopes: [RequestScope] })`, or, for an existing
+task `handle`, `fork(handle.with({ scopes: [RequestScope], … }))`. A bodiless
+`child({ scopes: [RequestScope] })` reports how it was ended, not how its
+work ended: `success` on `close()`, `aborted` on `abort()` (§4.12). Under
+`await using`, whose `[Symbol.asyncDispose]()` aborts first (§2.7), every
+unit of work on it then rolls back; after `close()` every one commits, even
+when a `call` on the node failed and the error was caught. The idiom does
+not apply to such a node.
+
+*`acquire()` is synchronous.* It hands out a lease and attaches it to the
+current node, the value's node. The producer below returns
+`Promise<Lease>`, which a field initializer cannot await (D26), so the
+idiom as shown, and its LIFO order, need the synchronous form. An
+asynchronous variant takes the lease at first use with `this.#node` as its
+owner and registers the `own(this, …)` entry after it, so that LIFO still
+commits before the connection is returned. `commit` and `rollback` return
+`Promise<void>`, since `Release<T>` is `(value: T) => void | Promise<void>`.
+
+*What the release sees.* `o === undefined` means the entry is released
+while the request still runs, in one of two ways. Either it is released
+without a signal: through `uow.done()` (`#node.release(uow)`), or through
+`close()` or `releaseAll()` on the kept `current()`, none of which aborts
+the value's node, so the unit of work commits (a free `release(uow)` from
+the request body throws `NotOwnedError`, C7: the entry is on the value's
+node, not the request's). Or the value's own node was aborted first (G1: an
+owned or `'link'` fiber forked on it failed, or `abort()`, or a `Symbol`
+dispose method, which aborts first (§2.7), was called through a kept
+`current()`), whose signal has then fired, so it rolls back. Only such an
+abort makes the early branch roll back: a cancel written as
+`#node.close()` commits. In every other case the request node's outcome is
+fixed at settling, and its provided
+stack is released after its explicit stack (§2.4, §4.12): a value's release
+sees the outcome of the node storing it as decided at settling, unless its
+own node was aborted first, and a G1 abort after the request settled reads
+that settled outcome. The release phase may later amend the outcome with
+release failures and unconsumed child failures, folded in at completion
+(§4.12, D16), which the release does not see; so a request body that
+returns while a `'join'` fork it never joined has failed still commits. The
+value's own node settles `aborted` when the request's release loop reaches
+it, whatever the request did, with `OwnerInterrupt` or, when the request
+was interrupted, the request's own reason, which is why the idiom reads the
+parent, not the owner. That is the outcome fixed at settling, and only
+when the request's turn is what ends the node: a `close()` through the
+kept `current()` ends it earlier, `success`. Either way the node's final
+outcome may still be amended at completion (§4.12): a release of its own
+that throws, or an owned fiber of it that failed, makes it `failure`.
+
 `releaseAll()` releases the entries on the node's explicit stack at the
 time of the call, top down and one at a time: each release finishes before
 the next starts, and an entry released meanwhile by something else is
@@ -370,12 +449,46 @@ and a token with a `factory`, is its own **default factory**.
 `setDependencies(target, ...keys)` declares constructor or function
 arguments. Providers (`valueProvider`, `factoryProvider`, `classProvider`,
 `aliasProvider`) bind keys on a node, at construction (`providers`) or
-later (`addProvider`). A `Scope` is a name nodes carry (`scopes`); a scoped
-key or provider stores its value on the nearest node carrying that scope.
+later (`addProvider`). A `Scope` is a name nodes carry (`scopes`), made by
+`createScope(name)`; a scoped key or provider stores its value on the
+nearest node carrying that scope. A key's scope is declared at the key
+(D32):
+
+```ts
+const SessionScope = createScope('session');
+
+class SessionCache {
+  static readonly scope = SessionScope;       // one per session, whatever it injects
+  readonly #config = inject(Config);
+  readonly #entries = new Map<string, Entry>();
+}
+```
+
+A class or function key declares its scope with its `scope` property, read
+as JavaScript reads any static: a subclass inherits its base's
+declaration, and `static override readonly scope = X` re-declares it. The
+value is a declaration only when it is a `Scope` made by `createScope`
+(checked by identity, not shape). `undefined` (what `static scope?: Scope`
+with no initializer emits) and a function (a static method named `scope`,
+such as an ORM's `Model.scope()`) are ignored; any other value is a
+`TypeError` naming the key, at every read of the key's scope: resolution,
+the shadow checks of §3.4, and provider registration (`child({ providers })`,
+`addProvider`). `setScope(key, scope)` is the form for a key you do not
+own (a third-party class, a function), including one whose unrelated static
+`scope` member would otherwise be refused; the registered scope wins over
+the property, and `setScope` on a key that already declares a scope, own or
+inherited, is a `TypeError` (two declarations). A token takes
+`createInjectionKey(name, { scope })`. A provider's own `scope` option takes
+precedence over the key's and never reads it.
+
 `SelfScope` means "per consuming creation, stored nowhere" (or at a node
 that carries it); `RootScope` is on every root; `RequestScope` is the
-conventional per-request scope, attached explicitly
-(`child({ scopes: [RequestScope] })`). Topics are keys too (§5).
+conventional per-request scope, attached explicitly: to the request's
+fiber (`task(async (req) => …, { scopes: [RequestScope] })`, or
+`handle.with({ scopes: [RequestScope] })` for an existing task `handle`),
+which the unit-of-work idiom of §2.6 requires, or to a bodiless
+`child({ scopes: [RequestScope] })`.
+Topics are keys too (§5).
 
 ### 3.2 The two verbs: `inject` and `lookup` (D4′)
 
@@ -413,6 +526,16 @@ consumed, and sharing is as wide as the dependencies allow. Tracked reads
 decide placement only for auto-hoisted values; a value with a declared
 placement stays where it was declared.
 
+**When to declare (D32).** Inference gives the widest sharing the
+dependencies allow, which is right for stateless and derived services and
+wrong for state: a class whose fields inject nothing session-scoped lands at
+the root and is shared by every session, and nothing in the class says so.
+A service that holds state for one session, request or other unit declares
+its scope (`static readonly scope`, §3.1); its value is then stored on the
+nearest node carrying that scope, whatever it injects, and a requester with
+no such node above it gets the error of any scoped key without one.
+Everything else is left to inference.
+
 The value's **own node** is excluded from tracking (D4′):
 `inject(ContextKey)`, or `current()` in creation, returns it. It is created
 when the factory first needs a current node: at the first `current()`,
@@ -420,14 +543,17 @@ when the factory first needs a current node: at the first `current()`,
 `inject(ContextKey)`. A factory that calls none of them leaves its value
 without a node. An auto-hoisted value's node is **pending** until
 placement: it accepts `own`, `release`, `releaseAll`, `fork`, `pool` and
-`child`, while `get`, `addProvider`, `call`, `join`, `result`,
-`interrupted`, `never`, `managed`, `run`, `runSync` (§4.11), `abort`,
-`close` and the `Symbol` methods throw `PendingNodeError`. At placement its
+`child`, while `parent`, `get`, `addProvider`, `call`, `join`, `result`,
+`interrupted`, `never`, `sleep`, `managed`, `run`, `runSync` (§4.11),
+`abort`, `close` and the `Symbol` methods throw `PendingNodeError`, so an
+auto-hoisted factory cannot read its placement (D33). At placement its
 parent becomes the storage node `S`, it is pushed on **`S`'s provided
 stack**, unsubscribed, and the forks made in the factory start. A
 declared-placement value's node is never pending: `S` is known before the
-factory runs, so the node is created live on `S`'s provided stack, and when
-the creation ends it moves to the top of that stack, above the dependencies
+factory runs, so the node is created live on `S`'s provided stack (its
+`parent` is `S` from its first use, and reading it does not affect
+placement), and when the creation ends it moves to the top of that stack,
+above the dependencies
 the factory injected after the node was created (D27). This is the one time
 an entry changes position. Placement into a node that is already releasing (a release fiber's
 `lookup` created the value) pushes it on top, so it is released next,
@@ -437,7 +563,9 @@ before the values it depends on; placement into a complete node throws
 A factory that throws has its node's explicit stack released, caches
 nothing, and rethrows; the next resolution runs the factory again. A
 pending node is first placed at the requester (or the nearest open node
-above it), which then waits for that release and collects its failures; a
+above it), which is then its `parent`, waits for that release and collects
+its failures; when the factory completed the whole tree there is no such
+node, and the value's node is released unowned, with no `parent`. A
 declared-placement value's node is released where it is, on `S`. A
 factory returning `undefined` is `FactoryReturnedUndefinedError` (a
 `CreationViolationError`). Circular `inject` chains throw `Circular dependency detected: A → B → A`, including
@@ -500,7 +628,7 @@ never on a node that already caches the key (D7).
 During creation: `inject` reads are tracked and `lookup` throws; the
 value's own node is current (§3.3); `call`, `attempt`, `all`, `race`,
 `settle`, `run`, `runSync`, `join`, `result`, `interrupted`, `never`,
-`managed` and entering any other node as current throw
+`sleep`, `managed` and entering any other node as current throw
 `CreationViolationError` (`release`, `releaseAll`, `close()` and
 `[Symbol.asyncDispose]()` do not); `fork` on a live node passed in from
 outside is allowed (it starts in a microtask); a creation ends when its
@@ -546,17 +674,38 @@ plain code, and everything it does is legitimate (I8).
 
 A managed await is an await on a promise returned by `call`, `attempt`,
 `all`, `race`, `settle`, `release`, `releaseAll`, `join`, `result`,
-`interrupted`, `never`, `managed(p)`, `close()` or
-`[Symbol.asyncDispose]()`. Everything else is bare: `fetch`, timers, driver
-promises; `managed(p)` makes one freeze. `never()` returns a promise that
-never settles: a `freeze` or `restore` body awaiting it is parked until its
-node is delivered, which freezes it; anywhere else it waits forever.
+`interrupted`, `never`, `sleep(ms)`, `managed(p)`, `close()` or
+`[Symbol.asyncDispose]()`. Everything else is bare: `fetch`, timers other
+than `sleep`, driver promises; `managed(p)` makes one freeze. `never()`
+returns a promise that never settles: a `freeze` or `restore` body awaiting
+it is parked until its node is delivered, which freezes it; anywhere else
+it waits forever.
 `interrupted()` resolves with the current node's abort reason when that node
 is delivered (at once if it already was), and `ctx.interrupted()` with
 `ctx`'s; a `freeze` or `restore` body awaiting its own node's delivery is
 frozen by that delivery instead, so the resolving form is for `observe`
 bodies (§4.3), release fibers, top-level code and a body waiting on another
 node.
+
+`sleep(ms)` and `ctx.sleep(ms)` resolve after `ms` milliseconds, a number
+in [0, 2^31 − 1]; anything else is a `RangeError`, thrown before a timer is
+armed (`never()` is the unbounded wait). Its freeze target is decided when
+it is called, as below: a `freeze` or `restore` body awaiting it is frozen
+at its node's delivery, and that delivery **clears the timer**, whether the
+sleep was awaited or only stored, so no timer outlives the interruption or
+retains the frozen body. A body already applied when it calls `sleep`
+(plain code after delivery, I8, or a fork born delivered, §4.6) arms no
+timer and freezes on it, as on `never()`. Without a target (an `observe`
+body, a release fiber, a failure handler, a `ctx.run` frame on a bodiless
+node, top level) it waits the full `ms`: an `observe` body reacts to its
+interruption through `signal()` and `interrupted()` (§4.3), and a failure
+handler that backs off with `await sleep(…)` resumes (§4.7). A failure
+handler that awaits a sleep a body made, which the body's delivery may
+clear or which armed no timer, waits on a timer of its own and resumes at
+that sleep's deadline (§4.7). The timer is
+armed under an empty frame (§6) and, unlike ramme's own timers, is not
+unref'd: a sleep keeps the process alive like any timer. Repetition is a
+`fork` that loops on `sleep` (D34).
 
 The freeze decision is made for **the awaiting body's node**, `current()`
 when the promise is made, whichever node the method was called on. With no
@@ -584,6 +733,9 @@ that rejects, a `result(f)`, `attempt` or `settle` member of any combinator,
 any combinator with a bare member, a `.then`/`.catch`/`.finally` attached to
 a managed promise without awaiting it at once, and a managed promise awaited
 by another body. Development mode reports them when they misfire (§4.4).
+`ramme/no-promise-combinators` (§9, D35) flags every `Promise` combinator,
+the supported fulfilling `Promise.all` included, because syntax cannot tell
+it from one that rejects; such a use is disabled inline with a reason.
 
 A managed promise wraps a **source**, an internal promise that never
 rejects (a node's completion, the end of an entry's release, a node's
@@ -622,6 +774,14 @@ mitigation is diagnostic: `node:stalled` when a delivered node (any mode)
 has neither settled nor frozen within `stallWarningMs`. Release fibers are
 nodes, so a stuck release shows up the same way.
 
+The commonest bare await is a platform timer. An
+`await new Promise((r) => setTimeout(r, ms))` in flight at interruption is
+not cut, so the body resumes when the timer fires and its node, with
+everything attached to it (a connection lease), stays alive for the rest of
+the wait. `sleep(ms)` is the managed form, whose timer the delivery clears
+(§4.2, D34); `ramme/no-timers` flags `setTimeout`, `setInterval` and
+`setImmediate` in application code (§9).
+
 **Development mode** is on unless `process.env.NODE_ENV === 'production'`,
 and always on where `process` does not exist (D30). It adds these checks:
 `AsyncRunError` when `run(fn)` returns a promise (§4.11); a
@@ -631,7 +791,8 @@ instead); a warning when a body settles after it was counted frozen, which
 means it awaited in an unsupported shape (§4.2); a warning, once per node,
 when a managed promise is awaited by a body other than the one that made
 it; and a warning when a failure handler awaits a managed promise whose
-creating body was frozen on it, which never settles (§4.7).
+creating body was frozen on it, which never settles (§4.7; a `sleep` is the
+exception, since the handler waits it out on a timer of its own).
 
 ### 4.5 Tasks and the two kinds of function (D8′, D31)
 
@@ -739,14 +900,19 @@ from a body, or use a pool.
 A handler runs with the parent current, so `lookup`, `own`, `fork`, `child`
 and `pool` act on the node whose lifetime the handler's work shares, but it
 is not the parent's body. Its managed awaits never freeze: the parent's
-delivery neither cuts them nor counts the parent frozen. Its `call`s lend
-nothing (§4.9). While the parent's body is lent, the handler may still use
+delivery neither cuts them nor counts the parent frozen, and a `sleep` there
+runs its full duration (§4.2). A `sleep` the parent's body made, awaited by
+the handler, resumes it at that sleep's deadline: the handler waits on a
+timer of its own, which the delivery that clears the body's timer leaves
+running. Its `call`s lend nothing (§4.9). While the
+parent's body is lent, the handler may still use
 `get`, `fork`, `child`, `pool` and `runSync` through the parent, and `own`,
 `release`, `releaseAll`, `abort`, `close` and the `Symbol` methods, which no
 lent node refuses; `call`, `attempt`, `all`, `race`, `settle`, `run`,
-`join`, `result`, `interrupted`, `never` and `managed` through it throw
-`UnawaitedCallError`. Through any other node only that node's own body
-guards apply (§4.9). A promise the handler returns holds the parent open
+`join`, `result`, `interrupted`, `never`, `sleep` and `managed` through it
+throw `UnawaitedCallError`; a handler that must wait then forks the wait.
+Through any other node only that node's own body guards apply (§4.9). A
+promise the handler returns holds the parent open
 until it settles, and a rejection, like a synchronous throw, is collected
 with the parent's release failures (§4.12). While that hold lasts and the
 parent's stacks are otherwise empty, the parent's release loop takes only
@@ -809,7 +975,7 @@ pending (`PendingNodeError`), no creation is current
 `fork`, `child` and `pool`, which a pending node and a creation allow, check
 completion and lending only. While lent, `lookup`/`get`, `call`, `attempt`,
 `fork`, `child`, `pool`, `all`, `race`, `settle`, `join`, `result`,
-`interrupted`, `never`, `managed`, `run` and `runSync` throw
+`interrupted`, `never`, `sleep`, `managed`, `run` and `runSync` throw
 `UnawaitedCallError` naming the child (`.child`); a managed await also
 checks the lending of the awaiting body's node, whichever node receives it.
 `own`, `release`, `releaseAll`, `abort`, `close` and the `Symbol` methods do
@@ -985,6 +1151,11 @@ forker's node nor a finished creation.
 
 ## 7. Package layout
 
+The repository is a pnpm workspace. Its root is the `ramme` package, whose
+modules, in `src/`, are these; `packages/eslint-plugin-ramme` is the lint
+plugin (§9), a separate package that ramme does not depend on and that does
+not import ramme.
+
 | Module | Responsibility |
 | --- | --- |
 | `context-key.ts` | `InjectionKey`, default factories, key scopes, `setDependencies` |
@@ -1008,8 +1179,9 @@ forker's node nor a finished creation.
 | `index.ts` | the public surface |
 
 Runtime import graph (type-only imports not shown; no evaluation-order
-cycles): `context-key`, `scope`, `resource`, `internal-context` and
-`context` are leaves; `topic` sits over `context-key`, and
+cycles): `scope`, `resource`, `internal-context` and `context` are leaves;
+`context-key` sits over `scope` (a key's declared scope, D32); `topic` sits
+over `context-key`, and
 `lifecycle-events` over `topic`; `context-storage`, `stack` and `pool` sit
 over `resource`, and the adapters register into `context-storage`;
 `managed` sits over `context-storage`; `inject` over `context-key`,
@@ -1048,13 +1220,21 @@ nothing process-global.
 
 ## 9. What is not here
 
-- **The lint rules** ship as a separate ESLint plugin package:
-  `ramme/no-finally-in-async` and `ramme/no-using-in-async` (A7),
-  `ramme/no-stored-borrow` (a `lookup(...)` result assigned to a field or
-  module variable), `ramme/no-owned-provider` (the wiring error of §2.5)
-  and `ramme/no-bare-task` (an `async` function passed where a `Task` is
-  expected without `task()`, where the type does not already catch it).
-  Recommended alongside: `@typescript-eslint/no-floating-promises`.
+- **The lint rules** ship in this repository as a separate package,
+  `eslint-plugin-ramme` (`packages/eslint-plugin-ramme`, §7; D35), whose
+  `configs.recommended` turns all seven on as errors:
+  `ramme/no-finally-in-async` and `ramme/no-using-in-async` (a `finally` or
+  a `using` declaration in an async function, A7, §2.6),
+  `ramme/no-timers` (`setTimeout`, `setInterval`, `setImmediate`: bare
+  awaits, §4.2, §4.4), `ramme/no-promise-combinators` (every `Promise`
+  combinator, stricter than §4.2), `ramme/no-stored-borrow` (a `lookup(…)`
+  result in a class field, on `this` or in a module variable, §3.2),
+  `ramme/no-owned-provider` (the wiring error of §2.5) and
+  `ramme/no-unused-outcome` (a discarded `attempt` or `settle`, §4.5, D31).
+  They are syntactic, and the package's README names each rule's
+  approximations. A named async function passed to `fork` or `call`
+  (`fork(parse)`) has no lint and stays an open gap (D8′). Recommended
+  alongside: `@typescript-eslint/no-floating-promises`.
 - **kilde's hot layer**, the constructs that hold a subscription or run
   asynchronous work, lives in kilde, built on ramme's public API as tasks
   and as values on a factory's node (D6′).

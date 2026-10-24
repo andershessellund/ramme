@@ -224,8 +224,8 @@ requiring `task()` for inline bodies too, ceremony that closes no gap.
 **Cost.** A node per fiber (fibers are not free); application code must
 decide function vs task at the definition. `fork` and `call` also accept a
 plain function, so for a named async function the gap stays open:
-`fork(parse)` and `parse()` both compile. The `ramme/no-bare-task` lint rule
-flags it (DESIGN.md §9); the type does not. DESIGN.md §4.5–§4.9.
+`fork(parse)` and `parse()` both compile, and neither the type nor a lint
+flags it (D35). DESIGN.md §4.5–§4.9.
 
 ### D22. `fork` starts in a microtask; `call` starts synchronously
 
@@ -428,6 +428,123 @@ price of a pending node whose storage is already known; leaving the entry
 where it was pushed, which releases a value's late dependencies before the
 value. **Cost.** One exception to fixed positions, which any reasoning
 about release order has to remember. DESIGN.md §3.3.
+
+### D32. A key declares its lifetime at the class: `static readonly scope`
+
+A class or function key declares its scope through its `scope` property:
+`class SessionCache { static readonly scope = SessionScope; … }`. The
+property is read as JavaScript reads any static, through the prototype
+chain, so a subclass inherits its base's declaration and
+`static override readonly scope = X` re-declares it. It is a declaration
+only when its value is a `Scope` made by `createScope`, tested by identity
+(a module-private `WeakSet` that `createScope` fills, which covers
+`SelfScope`, `RootScope` and `RequestScope`). `undefined` and a function
+are ignored; any other value is a `TypeError` naming the key, at every read
+of the key's scope: resolution, the shadow checks of placement by view
+(D10′) and provider registration. `getKeyScope(key)` is the
+`setScope`-registered scope, else the declaration, else none.
+`setScope(key, scope)` registers a scope for a key that declares none, and
+wins over its property; on a key with a declaration, own or inherited, it
+is a `TypeError`. `createInjectionKey(name, { scope })` is unchanged and is
+the form for tokens. Placement is the existing scoped placement: the value
+is stored on the nearest node carrying the scope, whatever it injects, and
+a provider's own `scope` still takes precedence over the key's
+(`p.scope ?? getKeyScope(key)`), so such a provider never reads the
+property. The rule for users: a service that holds state for one session,
+request or other unit declares its scope; inference is for stateless and
+derived services, and gives the widest sharing the dependencies allow.
+
+**Why.** Auto-hoisting places a value at its deepest dependency (D7), so a
+class whose fields inject nothing session-scoped lands at the root and is
+shared by every session, and nothing in the class says so; `setScope(Class,
+scope)` was an opt-in line somewhere else. A lifetime is part of what a
+stateful class is, so it must be readable at the class, and a static
+property needs no compiler flag and no dependency. It is read through the
+prototype chain because that is how a reader expects a static to behave.
+Identity decides what counts, not shape: every function has a string
+`name`, so a structural test would take a static method named `scope` for a
+`Scope`. `undefined` is ignored because under the ES2022 target
+`static scope?: Scope` with no initializer emits an own `scope` property
+whose value is `undefined`; a function is ignored because an unrelated
+static method named `scope` (an ORM's `Model.scope()`) is common. Any other
+value is refused rather than ignored: a `scope` that looks like a lifetime
+and is not one (`static scope = 'session'`) would otherwise auto-hoist
+silently, the defect the declaration exists to prevent, and `setScope` is
+the escape for a key whose `scope` means something else, a third-party
+class included. `setScope` on a declared key is refused because two
+declarations of one key's lifetime would need a precedence rule the
+class's reader cannot see. **Rejected:** a development-mode warning when a
+value that `own`s something is hoisted to the root, which cannot tell state
+from stateless (a root service that owns a connection pool is the normal
+case); decorators, which need a compiler flag and are not zero-dependency;
+mandatory scopes, which punish the stateless majority that inference serves
+well; a structural `Scope` test (above). **Cost.** A declared scope on a
+class that is also provided elsewhere with a different scope is two
+declarations, and the provider's wins, as it does today. A third-party
+class whose static `scope` is something else must be given `setScope`
+before it is resolved or provided, or it is refused. The property is read
+at every read of the key's scope: each resolution that does not hit a
+cached value, each shadow check, each provider registration. Nothing is
+memoized beyond the cached value itself, so a cache hit reads no `scope`,
+and a property reassigned after a value was cached leaves that value where
+it is for every requester the cache serves. DESIGN.md §3.1, §3.3.
+
+### D33. `parent` is public, and a stored value's release reads its storage node through it
+
+`Context` has `readonly parent: Context | undefined`, the node's resolution
+parent (DESIGN.md §2.1): `undefined` on a root, and on a value's node
+released unowned after its factory completed the whole tree; a value's
+storage node, and after a failed factory the node it was placed at to be
+released; a release fiber's owner, so `current().parent` inside a release
+is the owner; the node a `fork`, `call`, `child` or pool child was made on.
+It is readable on a complete node, since tree shape does not change, like
+`outcome`. On a pending value node it throws `PendingNodeError`, the
+refusal `get` and `addProvider` give there (DESIGN.md §3.3), so an
+auto-hoisted factory cannot read its placement. A declared-placement
+factory can: its node is live on `S` from its first use (D27), so
+`current().parent` in it is `S`, which is fixed before the factory runs and
+which reading does not move. The DI unit of work of DESIGN.md §2.6 is the
+idiom it enables: a value declared per request (D32) whose release reads
+`#node.parent.outcome` to commit or roll back, on a request fiber that
+carries the scope.
+
+**Why.** The case was a unit of work whose release commits or rolls back by
+the request's outcome, and it could not be a DI service: its release must
+read the request node's outcome, and a DI value's own node is not the
+request. The program spread it over a captured `current()`, an `own` with
+an outcome test and `placeOrder.with({ providers })`: seven pieces and an
+extra node per request. The storage node's outcome is the one a stored
+value's release wants, since the storage node is what the value lives as
+long as, and `parent` is the general primitive: it is already a fact of the
+tree, which every internal walk reads. **Rejected:** passing the owner's
+outcome to the release callback: the owner of a value's entries is the
+value's node, which settles `aborted` when its owner's turn aborts it
+(DESIGN.md §2.4), whatever the request did, so it answers the wrong
+question (its final outcome can still be amended at completion, DESIGN.md
+§4.12, but by the value's own failures, not the request's). A `storage()`
+accessor: a second name for a parent. Exposing `parent` on a pending node
+as `undefined`: that is a root's answer, so a pending node would read as a
+root, and code that captured the node would read two different parents for
+one node; `PendingNodeError` is the refusal `get` and `addProvider` already
+give before placement (DESIGN.md §3.3). **Cost.** `parent` lets code reach
+up the tree. DESIGN.md §2.6's rules on what a release may use (G3) are
+unchanged, and `lookup` remains the way to resolve upward. The idiom's
+reading is the outcome as decided at settling (D16): release failures and
+unconsumed child failures folded in at completion do not reach it, so a
+request whose unjoined `'join'` fork failed still commits, and a bodiless
+`child({ scopes: [RequestScope] })` reports how it was ended, not how its
+work ended (DESIGN.md §2.6, §4.12). DESIGN.md §2.1, §2.6, §3.3.
+
+Settled while implementing it:
+
+- *Internal walks read `up`; `parent` is a getter.* The node already had a
+  public, mutable `parent` field, written once by placement, which internal
+  code read on pending nodes: an event's `parentId`, the birth rule's walk
+  up the subscription path, the creation owner, the root test of
+  `[Symbol.dispose]()`. Declaring the member on `Context` would have
+  compiled with no new code and answered `undefined` on a pending node, the
+  alternative rejected above. The field is `up`, every internal walk stays
+  on it, and only the public getter refuses a pending node.
 
 ### D9′. Async context propagation is required
 
@@ -734,7 +851,8 @@ flow entirely, because acquisition is ownership (law 1) and the node
 releases what the body owned. Only promises ramme produced can freeze,
 because only they can be decided at `then` time; everything else is a bare
 await and completes normally, and `signal()` and `managed(p)` bring foreign
-work in. With no current node (top level, a platform callback) nothing can
+work in (a timer has its own managed form, `sleep(ms)`, D34). With no
+current node (top level, a platform callback) nothing can
 freeze, so `app.abort()` from a signal handler rejects a top-level
 `await app.call(main)` and the process's `await using` cleanup runs.
 **Rejected:** cooperative cancellation; freezing at delivery regardless of
@@ -778,6 +896,72 @@ waiting on a sibling that is then cut loses it, which is why
 `Promise.allSettled` is unsupported in `freeze` bodies; multi-member waits
 belong in ramme's `all`/`race`/`settle`, which join their members themselves
 (D31).
+
+### D34. `sleep(ms)`: ramme's timer is a managed await
+
+A free function `sleep(ms): Promise<void>` and a method `ctx.sleep(ms)`
+resolve after `ms` milliseconds. Both are body-shaped, like `never` and
+`managed`: `CreationViolationError` in creation, `NoCurrentNodeError` for the
+free function outside any node (`ctx.sleep` with no current node is a plain
+delay), `PendingNodeError` on a pending node, and `UnawaitedCallError` when
+the awaiting node is lent, a failure handler going through its lent parent
+included. `ms` is a number in [0, 2^31 − 1], the bound of every ramme
+timer; anything else is a `RangeError` naming the value and the bound and
+suggesting `never()`, thrown before a timer is armed. It is a managed await
+(D13) whose freeze target is decided when the promise is made: the current
+node when it has a body, is not `observe`, is not a release fiber and the
+frame is not a failure handler's. A target already applied gets `never()`'s
+frozen await and no timer. Otherwise the target's delivery clears the timer,
+whether the sleep is awaited or only stored, and a `freeze` or `restore`
+body awaiting it is frozen as on any managed await; the timer removes its
+clearing entry when it fires. Without a target the sleep runs its full
+duration. The timer is armed under an empty frame (DESIGN.md §6) and is not
+unref'd.
+
+**Why.** A timer is the most common bare await, with a measurable cost at
+interruption. Freezing happens only at a managed await, so a bare
+`await setTimeout` in flight when its node is delivered keeps the node
+alive until the timer fires: an aborted request held its connection lease
+for the full duration of a bare wait, and the workaround, a user-written
+timer promise awaited as `await managed(delay(20, signal()))`, took two
+wrappers around it. Clearing at the delivery is what makes the freeze complete: no timer
+outlives the interruption, and none retains the frozen body. Arming none
+for a target already applied follows, since the await freezes at once. A
+failure handler's awaits never freeze (DESIGN.md §4.7), so its sleep is
+never cleared by its parent's delivery, and a handler that backs off with
+`await sleep(…)` resumes. ramme's own timers are unref'd because they only
+diagnose or bound a wait; a sleep is the wait, and a top-level
+`await app.sleep(n)` must not let the process exit before it resolves.
+**Rejected:** `managed(setTimeout-promise)` as the idiom: two wrappers, and
+the timer survives the freeze; patching the global timers, which is not
+zero-dependency and not ours to patch; a `sleep` that rejects or resolves
+early for `observe` bodies: an `observe` body reacts through `signal()` and
+`interrupted()` (DESIGN.md §4.3), and an early resolution would run the next
+iteration of a loop as if the time had passed. **Cost.** `setTimeout`,
+`setInterval` and `setImmediate` in application code become lint errors
+(D35), and `fork` with a loop on `sleep` replaces `setInterval`. A failure
+handler cannot sleep through a parent that is lent; it forks the wait. One
+more name in tier 1. DESIGN.md §4.2, §4.4.
+
+Settled while implementing it:
+
+- *A failure handler that awaits a body's sleep waits on a timer of its
+  own.* A handler's awaits are untargeted and are delivered when their
+  source settles (DESIGN.md §4.7), but a targeted sleep's source is the
+  body's timer, which the body's delivery clears, and a sleep the body made
+  after its delivery has no timer at all. A handler awaiting either would
+  wait on a promise that never settles and hold its parent open, with no
+  report. So a handler's await of a targeted sleep arms a timer of its own,
+  outside every frame and not unref'd, to the sleep's deadline (and at most
+  `ms` after the handler's await, however the wall clock moves), whatever
+  became of the body's. The body's timer is still cleared at its delivery,
+  and the wrapper keeps only the deadline, so nothing of the frozen body is
+  retained. **Rejected:** keeping the body's timer running while a handler
+  awaits it, which lets it outlive the interruption and still leaves a
+  handler that first awaits after the clear, or on the applied path,
+  without one; a development warning for the hang, which reports a hang
+  ramme can avoid. **Cost.** A handler that awaits a body's sleep before the
+  delivery arms a second timer to the same deadline.
 
 ### D14. A `'join'` fork onto a bodiless node is refused
 
@@ -932,10 +1116,10 @@ rejection, or outcomes), two result types under one name; holding the
 members' failures on the group, or consuming them in its body (above).
 **Cost.** An outcome nobody inspects drops its error silently: `await
 attempt(t)` with no look at `status` is the failure mode outcomes-as-values
-invite, which is why `call` stays the default and `attempt` is opt-in. A
-lint rule requiring that the result of `attempt` or `settle` be used is a
-follow-up, not yet written. A `restore` child inside an `observe` region
-can hand a caller that was not interrupted the region's shutdown as
+invite, which is why `call` stays the default and `attempt` is opt-in.
+`ramme/no-unused-outcome` flags a discarded `attempt`/`settle` (D35). A
+`restore` child inside an `observe` region can hand a caller that was not
+interrupted the region's shutdown as
 `aborted`, which only its reason tells apart from the child's deadline. Two
 more names in tier 1; `attempt` emits `join:enter`/`join:leave`, which
 `call` does not. DESIGN.md §4.5, §4.8, §4.12.
@@ -1217,3 +1401,55 @@ run every check and warning unless the bundler defines
 `process.env.NODE_ENV`, and so does a production server that does not set
 it; code never run in development can pass a promise through `run`
 unreported. DESIGN.md §4.4, §4.11.
+
+### D35. Lints, not runtime checks
+
+The hazards that are syntactic are lint rules, in the separate package
+`eslint-plugin-ramme` in this repository (DESIGN.md §9), whose
+`recommended` config turns all seven on as errors: a `finally` or a `using`
+declaration in an async function (`no-finally-in-async`,
+`no-using-in-async`), a platform timer (`no-timers`), a `Promise` combinator
+(`no-promise-combinators`), a `lookup` result stored in a field, on `this`
+or in a module variable (`no-stored-borrow`), a value provided on the node
+that owns it (`no-owned-provider`) and a discarded `attempt` or `settle`
+(`no-unused-outcome`). The hazards that depend on run-time values stay
+development-mode diagnostics (DESIGN.md §4.4, D30): an await shape that
+misfired, a managed promise awaited by another body, a late read that
+creates a value, a promise returned to `run`; a stall stays `node:stalled`.
+
+**Why.** Each of these hazards is visible where it is written and invisible
+when it happens: a `finally` that never runs leaves no trace, a timer only
+delays a release, a dropped outcome is silent by construction (D31), and a
+stored borrow fails, if at all, after its node completed, far from the line
+that stored it. Inside a body the constructs look like plain JavaScript and
+behave differently (DESIGN.md §2.6, §4.2), so a reader does not catch them
+either. A lint reports each one before the code runs, at no run-time cost,
+and checks A7 and the timer half of A8. The development-mode diagnostics
+stay because their hazards depend on what syntax cannot see: which promise
+is managed, which body awaits it, whether a read creates a value. Where a
+rule must choose, it is stricter than the design: `no-promise-combinators`
+flags the fulfilling `Promise.all` over managed members that DESIGN.md §4.2
+supports, because syntax cannot tell it from one that rejects, nor managed
+members from bare ones, and an inline disable with a reason marks the cases
+that are fine. One package in the same repository keeps the rules in step
+with the design they enforce; it has no runtime dependencies (ESLint is a
+peer), and ramme does not depend on it. **Rejected:** type-level tricks: a
+`Promise` subtype for managed promises cannot forbid `Promise.race` over it,
+since every subtype is still a `Promise`, and a `finally` has no type at
+all; a runtime patch of `Promise.race` and its siblings, which changes a
+global ramme does not own and costs every program that loads ramme;
+`no-bare-task`, the rule DESIGN.md §9 once listed for an async function
+passed where a task belongs. `fork` and `call` accept inline bodies by
+design (DESIGN.md §4.5), and `all`, `race` and `settle` take only a `Task`,
+so the type already catches a bare function there. What remains, a named
+async function passed to `fork` or `call` (`fork(parse)`, the case D8′ gave
+that rule), is an open gap with no lint (D8′). **Cost.** The rules are
+syntactic approximations, named per rule in the package's README. ramme's
+functions are matched by name, not by import. Every async function counts
+as a body, so a `finally` in a release callback or an `observe` body, which
+never freeze, is flagged, and so is a top-level `Promise.all` or timer.
+Aliasing gives false negatives (`const t = setTimeout`,
+`const { all } = Promise`, a borrow stored through a local). `setTimeout`,
+`setInterval` and `setImmediate` in application code are errors, and `fork`
+with a loop on `sleep` replaces `setInterval` (D34). A lint binds only a
+project that runs it. DESIGN.md §9.

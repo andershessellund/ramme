@@ -152,6 +152,12 @@ export interface Context {
   readonly signal: AbortSignal;
   /** `undefined` while running. */
   readonly outcome: Outcome<unknown> | undefined;
+  /**
+   * The resolution parent (DESIGN.md §2.1): `undefined` on a root; a value's storage node; a release fiber's
+   * owner; the node a fork, call, child or pool was made on. Throws `PendingNodeError` on a value's node before
+   * placement (DESIGN.md §3.3).
+   */
+  readonly parent: Context | undefined;
 
   // --- resolution ---
   get<T>(key: InjectionKey<T>): T;
@@ -193,6 +199,12 @@ export interface Context {
   result<T>(fiber: Fiber<T>): Promise<Outcome<T>>;
   interrupted(): Promise<unknown>;
   never(): Promise<never>;
+  /**
+   * Resolves after `ms` milliseconds, in [0, 2^31 − 1] (`RangeError` otherwise). A managed await: a delivered
+   * `freeze` or `restore` body awaiting it is frozen and its timer cleared; with no current node it is a plain
+   * delay (DESIGN.md §4.2).
+   */
+  sleep(ms: number): Promise<void>;
   managed<T>(promise: Promise<T>): Promise<T>;
 
   // --- synchronous frames ---

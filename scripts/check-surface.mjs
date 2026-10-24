@@ -59,6 +59,7 @@ const expected = new Map([
     'result',
     'interrupted',
     'never',
+    'sleep',
     'managed',
     'runSync',
   ].map((n) => [n, ['value', './ambient.js']]),
@@ -102,7 +103,7 @@ const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'pool', 'child',
-  'join', 'result', 'interrupted', 'never', 'managed',
+  'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, outcomes

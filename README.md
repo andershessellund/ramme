@@ -96,11 +96,75 @@ server.on('request', (req, res) =>
 - When the client hangs up, `req.signal` interrupts the handler: it stops at
   its next *managed await* and never resumes, and the lease goes back to the
   pool. A managed await is an `await` on a promise ramme returned (`call`,
-  `join`, `all`, `race`, `release`, …); `await fetch(...)` or a timer is
-  not one, which is why you pass `signal()` on ([DESIGN.md
+  `join`, `all`, `race`, `release`, `sleep`, …); `await fetch(...)` is not
+  one, which is why you pass `signal()` on, and a timer is one only as
+  `await sleep(ms)` ([DESIGN.md
   §4.2](DESIGN.md#42-freeze-and-managed-awaits-d13)). An interruption is not
   a failure, so `onFailure` is not called.
 - If `work` throws, `onFailure` gets the error once.
+
+## Services that hold state
+
+A service is placed as deep as its dependencies require, so one whose
+fields inject only root-level things is shared by the whole application.
+That is right for a stateless service and wrong for state. A service that
+holds state for one session, one request or another unit declares its
+scope:
+
+```ts
+import { createScope, inject } from 'ramme';
+
+const SessionScope = createScope('session');
+
+class SessionCache {
+  static readonly scope = SessionScope;              // one per session, whatever it injects
+  readonly #config = inject(Config);
+  readonly #entries = new Map<string, unknown>();
+}
+
+const session = app.child({ scopes: [SessionScope] });   // lookup(SessionCache) below it is this session's
+```
+
+The value is stored on the nearest node that carries the scope. Leave
+stateless and derived services undeclared. For a class you do not own,
+`setScope(TheirClass, SessionScope)` declares it from outside; a token
+takes `createInjectionKey(name, { scope })`.
+
+A unit of work that commits or rolls back with its request is a
+per-request service whose release reads the request's outcome through
+`parent`, the node that stores it:
+
+```ts
+import { RequestScope, current, inject, lookup, own, signal, task } from 'ramme';
+
+class UnitOfWork {
+  static readonly scope = RequestScope;
+  readonly #node = current();                     // this value's own node; its parent is the request's node
+  readonly #lease = inject(DbPool).acquire();     // a synchronous acquire(owner = current()): owned by #node, returned after the commit
+  constructor() {
+    own(this, () => {
+      const o = this.#node.parent!.outcome;       // how the request ended
+      if (o === undefined) return this.#node.signal.aborted ? this.rollback() : this.commit();   // done(), or this unit aborted early
+      return o.status === 'success' ? this.commit() : this.rollback();
+    });
+  }
+  done(): Promise<void> { return this.#node.release(this); }   // commit now, while the request runs
+  query(sql: string) { return this.#lease.conn.query(sql, signal()); }
+  async commit(): Promise<void> { … }
+  async rollback(): Promise<void> { … }
+}
+
+const handle = task(async (req: Request) => {
+  await lookup(UnitOfWork).query('…');            // every lookup in this request shares one
+}, { scopes: [RequestScope] });                   // the request's own fiber carries the scope
+```
+
+The request's fiber must carry `RequestScope`, as `handle` does, so that
+its outcome is how the request ended. A bodiless
+`child({ scopes: [RequestScope] })` reports how it was ended, not how its
+work ended: under `await using` every unit of work on it rolls back, and
+after `close()` every one commits, even when a `call` on it failed and the
+error was caught ([DESIGN.md §2.6](DESIGN.md#26-ownership)).
 
 ## Fork now, join later
 
@@ -119,6 +183,25 @@ you never join is interrupted when its parent's body returns, and its
 failure, if any, surfaces from the parent. It is never an unhandled
 rejection.
 
+Something that repeats is a fork that loops on `sleep`:
+
+```ts
+const session = task(async (user: User) => {
+  fork(async () => {
+    for (;;) {
+      await sleep(30_000);                  // an interrupted loop stops here, and its timer is cleared
+      await call(sendHeartbeat, user);
+    }
+  });
+  await call(serve, user);                  // when serve returns, the heartbeat is interrupted
+});
+```
+
+In a body, `await sleep(ms)` is the timer to use: a bare `setTimeout` is
+not a managed await, so an interrupted body waiting on one keeps its node,
+and everything attached to it, until the timer fires. Outside any node,
+`app.sleep(ms)` is a plain delay.
+
 ## The rules
 
 - **Own it before the work; don't clean up in `finally`.** An interrupted
@@ -135,8 +218,8 @@ rejection.
   body-shaped operation in that body (`lookup`, `fork`, `call`, `join`, …)
   throws `UnawaitedCallError`. `own`, `release`, `abort` and `close` stay
   allowed, so they do not reveal it. Use `all([...])` for concurrent calls.
-- **Pass `signal()` on** to `fetch`, timers and drivers, so work stops
-  promptly when interrupted.
+- **Pass `signal()` on to `fetch` and drivers; use `sleep` for timers**, so
+  work stops promptly when interrupted.
 - **`inject` in constructors, `lookup` in bodies.** `lookup` throws during
   creation and `inject` throws outside it. Don't store a `lookup` result on
   anything that outlives the current task.
@@ -182,6 +265,12 @@ const prices = r.status === 'success' ? r.value : cachedPrices(sku);   // 'abort
 
 const [user, orders] = await settle([fetchUser.bind(id), fetchOrders.bind(id)]);
 if (orders.status === 'failure') log(orders.error);                    // all would have rejected; user is still here
+
+let quote = await attempt(fetchQuote, sku);
+for (let i = 0; quote.status === 'failure' && i < 3; i++) {
+  await sleep(100 * 2 ** i);                                           // back off; an interrupted caller stops here
+  quote = await attempt(fetchQuote, sku);
+}
 ```
 
 `aborted` means the task's own abort (its `timeoutMs` or `signal`, or an
@@ -197,6 +286,31 @@ deadline fallback there checks that the reason is a `TimeoutError`
 `DOMException`, which is what `timeoutMs` delivers. A failure delivered as a
 value is yours to look at; ignore `status` and the error is gone, which is
 why `call` stays the default.
+
+## Lint
+
+An ESLint plugin, `eslint-plugin-ramme` (ESLint 9 or later, flat config),
+checks what syntax can see of the rules above:
+
+```sh
+pnpm add -D eslint-plugin-ramme
+```
+
+```js
+// eslint.config.js
+import ramme from 'eslint-plugin-ramme';
+import tseslint from 'typescript-eslint';
+
+export default [...tseslint.configs.recommended, ramme.configs.recommended];
+```
+
+`ramme.configs.recommended` turns on, as errors: `finally` and `using` in
+async functions, `setTimeout` and its siblings, `Promise` combinators, a
+`lookup` result stored on an object or in a module variable, a value
+provided on the node that owns it, and a discarded `attempt` or `settle`.
+Some rules are stricter than ramme itself: a top-level `Promise.all` is
+flagged too. The [plugin's README](packages/eslint-plugin-ramme/README.md)
+says what each rule flags, why, and where it is approximate.
 
 ## Documentation
 

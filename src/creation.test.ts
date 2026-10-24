@@ -71,7 +71,7 @@ describe('the pending node (DESIGN.md §3.3)', () => {
           before = peekCurrentNode();
           trigger();
           n = peekCurrentNode();
-          seen = { state: n!.state, parent: n!.parent, sameRoot: n!.root === impl(requester).root };
+          seen = { state: n!.state, parent: n!.up, sameRoot: n!.root === impl(requester).root }; // the internal field: `parent` refuses a pending node (D33)
           return {};
         },
       });

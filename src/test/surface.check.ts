@@ -72,6 +72,13 @@ export const fiberNamespace = ramme.Fiber;
 /** `runSync` is the ambient function of DESIGN.md §4.11, `current().runSync(fn, ...args)`. */
 type _RunSync = Expect<Equal<typeof ramme.runSync, <R, A extends unknown[]>(fn: (...args: A) => R, ...args: A) => R>>;
 
+/** `sleep` is a free function and a method, both a managed await over a timer (DESIGN.md §4.2, D34). */
+type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Promise<void>>>;
+type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Promise<void>>>;
+
+/** `parent` is the resolution parent, a node or `undefined` (DESIGN.md §2.1, D33). */
+type _Parent = Expect<Equal<Context['parent'], Context | undefined>>;
+
 // Names removed by the redesign: one import per name, which fails if the
 // name comes back as a value or as a type. Then the internal names that
 // must never leak.

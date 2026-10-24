@@ -62,7 +62,7 @@ import {
 import { TASK, toTask } from './internal-context.js';
 import type { BodyInfo, CacheEntry, FailureRecord, NodeInit, NodeKind, TaskLike } from './internal-context.js';
 import type { NodeEvent, NodeEventInput } from './lifecycle-events.js';
-import { managedFor, managedNever, managedSignal, thenAsHandler } from './managed.js';
+import { managedFor, managedNever, managedSignal, managedSleep, thenAsHandler } from './managed.js';
 import type { AwaitWatch, WaitsFor } from './managed.js';
 import { PoolState, poolChildComplete, poolChildSettled, poolDelivered, poolFork } from './pool.js';
 import {
@@ -165,6 +165,18 @@ function checkMs(opts: NodeOptions): void {
     if (typeof v !== 'number' || !(v >= 0 && v <= MAX_TIMER_MS))
       throw new TypeError(`${k} must be a number of milliseconds in [0, ${MAX_TIMER_MS}], or Infinity for none (got ${String(v)})`);
   }
+}
+
+/**
+ * `sleep(ms)`'s argument (D34): a number in [0, 2^31 - 1]. NaN, ±Infinity, a negative or larger number and a
+ * non-number are a RangeError, thrown before a timer is armed: Node fires a longer timer after 1 ms.
+ */
+function checkSleepMs(ms: unknown): void {
+  if (typeof ms === 'number' && ms >= 0 && ms <= MAX_TIMER_MS) return;
+  throw new RangeError(
+    `sleep(ms): ms must be a number of milliseconds in [0, ${MAX_TIMER_MS}] (got ${typeof ms === 'string' ? JSON.stringify(ms) : describe(ms)}); ` +
+      'for an unbounded wait, use never()',
+  );
 }
 
 /**
@@ -283,7 +295,7 @@ function holdEntry(e: Entry): () => void {
 
 /** The first of `n` and its ancestors for which `pred` holds. */
 function firstUp(n: NodeImpl, pred: (c: NodeImpl) => boolean): NodeImpl | undefined {
-  for (let c: NodeImpl | undefined = n; c; c = c.parent) if (pred(c)) return c;
+  for (let c: NodeImpl | undefined = n; c; c = c.up) if (pred(c)) return c;
   return undefined;
 }
 
@@ -378,7 +390,7 @@ class EarlyAwait implements AwaitWatch {
  * fiber hears before that node's turn, whether it was forked before or after the owner's abort.
  */
 function deliveredOnSubscriptionPath(parent: NodeImpl): NodeImpl | undefined {
-  for (let c: NodeImpl | undefined = parent; c; c = c.parent) {
+  for (let c: NodeImpl | undefined = parent; c; c = c.up) {
     if (c.delivered) return c;
     if (!c.subscribed) return undefined;
   }
@@ -438,8 +450,12 @@ export class NodeImpl implements Context {
   readonly name: string | undefined;
 
   // --- tree ---
-  /** Written once by placeAt() for a pending value node; otherwise set in the constructor. */
-  parent: NodeImpl | undefined;
+  /**
+   * The resolution parent and owner, for every internal walk: readable on a pending node, where it is
+   * `undefined` until placeAt() writes it once; otherwise set in the constructor. The public `parent` is the
+   * getter, which refuses a pending node (DESIGN.md §2.1, §3.3, D33).
+   */
+  up: NodeImpl | undefined;
   depth: number;
   root: NodeImpl;
   autoScopeRoot: NodeImpl;
@@ -567,7 +583,7 @@ export class NodeImpl implements Context {
     checkMs(opts); // before anything is emitted or attached (DESIGN.md §2.1)
     this.id = ++nextId;
     this.kind = init.kind;
-    this.parent = init.parent;
+    this.up = init.parent;
     this.hasBody = init.body !== undefined;
     this.body = init.body;
     this.poolState = init.pool;
@@ -796,12 +812,12 @@ export class NodeImpl implements Context {
     this.clearTimers();
     this.outcome = classify(this, r); // fixed NOW, readable by every release (DESIGN.md §2.8, §2.6)
     this.state = 'settling';
-    if (this.pooled && r.kind === 'unstarted') poolChildSettled(this.parent!, this); // D15: a waiter leaves the queue now
+    if (this.pooled && r.kind === 'unstarted') poolChildSettled(this.up!, this); // D15: a waiter leaves the queue now
     this.emit(r.kind === 'frozen' ? { type: 'node:frozen' } : { type: 'node:settled', outcome: this.outcome.status });
     // The immediate half of the destination: 'link' aborts the parent at once (DESIGN.md §4.7); so does an owned fiber (C5).
     // While the parent is open, not only while its body runs (DESIGN.md §2.6) — a parent closing or awaiting
     // its children is interrupted too, as a later abort() would (DESIGN.md §2.7).
-    const parent = this.parent;
+    const parent = this.up;
     if (
       this.kind === 'fiber' &&
       this.outcome.status === 'failure' &&
@@ -1094,7 +1110,7 @@ export class NodeImpl implements Context {
       this.lentTo.lender = undefined;
       this.lentTo = undefined;
     }
-    const p = this.parent;
+    const p = this.up;
     const o = this.outcome!;
     p?.subscribers.delete(this); // a delivery the routing below starts never reaches this complete node
     // D15: a pooled fiber gives its slot back before its handler runs, so the pool's onFailure can
@@ -1205,12 +1221,12 @@ export class NodeImpl implements Context {
 
   /** Where this node's failure record is held: its parent, or, for a member of a `settle` group, the group's parent (D31). */
   private failureHolder(): NodeImpl | undefined {
-    const p = this.parent;
+    const p = this.up;
     return (this.kind === 'fiber' ? p?.memberFailuresTo : undefined) ?? p;
   }
 
   // =========================================================================
-  // Awaiting: join, result, interrupted, never, managed, close, dispose (DESIGN.md §4.5, §4.2, §2.7)
+  // Awaiting: join, result, interrupted, never, sleep, managed, close, dispose (DESIGN.md §4.5, §4.2, §2.7)
   // =========================================================================
 
   /**
@@ -1264,6 +1280,13 @@ export class NodeImpl implements Context {
     return managedNever();
   }
 
+  /** A managed await over a timer (DESIGN.md §4.2, D34): guarded as `never` is, then `ms` checked, then armed. */
+  sleep(ms: number): Promise<void> {
+    this.assertAwaitShaped('sleep');
+    checkSleepMs(ms);
+    return managedSleep(ms);
+  }
+
   managed<T>(promise: Promise<T>): Promise<T> {
     this.assertAwaitShaped('managed');
     return managedFor(promise); // the one wrapper over a user promise: its rejection is delivered as it is
@@ -1307,7 +1330,7 @@ export class NodeImpl implements Context {
 
   [Symbol.dispose](): void {
     if (this.state === 'pending') throw new PendingNodeError(`[Symbol.dispose]() on pending node ${describeNode(this)}`);
-    if (this.parent === undefined)
+    if (this.up === undefined)
       throw new TypeError('A root context has no owner to wait for its completion; use `await using` or close()');
     this.abort();
   }
@@ -1499,7 +1522,7 @@ export class NodeImpl implements Context {
         const g = currentFrame()!.node!; // the group fiber
         // Before any member exists: their failures wait on the group's parent for the caller's resume step,
         // not on the group, so the group neither folds them into its own outcome nor consumes them (D13, D31).
-        g.memberFailuresTo = g.parent;
+        g.memberFailuresTo = g.up;
         // One at a time: a fork that throws leaves the members already running in `fibers`, so the resume step
         // consumes their failures instead of leaving them on the receiver (I11, D31).
         for (const m of members) fibers.push(g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
@@ -1573,7 +1596,7 @@ export class NodeImpl implements Context {
     if (this.state !== 'pending') throw new Error(`placeAt on non-pending node ${describeNode(this)}`);
     S.assertOpen('place');
     if (S.root !== this.root) throw new Error(`placeAt: ${describeNode(S)} is not in the requester's tree`); // a pending node is born with its requester's root
-    this.parent = S;
+    this.up = S;
     this.fixTree(S);
     this.entryOnOwner = S.attachNode(this, 'provided');
     this.state = 'running';
@@ -1645,11 +1668,11 @@ export class NodeImpl implements Context {
       ); // only inject reads ContextKey (DESIGN.md §4.12)
     if (options?.skipSelf) {
       // The internal walk from the parent, not parent.get(): its guards are not this node's concern (DESIGN.md §3.2).
-      if (this.parent === undefined) {
+      if (this.up === undefined) {
         if (options.optional) return undefined;
         throw new Error(`Cannot skipSelf for key '${getKeyDescription(key)}': no parent context exists.`);
       }
-      const r = resolveFrom(this.parent, key);
+      const r = resolveFrom(this.up, key);
       if (r.resolved) return r.value;
       if (options.optional) return undefined;
       throw new Error(`No provider found for key: ${getKeyDescription(key)}`);
@@ -1689,7 +1712,7 @@ export class NodeImpl implements Context {
     if (isNodeImpl(target)) {
       // The first overload with a node: a brand check moves it from subscriber to non-subscriber (DESIGN.md §2.3).
       if (release !== undefined) throw new TypeError('own(node, release): a node releases itself');
-      if (target.parent !== this || target.entryOnOwner === undefined || target.entryOnOwner.stack !== this.explicit)
+      if (target.up !== this || target.entryOnOwner === undefined || target.entryOnOwner.stack !== this.explicit)
         throw new NotOwnedError(`${describeNode(target)} is not owned by ${describeNode(this)} (not on its explicit stack)`); // no transfer of an entry between owners (DESIGN.md §9)
       if (!target.subscribed) throw new AlreadyOwnedError(`${describeNode(target)} is already owned`);
       target.subscribed = false;
@@ -1746,6 +1769,18 @@ export class NodeImpl implements Context {
 
   get scopes(): ReadonlySet<Scope> {
     return this.scopeSet ?? EMPTY_SCOPES;
+  }
+
+  /**
+   * The resolution parent (DESIGN.md §2.1, D33): `undefined` on a root, and on a value node released unowned;
+   * a value's storage node; a release fiber's owner; the node a fork, call, child or pool was made on. Refused on
+   * a pending node, as `get` and `addProvider` are (DESIGN.md §3.3): an auto-hoisted factory cannot read its
+   * placement. Internal walks read `up`, which a pending node has.
+   */
+  get parent(): NodeImpl | undefined {
+    if (this.state === 'pending')
+      throw new PendingNodeError(`parent of pending node ${describeNode(this)}: a value's node has no parent until it is placed`);
+    return this.up;
   }
 
   /** Pools: started and not complete. 0 for other kinds. */
@@ -1842,7 +1877,7 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * A managed await made through this node (join, result, interrupted, never, managed): the receiver's
+   * A managed await made through this node (join, result, interrupted, never, sleep, managed): the receiver's
    * guards, then the AWAITING node's lending. The await belongs to current(), whose freeze decision it is
    * (DESIGN.md §4.2), so a current node that is lent has a call it did not await (DESIGN.md §4.9, I26),
    * whichever node receives the method. own, release, abort and close stay exempt. In a
@@ -1886,7 +1921,7 @@ export class NodeImpl implements Context {
       seq: ++seq,
       id: this.id,
       kind: event.type.startsWith('entry:') ? 'entry' : this.kind,
-      parentId: this.parent?.id ?? null,
+      parentId: this.up?.id ?? null,
     } as NodeEvent;
     try {
       const ret: unknown = r(full);

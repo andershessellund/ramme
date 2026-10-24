@@ -12,7 +12,7 @@
 // - `own`, `release`, `releaseAll`, `fork`, `pool`, `child`, `current` and
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
-//   `settle`, `join`, `result`, `interrupted`, `never`, `managed` and
+//   `settle`, `join`, `result`, `interrupted`, `never`, `sleep`, `managed` and
 //   `runSync`, throw `CreationViolationError` first, before touching any node
 //   (DESIGN.md §3.2, §3.5, I16): a refused call never creates the value's node.
 //
@@ -198,6 +198,15 @@ export function interrupted(): Promise<unknown> {
 /** A managed await that never settles. */
 export function never(): Promise<never> {
   return requireBodyShaped('never').never();
+}
+
+/**
+ * A managed await that resolves after `ms` milliseconds, a number in [0, 2^31 − 1] (`RangeError` otherwise). A
+ * delivered `freeze` or `restore` body awaiting it is frozen, and its timer is cleared at that delivery; an
+ * `observe` body, a release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34).
+ */
+export function sleep(ms: number): Promise<void> {
+  return requireBodyShaped('sleep').sleep(ms);
 }
 
 /** Make a bare promise a managed await: in a delivered `freeze` body it never settles (DESIGN.md §4.2). */
