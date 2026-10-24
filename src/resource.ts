@@ -33,11 +33,11 @@ export class AlreadyOwnedError extends Error {
   override name = 'AlreadyOwnedError';
 }
 
-/** A body-shaped operation on a node that is lent to a `call` or a `shield` (DESIGN.md §4.9): it was not awaited. */
+/** A body-shaped operation on a node that is lent to a `call` (an `attempt`, an `unshield`) or a `shield` (DESIGN.md §4.9): it was not awaited. */
 export class UnawaitedCallError extends Error {
   override name = 'UnawaitedCallError';
   constructor(
-    /** The call fiber, or the shield's release fiber, the node is lent to. */
+    /** The call fiber (an `unshield`'s hole included), or the shield's release fiber, the node is lent to. */
     readonly child: Context,
     message?: string,
   ) {

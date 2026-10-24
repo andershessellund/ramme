@@ -12,8 +12,8 @@
 // - `own`, `release`, `releaseAll`, `fork`, `pool`, `child`, `current` and
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
-//   `settle`, `shield`, `join`, `result`, `interrupted`, `never`, `sleep`,
-//   `managed` and `runSync`, throw `CreationViolationError` first, before
+//   `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`, `never`,
+//   `sleep`, `managed` and `runSync`, throw `CreationViolationError` first, before
 //   touching any node (DESIGN.md §3.2, §3.5, I16): a refused call never
 //   creates the value's node.
 //
@@ -179,6 +179,24 @@ export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, o
  */
 export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T> {
   return requireBodyShaped('shield').shield(t, ...args);
+}
+
+/**
+ * A hole in the enclosing shield (D39, DESIGN.md §4.2): `shield` and `unshield` are Effect's `uninterruptibleMask`
+ * and its `restore`. It runs `t` as `attempt` does, in a new child of the current node, started synchronously, lending
+ * the current node until it completes, and resolves with its outcome. The child is also linked to the signal of the
+ * shield's owner, the node the nearest `shield` at or above the current node runs on (its release fiber's parent: the
+ * node current at the free `shield`, `ctx` for `ctx.shield`), found from a call made in the shield too. The owner's
+ * interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject and it ends `aborted` with the
+ * owner's reason; an `observe` hole hears it through `signal()`. An interruption that already came skips the hole, and
+ * the shield's body goes on either way. A `failure` is a value, consumed on resume. A shield inside a shield, or inside
+ * a call made under one, runs on that shield or call, so its holes follow only that node's own signal: the outer
+ * shield's release deadline, or the call's own delivery.
+ *
+ * @throws TypeError outside any shield, before anything runs: there is no owner to link to; use `attempt` there.
+ */
+export function unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+  return requireBodyShaped('unshield').unshield(t, ...args);
 }
 
 /** An unsubscribed pool on the current node; its forks report to `onFailure` (DESIGN.md §4.10). */

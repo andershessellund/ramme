@@ -42,6 +42,7 @@ export {
   race,
   settle,
   shield,
+  unshield,
   pool,
   child,
   join,

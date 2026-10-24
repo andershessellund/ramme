@@ -18,7 +18,7 @@
 //   pushed during release is released next);
 // - one release (DESIGN.md §2.4): every release runs in a release fiber that
 //   is the current node while it runs (I14); `shield` runs a body in one on
-//   demand (D39);
+//   demand, and `unshield` makes a hole in it (D39);
 // - completion (DESIGN.md §4.12): release and unconsumed errors amend the
 //   outcome once; the final failure is routed to its destination
 //   (DESIGN.md §4.7);
@@ -89,7 +89,7 @@ let nextId = 0;
 let seq = 0;
 
 /** The operations that make a call (`callTask`), and `shield`, named in the lending error (DESIGN.md §4.9). */
-type CallOp = 'call' | 'attempt' | 'all' | 'race' | 'settle' | 'shield';
+type CallOp = 'call' | 'attempt' | 'unshield' | 'all' | 'race' | 'settle' | 'shield';
 
 /** One shared empty set; `scopeSet` is never mutated after construction. */
 const EMPTY_SCOPES: ReadonlySet<Scope> = new Set<Scope>();
@@ -134,7 +134,7 @@ function reportReceiverError(err: unknown): void {
 /**
  * What a failure handler may do on its own parent while the parent's body is lent (DESIGN.md §4.7, §4.9): resolve,
  * fork and make children. None of them awaits, enters the parent or lends it, so none of them is a forgotten
- * await (I26). `call`, `attempt`, `all`, `race`, `settle`, `shield`, `run` and the managed awaits through the parent
+ * await (I26). `call`, `attempt`, `unshield`, `all`, `race`, `settle`, `shield`, `run` and the managed awaits through the parent
  * stay refused, so `lentTo` is never touched. Through any other node a handler is checked as the receiver only. A
  * parent lent to a shield is lent only until its body settles (D39), so a handler running after that is not refused.
  */
@@ -352,6 +352,15 @@ function joinMark(f: NodeImpl): (target: FreezeTarget) => boolean {
 function heldByUnwindingBody(n: NodeImpl): boolean {
   const b = n.up === undefined ? undefined : firstUp(n.up, (c) => c.hasBody);
   return b !== undefined && b.applied && b.bodyStarted && !b.bodyDone;
+}
+
+/**
+ * D39: the region `unshield` makes a hole in, the nearest shield's release fiber at or above `n`, or `undefined`
+ * outside any shield. The walk passes nodes of every kind: an entry's release fiber is not a shield, and a call, a
+ * fork, a `child()` scope or a hole inside the shield's body is inside its region.
+ */
+function enclosingShield(n: NodeImpl): NodeImpl | undefined {
+  return firstUp(n, (c) => c.isShield);
 }
 
 /**
@@ -583,8 +592,12 @@ export class NodeImpl implements Context {
    * completing, so the node completes after every shield, awaited or not. Created on first use.
    */
   shieldHolds: Set<Promise<void>> | undefined = undefined;
-  /** A shield's release fiber: it routes its final failure to its parent, as a `'join'` fiber does (D39, A.4). */
-  routesFailure = false;
+  /**
+   * A release fiber `shield` made, never an entry's (D39, A.4): it routes its final failure to its parent, as a
+   * `'join'` fiber does; a lending to it ends with the lender's body; and it is the region `unshield` finds, whose
+   * parent is the owner the hole is linked to.
+   */
+  isShield = false;
   /**
    * Set only while the release loop waits for `handlerHolds` or `earlyAwaits`; an attached node entry,
    * a dropped hold and an early awaiter that stops waiting wake it (DESIGN.md §2.4, D16).
@@ -869,7 +882,7 @@ export class NodeImpl implements Context {
     // D39 (A.4): a lending to a shield ends with the lender's body. A settled body cannot have forgotten an await, and
     // `shieldHolds` keeps this node open until the shield completes, so a child's failure handler may await through it.
     const lent = this.lentTo;
-    if (lent !== undefined && lent.routesFailure && (r.kind === 'returned' || r.kind === 'threw')) {
+    if (lent !== undefined && lent.isShield && (r.kind === 'returned' || r.kind === 'threw')) {
       lent.lender = undefined;
       this.lentTo = undefined;
       this.emit({ type: 'node:returned', childId: lent.id });
@@ -1201,7 +1214,7 @@ export class NodeImpl implements Context {
     let escalate: { error: unknown } | undefined;
     // An entry's release fiber is excluded: its failure is that entry's release failure (D16). A shield's is routed
     // as a 'join' fiber's, for its resume step to consume or its parent to surface (D39, A.4).
-    if (p !== undefined && o.status === 'failure' && (this.kind !== 'release' || this.routesFailure)) {
+    if (p !== undefined && o.status === 'failure' && (this.kind !== 'release' || this.isShield)) {
       const err = o.error;
       const record: FailureRecord = { error: err, consumed: false };
       this.failure = record;
@@ -1484,17 +1497,51 @@ export class NodeImpl implements Context {
    */
   attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
     this.assertBodyShaped('attempt');
-    return this.callTask<Outcome<T>>('attempt', toTask(t as unknown as TaskLike), args, (child) => {
-      const awaiter = this.awaiterNode(); // as result(): the awaiting body's node, else the receiver (DESIGN.md §5)
-      awaiter.emit({ type: 'join:enter', joinedId: child.id });
-      return outcomeStep<T>(child, awaiter);
-    });
+    return this.callTask<Outcome<T>>('attempt', toTask(t as unknown as TaskLike), args, (child) => this.outcomeResume<T>(child));
   }
 
   /**
-   * `call` and `attempt`, and the group fiber of `all`, `race` and `settle`: `op` is the method the user called,
-   * for the lending error. `resume(child)` runs once the child exists and the current node is lent, before the
-   * body starts, and returns the resume step (D13): the only difference between the five.
+   * D39: a hole in the enclosing shield, which is to `shield` what Effect's `restore` is to `uninterruptibleMask`. It is
+   * `attempt` on this node whose child is also linked, through `NodeOptions.signal`, to the signal of the shield's
+   * owner: the node the nearest shield at or above this node (`enclosingShield`) runs on, its parent (the current
+   * node for the free `shield`, `ctx` for `ctx.shield`, the outer shield for a shield inside a shield). The owner's
+   * interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject, and its outcome is `aborted`
+   * with the owner's reason; an `observe` hole hears it through `signal()`. One that already came skips it, since a
+   * linked signal that is already aborted settles the child without running it (DESIGN.md §4.6); either way the
+   * shield's body goes on, with the outcome as a value. The walk finds the owner from a call made inside the shield
+   * too, where `current().parent` is the shield's release fiber, whose signal is only the release deadline. Outside
+   * any shield there is no owner to link to: a TypeError, thrown before anything is made.
+   */
+  unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>> {
+    this.assertBodyShaped('unshield');
+    const region = enclosingShield(this);
+    if (region === undefined)
+      throw new TypeError(
+        `unshield() on ${describeNode(this)} outside any shield: it makes a hole in the enclosing shield(), which the ` +
+          'interruption of the node the shield runs on cancels; outside a shield, use attempt()',
+      );
+    const task = toTask(t as unknown as TaskLike);
+    const owner = region.up!.signal; // a shield's release fiber always has a parent: the node it was started on
+    const own = task.opts.signal;
+    const signal = own === undefined ? owner : AbortSignal.any([own, owner]); // the task's own signal still delivers it
+    const hole: TaskLike = { [TASK]: true, name: task.name, body: task.body, opts: { ...task.opts, signal } };
+    return this.callTask<Outcome<T>>('unshield', hole, args, (child) => this.outcomeResume<T>(child));
+  }
+
+  /**
+   * The resume step of `attempt` and `unshield`: `join:enter` now and `join:leave` on resume, on the awaiting body's
+   * node as `result()` emits them, else on the receiver (DESIGN.md §5); the outcome as a value.
+   */
+  private outcomeResume<T>(child: NodeImpl): () => Outcome<T> {
+    const awaiter = this.awaiterNode();
+    awaiter.emit({ type: 'join:enter', joinedId: child.id });
+    return outcomeStep<T>(child, awaiter);
+  }
+
+  /**
+   * `call`, `attempt` and `unshield`, and the group fiber of `all`, `race` and `settle`: `op` is the method the user
+   * called, for the lending error. `resume(child)` runs once the child exists and the current node is lent, before the
+   * body starts, and returns the resume step (D13): with `unshield`'s linked signal, the only difference between the six.
    */
   private callTask<R>(op: CallOp, task: TaskLike, args: unknown[], resume: (child: NodeImpl) => () => R): Promise<R> {
     // DESIGN.md §4.9: `call` lends the CURRENT node (the awaiting body), not the receiver (D11). A current
@@ -1544,7 +1591,7 @@ export class NodeImpl implements Context {
       opts: { name: `shield:${task.name}`, interrupt: 'observe', signal: releaseDeadline(this.releaseTimeoutMs) },
       body: { fn: task.body as Body<unknown, unknown[]>, args, destination: noop, taskName: task.name },
     });
-    rf.routesFailure = true;
+    rf.isShield = true;
     const holds = (this.shieldHolds ??= new Set());
     const hold = rf.completion;
     holds.add(hold);
@@ -1986,7 +2033,10 @@ export class NodeImpl implements Context {
           ? `(await it before this ${op}(), or put both in one ${op === 'settle' ? 'settle' : 'all'}())` // the group combinators name themselves in the lending error
           : op === 'attempt'
             ? '(two concurrent attempts on one node? use settle())'
-            : '(two concurrent calls on one node? use all())'),
+            : op === 'unshield'
+              ? // D39: an all() in the shield would make its members children of the shield, linked to no owner
+                '(two concurrent unshields on one node? await each one, or make one hole: unshield(() => all([...])))'
+              : '(two concurrent calls on one node? use all())'),
     );
   }
 
@@ -1998,7 +2048,7 @@ export class NodeImpl implements Context {
     this.assertNotLent(op);
   }
 
-  /** get, call, attempt, all, race, settle, shield, run, runSync: the four guards, and nothing that runs inside a creation (DESIGN.md §3.3). */
+  /** get, call, attempt, unshield, all, race, settle, shield, run, runSync: the four guards, and nothing that runs inside a creation (DESIGN.md §3.3). */
   private assertBodyShaped(op: string): void {
     this.assertBodyGuards(op);
     this.assertNotUnderCreation(op);

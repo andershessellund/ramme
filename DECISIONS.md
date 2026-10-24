@@ -1317,6 +1317,59 @@ Settled while implementing it:
   `node:frozen` event. **Cost.** A rejected promise's source holds its
   resume step, and through it its nodes, until the source settles; a
   `never()` raced in a loop stays armed on its node until the delivery.
+- *`unshield` is the hole in a shield: `shield` plus `unshield` are Effect's
+  `uninterruptibleMask` plus `restore`.* Inside a shield `signal()` is the
+  release deadline, so nothing started there hears the owner's interruption
+  (the owner is the node the shield runs on, its release fiber's parent: the
+  current node for the free `shield`, `ctx` for `ctx.shield`, never the body
+  that called `ctx.shield`, since the shield is that node's release work,
+  holding it open and resolving through it), and a library helper that
+  wants "non-cancellable except for this one await" needs a hole. By hand it
+  is a child linked to `current().parent!.signal`, which is right only in the
+  shield's own body: in a call made there, `current()` is the call's node and
+  `.parent` the shield's release fiber, so the hole is linked to the deadline
+  and silently never fires. `unshield(t, …args)` walks up from the node it is
+  made on to the nearest shield's release fiber, which the one flag a shield
+  already carried marks (`isShield`, which routes its failure and ends its
+  lending with the lender's body; an entry's release fiber has it unset),
+  and links the child to that fiber's parent's signal through
+  `NodeOptions.signal`, combined with the task's own by `AbortSignal.any`.
+  It is attempt-shaped because the hole is the one place in a shield where
+  the owner's interruption arrives, and the shield's body is release work
+  that must go on: an outcome lets it branch (carry on after `aborted`,
+  rethrow a `failure`), where a rejection would unwind the very body the
+  shield exists to keep running, and the lending keeps D11 (an unawaited
+  hole is a forgotten await; a second `unshield` during one is refused with
+  the hint that keeps the link, one hole around an `all()`, since an `all()`
+  of the two in the shield would make its members children of the shield,
+  linked to no owner). An owner already interrupted skips the hole:
+  a linked signal that is already aborted settles any child unstarted,
+  `observe` or not (DESIGN.md §4.6), which is Effect's `restore` under a
+  pending interruption, and spares the hole's bare work (a peer notification
+  not handed `signal()`). This supersedes the first specification of
+  `unshield`, which had such a hole born delivered and run up to its first
+  managed await (rejected below). An `observe` hole whose owner is
+  interrupted mid-hole hears it through `signal()` and runs on, as any
+  `observe` child does. A shield inside a shield, or inside a call made
+  under one, runs on that shield's release fiber or that call's node, which
+  is then its owner, so its holes follow only that node's own signal (the
+  outer shield's release deadline, or the call's own delivery) and the
+  task's interruption neither cuts nor skips them. That is Effect's rule
+  too (`restore` restores the entry state of its own mask), and linking past
+  the caller's shield to the task would let a helper's hole reopen a region
+  its caller closed on purpose. Outside any shield it throws a
+  `TypeError`, before anything is made: there is no owner to link to, and
+  behaving as `attempt` there would hide a helper used where it cannot do
+  what it says. No row in the error table: it is a misuse at the call site,
+  as `race([])` is. A third name in the core surface;
+  `ramme/no-unused-outcome` does not match it yet (D35). **Rejected:** a
+  `restore` callback parameter on `shield` (`shield((restore) => …)`), a
+  second name for a composition of two existing primitives, which code in a
+  call below the shield would have to be handed explicitly; reading the
+  owner off `current().parent`, for the call inside the shield above;
+  running a hole whose owner was already interrupted up to its first
+  managed await (the birth rule's `freeze` child), which repeats the bare
+  work the interruption was meant to stop.
 
 ### D40. Why not generators (Effection)
 

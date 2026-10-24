@@ -73,7 +73,7 @@ package.json names exactly those files). One of them is required (§6, D9′).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `InterruptedError`; `Result`, with its helpers in `ramme/result` (§4.13) | `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `InterruptedError`; `Result`, with its helpers in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `managed`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
@@ -140,6 +140,7 @@ Nodes differ in three independent bits, plus a `kind` tag (`context`,
 | `child(opts)` | context | explicit / yes | no | |
 | `call(t, …)` / `t.call(…)` | fiber, joined | explicit / yes | yes | starts synchronously; lends the current node (§4.9) |
 | `attempt(t, …)` / `t.attempt(…)` | fiber, joined | explicit / yes | yes | as `call`; resolves with the outcome (§4.5) |
+| `unshield(t, …)` | fiber, joined | explicit / yes | yes | as `attempt`, inside a shield; also linked to the signal of the shield's owner (§4.2) |
 | `fork(t, …)` / `t.fork(…)` | fiber | explicit / yes | yes | starts in a microtask, or after placement in creation |
 | `own(fork(t, …))` | fiber | explicit / **no** | yes | an owned fiber (§2.6 C5) |
 | `pool(opts)` | pool | explicit / no | no | its forks are its subscribers (§4.10) |
@@ -721,10 +722,10 @@ already caches the key (D7).
 
 During creation: `inject` reads are tracked and `lookup` throws; the
 value's own node is current (§3.3); `call`, `attempt`, `all`, `race`,
-`settle`, `run`, `runSync`, `join`, `result`, `interrupted`, `never`,
-`sleep`, `managed` and entering any other node as current throw
-`CreationViolationError` (`release`, `releaseAll`, `close()` and
-`[Symbol.asyncDispose]()` do not); `fork` on a live node passed in from
+`settle`, `shield`, `unshield`, `run`, `runSync`, `join`, `result`,
+`interrupted`, `never`, `sleep`, `managed` and entering any other node as
+current throw `CreationViolationError` (`release`, `releaseAll`, `close()`
+and `[Symbol.asyncDispose]()` do not); `fork` on a live node passed in from
 outside is allowed (it starts in a microtask); a creation ends when its
 factory returns, so a continuation the factory scheduled runs with no
 creation frame. A late read on a value's node that *creates* a value
@@ -778,7 +779,7 @@ delivery and completion the body may run plain code, and everything it does
 is legitimate (I8). Its node completes after the body has settled (§2.4).
 
 A managed await is an await on a promise returned by `call`, `attempt`,
-`all`, `race`, `settle`, `shield`, `release`, `releaseAll`, `join`,
+`unshield`, `all`, `race`, `settle`, `shield`, `release`, `releaseAll`, `join`,
 `result`, `interrupted`, `never`, `sleep(ms)`, `managed(p)`, `close()` or
 `[Symbol.asyncDispose]()`. Everything else is bare: `fetch`, timers other
 than `sleep`, driver promises; `managed(p)` makes one managed. `never()`
@@ -799,8 +800,9 @@ queued under no frame (§6), which runs the awaiter's callbacks in the
 awaiter's captured context, as a source's settlement would. When the job is
 queued depends on the shape of the await:
 
-- **Call-shaped awaits** (`call`, `attempt`, `all`, `race`, `settle`, and a
-  `join` or `result` of a fiber subscribed below the awaiting body) reject
+- **Call-shaped awaits** (`call`, `attempt`, `unshield`, `all`, `race`,
+  `settle`, and a `join` or `result` of a fiber subscribed below the awaiting
+  body) reject
   when the awaited fiber completes, never earlier. The awaiting node is lent
   to a call's child until then (§4.9), so a rejection at the delivery would
   resume a body that is still lent, and a foreign `finally` around the call
@@ -827,8 +829,8 @@ queued depends on the shape of the await:
   waiting for `p` and does not stop it: a driver call it wraps runs on unless
   it was handed `signal()`.
 
-`attempt`, `settle` and `result` on an interrupted caller reject with
-`InterruptedError` rather than resolving with an outcome: `aborted` in an
+`attempt`, `unshield`, `settle` and `result` on an interrupted caller reject
+with `InterruptedError` rather than resolving with an outcome: `aborted` in an
 outcome keeps meaning the awaited work's own abort (§4.5, §4.8).
 
 **Release work is exempt.** After its delivery a body may still await,
@@ -899,6 +901,67 @@ delivered and runs its synchronous prefix, and any bare work, until its
 first managed await rejects; an `observe` child is not born delivered (a
 call of one is delivered by the mark, and the call still rejects); a fork
 into an undelivered pool, and a failure handler's work, run normally.
+
+**`unshield(t, …args)`** and `ctx.unshield` make a hole in the enclosing
+shield: `shield` and `unshield` are Effect's `uninterruptibleMask` and its
+`restore`. Inside a shield `signal()` is the release deadline, so nothing
+started there hears the interruption of the node the shield runs on, its
+release fiber's parent (the current node for the free `shield`, `ctx` for
+`ctx.shield`, whichever body called it): the shield's **owner**. A helper
+that is non-cancellable except for one step needs a hole. `unshield` is
+`attempt` (§4.5) whose child is also linked to the owner's signal, as a
+`NodeOptions.signal` links a node (§4.1), alongside its task's own
+`signal`: a subscribed child of the node it is made on (the current node,
+for the free function), started synchronously, lending the current node
+until it completes (§4.9), with `lookup` resolving through that node, and a
+call-shaped await (above). The owner is found by walking up from
+that node to the nearest shield's release fiber, past calls, forks,
+`child()` scopes and an entry's release fiber, which is not a shield, and
+taking its parent. So a hole made in a call inside the shield still links to
+the owner, where a hand-written `current().parent!.signal` there would be the
+shield's release fiber's, the deadline, and would silently never fire.
+
+```ts
+await shield(async () => {
+  await flushBuffer();                            // runs to its end
+  const r = await unshield(notifyPeer, event);    // the one step the owner's interruption still stops
+  if (r.status === 'failure') throw r.error;      // a real failure stays a failure
+  await writeOffset();                            // runs to its end, whatever the hole did
+});
+```
+
+- **It ends when the owner is interrupted.** The owner's delivery fires its
+  signal, which delivers the hole with the owner's reason: a `freeze` or
+  `restore` hole's managed awaits reject, and once it has unwound `unshield`
+  resolves `{ status: 'aborted', reason }`; an `observe` hole hears it
+  through `signal()` and `interrupted()` and runs on, its outcome its own
+  (§4.3). The shield's body goes on, since a shield is an `observe` release
+  fiber on no stack, which the owner's delivery does not reach, and the hole
+  is below it.
+- **It is skipped at once if it already was**, the usual case in a `catch`
+  or a `finally` after the delivery: a linked signal that is already aborted
+  settles the child `aborted` without running its body (§4.6), whatever its
+  mode, so it lends nothing and does none of its bare work, where a child
+  born delivered (above) would run up to its first managed await (D39).
+- **The branch is a value.** As for `attempt`, a `failure` is delivered as a
+  value and consumed on resume, and `aborted` as one, so the shield's body
+  decides what each means instead of being unwound.
+
+Outside any shield there is no owner to link to: `unshield` throws a
+`TypeError` before it makes anything, and `attempt` is the form there.
+Nesting composes: a shield inside a hole is a new region, and an `unshield`
+inside it finds that inner shield and links to its owner. A shield inside a
+shield, or inside a call made under one, is a region too, and runs on that
+shield's release fiber or that call's node, which is therefore its owner.
+The task's interruption reaches neither, so it neither cuts nor skips their
+holes, which only that node's own signal bounds: the outer shield's release
+deadline, or the call's own delivery (its `signal`, its `timeoutMs`, an
+`abort()` of it), which no shield's deadline makes, since a shield is
+`observe`. That is Effect's `restore` under a nested `uninterruptibleMask`,
+which restores the inner mask's entry state: a library helper's hole is a
+hole in the helper's shield, so a caller that wraps the helper in a shield
+of its own makes the whole helper release work, its step included. Under
+`ctx.shield` the owner is `ctx`, never the body that called it.
 
 `sleep(ms)` and `ctx.sleep(ms)` resolve after `ms` milliseconds, a number
 in [0, 2^31 − 1]; anything else is a `RangeError`, thrown before a timer is
@@ -1241,8 +1304,8 @@ lend nothing (§4.9). While the
 parent's body is lent, the handler may still use
 `get`, `fork`, `child`, `pool` and `runSync` through the parent, and `own`,
 `release`, `releaseAll`, `abort`, `close` and the `Symbol` methods, which no
-lent node refuses; `call`, `attempt`, `all`, `race`, `settle`, `shield`,
-`run`, `join`, `result`, `interrupted`, `never`, `sleep` and `managed`
+lent node refuses; `call`, `attempt`, `unshield`, `all`, `race`, `settle`,
+`shield`, `run`, `join`, `result`, `interrupted`, `never`, `sleep` and `managed`
 through it throw `UnawaitedCallError`; a handler that must wait then forks
 the wait. A parent lent to a shield is lent only while its body runs (§4.9),
 so after a `void shield(…)` and the body's return its handlers may await
@@ -1304,8 +1367,8 @@ members it had forked, which are consumed with it.
 ### 4.9 Lending: unawaited calls are detected (D11)
 
 `call` **lends** the current node to the child until the call settles (the
-child completes, its releases included); so do `attempt`, and `all`, `race`
-and `settle`, which are calls, and `shield`, until its release fiber
+child completes, its releases included); so do `attempt` and `unshield`, and
+`all`, `race` and `settle`, which are calls, and `shield`, until its release fiber
 completes or the lender's body settles, whichever is first (a settled body
 cannot have forgotten an await, and the node holds its shields, §4.2). A
 call's lending is cleared only by the child's completion, which is why an
@@ -1316,7 +1379,7 @@ pending (`PendingNodeError`), no creation is current
 (`CreationViolationError`), and the node is not lent (`UnawaitedCallError`);
 `fork`, `child` and `pool`, which a pending node and a creation allow, check
 completion and lending only. While lent, `lookup`/`get`, `call`, `attempt`,
-`fork`, `child`, `pool`, `all`, `race`, `settle`, `shield`, `join`, `result`,
+`unshield`, `fork`, `child`, `pool`, `all`, `race`, `settle`, `shield`, `join`, `result`,
 `interrupted`, `never`, `sleep`, `managed`, `run` and `runSync` throw
 `UnawaitedCallError` naming the child (`.child`); a managed await also
 checks the lending of the awaiting body's node, whichever node receives it.
@@ -1418,8 +1481,8 @@ owned-fiber failure and every early-release failure that no resumed awaiter
 received. A fiber's final outcome then goes to *its* destination; a
 context's or pool's `close()` and `asyncDispose()` reject with it. A failure
 is consumed at most once: by the resume step (§4.2) of a `join` (or `call`),
-`result`, `attempt`, `settle`, `shield`, `asyncDispose` or `close`, or by the parent
-surfacing it. `result`, `attempt` and `settle` deliver a failure as a value
+`result`, `attempt`, `unshield`, `settle`, `shield`, `asyncDispose` or `close`, or by the parent
+surfacing it. `result`, `attempt`, `unshield` and `settle` deliver a failure as a value
 (`{ status: 'failure', error }`) instead of throwing it, and an `aborted`
 outcome as a value instead of `FiberAbortedError`; the consumption is the
 same, so an outcome nobody inspects is a failure dropped (D31). Nothing the
@@ -1436,7 +1499,7 @@ can be one (§4.13).
 | `AlreadyOwnedError` | a second release for one object on one node; `own(node)` of an already-owned node |
 | `UnawaitedCallError` | body-shaped use of a lent node (§4.9); `.child` is the call fiber, or a shield's release fiber |
 | `FiberNotAwaitableError` | awaiting a fiber; a body returning a fiber |
-| `FiberAbortedError` | `join`/`call`/`all`/`race` of an aborted fiber by an awaiter that is not itself interrupted; `[Symbol.asyncDispose]()` of an aborted fiber (it aborts first, §2.7), including an interrupted body's exempt dispose of a fiber below it (§4.2); a managed promise awaited by a body other than its creator, rejected by its creator's delivery (§4.2); `.reason`. `result`, `attempt` and `settle` report `aborted` as an outcome instead |
+| `FiberAbortedError` | `join`/`call`/`all`/`race` of an aborted fiber by an awaiter that is not itself interrupted; `[Symbol.asyncDispose]()` of an aborted fiber (it aborts first, §2.7), including an interrupted body's exempt dispose of a fiber below it (§4.2); a managed promise awaited by a body other than its creator, rejected by its creator's delivery (§4.2); `.reason`. `result`, `attempt`, `unshield` and `settle` report `aborted` as an outcome instead |
 | `InterruptedError` | the awaiting body's own interruption: after a `freeze` or `restore` node's delivery, every managed await its body makes but release work (§4.2); `.reason`. Rethrow it. A promise derived from another body's managed await and shared with this one carries that body's instead (§4.4) |
 | `PoolClosedError`, `PoolFullError` | pool intake after the signal or `close()`; at capacity with `whenFull: 'reject'` |
 | `CreationViolationError` | `lookup` or a body-shaped operation during creation; `inject` outside creation; `get(ContextKey)` |
@@ -1581,7 +1644,7 @@ owner), `kind` (`context` | `fiber` | `pool` | `release` | `value`, or
 | `entry:registered` / `entry:released` | `entryName`, `stack`; `error` on a failed release |
 | `node:complete` | `outcome`; always a node's last event |
 | `node:stalled` | `sinceMs` (§4.4) |
-| `join:enter` / `join:leave` | `joinedId`, `outcome`: a `join`, `result` or `attempt` waits on a fiber; emitted on the awaiting body's node, not on the receiver of `n.join(f)` (on the receiver when no body awaits); an awaiter whose resume step does not run (one rejected by its interruption) emits no `join:leave` |
+| `join:enter` / `join:leave` | `joinedId`, `outcome`: a `join`, `result`, `attempt` or `unshield` waits on a fiber; emitted on the awaiting body's node, not on the receiver of `n.join(f)` (on the receiver when no body awaits); an awaiter whose resume step does not run (one rejected by its interruption) emits no `join:leave` |
 
 Release fibers are nodes and emit these events too, so the stream covers
 shutdown. A receiver is a sink: it runs synchronously in the emitting frame
@@ -1644,7 +1707,7 @@ the two adapters (`ramme/node`, `ramme/async-context`) and `result.ts`
 | `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, the keys its factory injected itself, pin), resolve results (with the redirect an alias followed), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed) |
 | `stack.ts` | `Entry`, `Stack`: the two stacks, fixed positions, LIFO release order |
 | `managed.ts` | `ManagedPromise`: the target, sticky rejection (call-shaped deferral and its mark, the release-work exemption) and the resume step |
-| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers and `shield`, lending, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, awaits, events |
+| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, `shield` and `unshield`, lending, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, awaits, events |
 | `pool.ts` | the pool's concurrency queue and intake rules |
 | `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, alias redirects, decided markers, placement by view, the value node's creation and placement |
 | `fiber.ts` | `task()` |

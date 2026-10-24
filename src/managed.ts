@@ -20,8 +20,9 @@
 // `InterruptedError(reason)`, one in flight at the delivery and every one
 // made afterwards. Three shapes differ:
 //
-// - call-shaped awaits (`call`, `attempt`, `all`, `race`, `settle`, and a
-//   `join` or `result` of a fiber subscribed below the awaiter) reject only
+// - call-shaped awaits (`call`, `attempt`, `unshield`, `all`, `race`,
+//   `settle`, and a `join` or `result` of a fiber subscribed below the
+//   awaiter) reject only
 //   when the awaited fiber completes: a call's awaiting node is lent to it
 //   until then (D11), and a foreign `finally` around either must not run
 //   while that work is still unwinding. The wrapper is *marked* at the

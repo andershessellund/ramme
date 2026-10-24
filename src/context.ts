@@ -215,9 +215,17 @@ export interface Context {
   /**
    * Run `t` in a release fiber of this node and await it: release work, which no interruption rejects (D39,
    * DESIGN.md §4.2). It lends the current node as `call` does, until it completes or that node's body settles;
-   * this node completes after it, awaited or not.
+   * this node completes after it, awaited or not, and is the owner an `unshield` inside it follows.
    */
   shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<T>;
+  /**
+   * A hole in the enclosing shield (D39, DESIGN.md §4.2): `attempt` on this node, whose child is also linked to the
+   * signal of the shield's owner, the node the nearest `shield` at or above this node runs on (its release fiber's
+   * parent). That node's interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject and it
+   * ends `aborted`; an `observe` hole hears it through `signal()`. One that already came skips the hole, and the
+   * outcome is a value. `TypeError` outside any shield.
+   */
+  unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Promise<Outcome<T>>;
   /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Promise<[A, B]>` (DESIGN.md §4.8). */
   all<const T extends readonly Task<[], unknown>[]>(tasks: T, opts?: NodeOptions): Promise<AllResult<T>>;
   race<T>(tasks: readonly Task<[], T>[], opts?: NodeOptions): Promise<T>;

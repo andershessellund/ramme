@@ -61,6 +61,7 @@ const expected = new Map([
     'race',
     'settle',
     'shield',
+    'unshield',
     'pool',
     'child',
     'join',
@@ -110,8 +111,8 @@ const expected = new Map([
 const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
-  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield', 'pool',
-  'child', 'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
+  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
+  'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, results, outcomes

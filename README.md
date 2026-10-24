@@ -281,7 +281,13 @@ and everything attached to it, until the timer fires. Outside any node,
   release work still completes: `release(x)`, `releaseAll()`, `close()` or
   `[Symbol.asyncDispose]()` of a node below your task, and
   `shield(async () => …)`, which runs its body to the end (its `signal()` is
-  the release deadline) and hands you its result.
+  the release deadline) and hands you its result. Inside a `shield(…)` your
+  task's own body opens, `await unshield(step)` runs the one step your
+  task's interruption should still stop, skips it if that interruption
+  already came, and hands you its outcome (`aborted` then) instead of ending
+  the shield; elsewhere it follows the node the shield runs on (`ctx` for
+  `ctx.shield`, and for a shield nested in another the outer one, which
+  only the release deadline stops).
 - **Await every `call`.** A forgotten await is detected: the next
   body-shaped operation in that body (`lookup`, `fork`, `call`, `join`, …)
   throws `UnawaitedCallError`. `own`, `release`, `abort` and `close` stay
