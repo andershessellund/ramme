@@ -4,13 +4,14 @@ import { noAsyncBody } from './no-async-body.js';
 ruleTester.run('no-async-body', noAsyncBody, {
   assertionOptions,
   valid: [
-    { name: 'a generator body', code: 'const t = task(function* (id) { return yield* call(load, id); });' },
-    { name: 'a synchronous arrow', code: 'const t = task(() => 1); call(() => compute());' },
-    { name: 'a sync arrow returning an op, driven as the body', code: 'fork(() => call(t));' },
+    { name: 'a generator body', code: 'const t = task(function* (id) { return yield* load(id); });' },
+    { name: 'a synchronous arrow', code: 'const t = task(() => 1); app.call(() => compute());' },
+    { name: 'a sync arrow returning an op, driven as the body', code: 'fork(() => t());' },
     { name: 'a named generator function', code: 'function* load() { yield* sleep(1); } fork(load);' },
-    { name: 'promised over a generator', code: 'db.transaction(promised(function* (tx) { yield* call(insert, tx); }));' },
+    { name: 'promised over a generator', code: 'db.transaction(promised(function* (tx) { yield* insert(tx); }));' },
     { name: 'an async release or handler, a bare wait', code: 'own(x, async (v) => v.close()); task(work, { onFailure: async (e) => log(e) });' },
-    { name: 'an async function as a later argument', code: 'call(t, async () => 1);' },
+    { name: 'an async function as a later argument', code: 'app.call(t, async () => 1);' },
+    { name: 'a bound task’s generator body (D44): the receiver is no body', code: 'class Api { get = task(this, function* get(p) { return p; }); }' },
     { name: 'a name declared elsewhere, not visible', code: 'import { handler } from "./h.js"; fork(handler);' },
     { name: 'a let, which may be reassigned', code: 'let body = async () => 1; body = function* () {}; fork(body);' },
     { name: 'another verb', code: 'run(async () => 1); wait(async () => 1);' },
@@ -21,7 +22,12 @@ ruleTester.run('no-async-body', noAsyncBody, {
       code: 'const t = task(async (id) => load(id));',
       errors: [{ messageId: 'asyncBody', data: { verb: 'task' }, line: 1, column: 16, endColumn: 38 }],
     },
-    { name: 'an async function expression to call', code: 'yield* call(async function () {});', errors: [{ messageId: 'asyncBody', data: { verb: 'call' } }] },
+    { name: 'an async function expression to a node’s call', code: 'await app.call(async function () {});', errors: [{ messageId: 'asyncBody', data: { verb: 'call' } }] },
+    {
+      name: 'a bound task’s async body (D44): the second argument',
+      code: 'class Api {\n  get = task(this, async (p) => p);\n}',
+      errors: [{ messageId: 'asyncBody', data: { verb: 'task' }, line: 2, column: 20 }],
+    },
     { name: 'an async generator', code: 'fork(async function* () {});', errors: [{ messageId: 'asyncBody', data: { verb: 'fork' } }] },
     {
       name: 'a named async function declared in the file',

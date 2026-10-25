@@ -5,7 +5,7 @@
 // the async `?` operator of D38, is retired: a body is the scope (D42). The type-level half is
 // src/test/surface.check.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { call, fail, fork, join, never, pool, sleep, wait } from './ambient.js';
+import { fail, fork, join, never, pool, sleep, wait } from './ambient.js';
 import type { Failure, Result } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
@@ -271,7 +271,7 @@ describe('$: a Result unwrapped in a body (DESIGN.md §4.13, D42)', () => {
     const direct = await within(app.attempt(lookUp, 'nobody'));
     const viaCall = await within(
       app.attempt(function* () {
-        const user = yield* call(lookUp, 'nobody');
+        const user = yield* lookUp('nobody');
         log.push('caller after call');
         return user;
       }),
@@ -300,7 +300,7 @@ describe('$: a Result unwrapped in a body (DESIGN.md §4.13, D42)', () => {
       return success(user.id.length);
     });
     const outer = task(function* (id: string) {
-      const n = yield* $(yield* call(inner, id));
+      const n = yield* $(yield* inner(id));
       return n * 100;
     });
     const outcomes = await within(

@@ -7,14 +7,18 @@
 //
 // Flagged: an `async` function, `async` arrow or `async function*` that is the
 // first argument of `task`, `fork`, `call`, `attempt`, `shield`, `unshield`,
-// `promised` or `bind`, free or as a method (`ctx.call`, `pool.fork`), inline
-// or through an identifier whose declaration in this file is one.
+// `promised` or `bind`, free or as a method (`ctx.call`, `pool.fork`), or the
+// second argument of a bound `task(self, body)` (D44, decision 2), inline or
+// through an identifier whose declaration in this file is one.
 
 import type { Rule, Scope } from 'eslint';
 import { type EsNode, calleeName, declaredVariable, unwrap } from '../ast.js';
 import { docsUrl } from '../docs.js';
 
-/** The verbs whose first argument is a body (`bind` included, for an observer's callback). */
+/**
+ * The verbs whose first argument is a body: a node's `call` among them (the free `call` is retired, D44, and a
+ * function of that name is checked as one all the same), and `bind`, for an observer's callback.
+ */
 const BODY_VERBS = new Set(['task', 'fork', 'call', 'attempt', 'shield', 'unshield', 'promised', 'bind']);
 
 type FunctionNode = EsNode & { type: 'FunctionDeclaration' | 'FunctionExpression' | 'ArrowFunctionExpression'; async?: boolean };
@@ -62,15 +66,21 @@ export const noAsyncBody: Rule.RuleModule = {
       CallExpression(node) {
         const verb = calleeName(node);
         if (verb === undefined || !BODY_VERBS.has(verb)) return;
-        const first = node.arguments[0] as EsNode | undefined;
-        if (first === undefined || first.type === 'SpreadElement') return;
-        const arg = unwrap(first);
-        let fn = asFunction(arg);
-        if (fn === undefined && arg.type === 'Identifier') {
+        /** The function an argument is, inline or through this file's declaration of its name. */
+        const functionOf = (a: EsNode | undefined): FunctionNode | undefined => {
+          if (a === undefined || a.type === 'SpreadElement') return undefined;
+          const arg = unwrap(a);
+          const fn = asFunction(arg);
+          if (fn !== undefined || arg.type !== 'Identifier') return fn;
           const v = declaredVariable(context, arg, arg.name);
-          if (v !== undefined) fn = definedFunction(v);
-        }
-        if (fn !== undefined && fn.async === true) context.report({ node: first, messageId: 'asyncBody', data: { verb } });
+          return v === undefined ? undefined : definedFunction(v);
+        };
+        const first = node.arguments[0] as EsNode | undefined;
+        const second = node.arguments[1] as EsNode | undefined;
+        // `task(self, body)`: the second argument being a function makes the first the receiver (D44, decision 2).
+        const bodyArg = verb === 'task' && functionOf(second) !== undefined ? second : first;
+        const fn = functionOf(bodyArg);
+        if (fn !== undefined && fn.async === true) context.report({ node: bodyArg!, messageId: 'asyncBody', data: { verb } });
       },
     };
   },

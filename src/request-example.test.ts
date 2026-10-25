@@ -8,7 +8,7 @@
 // under `await using` and each test body runs as a top-level
 // `await app.call(main)`.
 import { describe, expect, it } from 'vitest';
-import { call, current, fork, join, lookup, own, result, signal, sleep, wait } from './ambient.js';
+import { current, fork, join, lookup, own, result, signal, sleep, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber, Instruction } from './context.js';
 import { task } from './fiber.js';
@@ -175,7 +175,7 @@ function world() {
   const handle = task(function* (req: Req, _res: Res) {
     const pool = lookup(Pool); // 1
     const lease = own(yield* wait(pool.acquire())); // 2
-    return yield* call(task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] })); // 3
+    return yield* task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] })(); // 3
   });
 
   function respond500(res: Res, e: unknown): void {

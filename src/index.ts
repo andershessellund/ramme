@@ -44,7 +44,6 @@ export {
   release,
   releaseAll,
   fork,
-  call,
   attempt,
   all,
   race,
@@ -80,7 +79,7 @@ export {
   PlacementError,
   OwnerInterrupt,
 } from './resource.js';
-export { createInjectionKey, setScope, setDependencies } from './context-key.js';
+export { createInjectionKey, createKeyFor, setScope, setDependencies } from './context-key.js';
 export type { InjectionKey, CreateInjectionKeyOptions } from './context-key.js';
 export { classProvider, factoryProvider, valueProvider, aliasProvider } from './provider-util.js';
 export { createScope, SelfScope, RootScope, RequestScope } from './scope.js';

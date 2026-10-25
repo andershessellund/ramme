@@ -25,7 +25,7 @@ import type { Rule } from 'eslint';
 import ts from 'typescript';
 import { afterEach, describe, expect, inject, it, vi } from 'vitest';
 import type { Context, Fiber } from '../index.js';
-import { RequestScope, createRootContext, fork, join, lookup, own, call, result, sleep, task, wait } from '../index.js';
+import { RequestScope, createRootContext, fork, join, lookup, own, result, sleep, task, wait } from '../index.js';
 import { fetch, listen } from '../platform.js';
 import { trace, within } from './util.js';
 
@@ -61,7 +61,7 @@ describe('the browser is a target: the core and ramme/platform through their pub
       function* (n: number) {
         const session = lookup(Session);
         own(t.at(`request ${n} released`));
-        const a = yield* call(double, n);
+        const a = yield* double(n);
         const f = fork(double, n + 1);
         const b = yield* wait(Promise.resolve(10));
         const c = yield* join(f);
@@ -82,8 +82,8 @@ describe('the browser is a target: the core and ramme/platform through their pub
     const root = app();
     const seen = await within(
       root.call(function* () {
-        const first = yield* call(handle, 1);
-        const second = yield* call(handle, 2);
+        const first = yield* handle(1);
+        const second = yield* handle(2);
         const f = fork(slow);
         yield* sleep(1);
         f.abort();

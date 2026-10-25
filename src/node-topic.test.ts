@@ -10,7 +10,7 @@
 // exist whether or not a receiver is provided; events exist only with a
 // receiver. FLIP marks a port whose expectation the redesign reversed.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { call, current, fork, interrupted, join, never, own, release, result, signal, wait } from './ambient.js';
+import { current, fork, interrupted, join, never, own, release, result, signal, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context } from './context.js';
 import { createRootContext } from './create-context.js';
@@ -432,7 +432,7 @@ describe('ported lifecycle-events cases', () => {
         function* () {
           main = current();
           const f = fork(task(function* () { return 'f'; }, { name: 'child' }));
-          yield* call(task(function* () { return 'c'; }, { name: 'inline' }));
+          yield* task(function* () { return 'c'; }, { name: 'inline' })();
           yield* join(f);
         },
         { name: 'main' },
@@ -451,15 +451,13 @@ describe('ported lifecycle-events cases', () => {
     let caught: unknown;
     await ev.root.call(function* () {
       try {
-        yield* call(
-          task(
-            function* () {
-              childId = current().id;
-              throw new Error('boom');
-            },
-            { name: 'fail-call' },
-          ),
-        );
+        yield* task(
+          function* () {
+            childId = current().id;
+            throw new Error('boom');
+          },
+          { name: 'fail-call' },
+        )();
       } catch (e) {
         caught = e;
       }

@@ -13,7 +13,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   all,
-  call,
   child,
   current,
   fork,
@@ -290,9 +289,9 @@ describe('invariants (DESIGN.md §10)', () => {
         t.push('resumed');
         t.push(`late: ${yield* wait(Promise.resolve('started'))}`); // started before it was yielded: run (row 5)
         try {
-          yield* call(function* () {
+          yield* task(function* () {
             workRan = true; // never: not started, so not run; the body is returned here (row 4)
-          });
+          })();
           t.push('unreachable');
         } catch {
           t.push('caught'); // never: no catch sees the halt
@@ -464,10 +463,10 @@ describe('invariants (DESIGN.md §10)', () => {
     expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['dropped join', 'unjoined']);
     let ran = false;
     const dropped = await root.call(function* () {
-      void call(function* () {
+      void task(function* () {
         ran = true;
         throw new Error('dropped call');
-      }); // the yield* was forgotten: the call never runs (no-unused-op reports it)
+      })(); // the yield* was forgotten: the call never runs (no-unused-op reports it, with type information)
       yield* wait(tick(2));
       return 'returned';
     });
@@ -681,7 +680,7 @@ describe('invariants (DESIGN.md §10)', () => {
         const done = other.fork(task(function* () { return 1; }, link));
         const ops: Record<string, () => unknown> = {
           lookup: () => lookup(K),
-          call: () => call(t),
+          call: () => t(),
           all: () => all([t]),
           race: () => race([t]),
           join: () => join(done),
@@ -842,7 +841,7 @@ describe('invariants (DESIGN.md §10)', () => {
       expect(impl(pool({ name: 'p', onFailure: () => {} })).parent).toBe(me);
       expect(signal()).toBe(me.signal);
       expect(lookup(K)).toBe('outer');
-      expect(yield* call(task(() => lookup(K), { providers: [valueProvider(K, 'inner')] }))).toBe('inner');
+      expect(yield* task(() => lookup(K), { providers: [valueProvider(K, 'inner')] })()).toBe('inner');
       expect(yield* join(f)).toBe(1);
       yield* release(x);
       expect(me.explicit.find(x)).toBeUndefined();
@@ -992,10 +991,10 @@ describe('invariants (DESIGN.md §10)', () => {
         });
         yield* join(other);
         const y = current();
-        const pending = call(function* () {
+        const pending = task(function* () {
           ran++;
           return 'called';
-        }); // made, not yielded: nothing runs, nothing is lent
+        })(); // made, not yielded: nothing runs, nothing is lent
         const ops: Record<string, () => unknown> = {
           get: () => y.get(K),
           call: () => y.call(t),
@@ -1030,12 +1029,18 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I26 fibers are not awaitable and tasks are not callable', async () => {
+  it('I26 fibers are not awaitable, and a task’s call is a lazy op, never a bare promise', async () => {
     const root = createRootContext();
-    const tk = task(function* (n: number) { return n * 2; });
-    // @ts-expect-error a Task has no call signature
-    expect(() => tk(1)).toThrow(TypeError);
+    let ran = 0;
+    const tk = task(function* (n: number) {
+      ran++;
+      return n * 2;
+    });
+    expect(() => tk(1)).toThrow(NoCurrentNodeError); // no node is current: no op is made, nothing runs
     await root.call(function* () {
+      const op = tk(1);
+      expect([op instanceof Promise, ran]).toEqual([false, 0]); // made, not run
+      expect(yield* op).toBe(2);
       const f = fork(tk, 21);
       const awaited = yield* wait(rejection(
         (async () => {

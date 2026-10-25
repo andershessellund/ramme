@@ -8,8 +8,8 @@
 // task options, tasks, fibers, results and outcomes, pools, the error classes)
 // is there, `Fiber` only as a type, `runSync` only as the ambient function, and
 // no name removed by the redesign or since (`ProviderOptions`, D36; `managed`,
-// `InterruptedError`, `UnawaitedCallError` and the async-context registry, D41)
-// or internal to ramme. Then requires dist/result.d.ts, the `ramme/result`
+// `InterruptedError`, `UnawaitedCallError` and the async-context registry, D41;
+// the free `call`, D44: a task is callable) or internal to ramme. Then requires dist/result.d.ts, the `ramme/result`
 // subpath, to export exactly the `resultExpected` functions and nothing else
 // (`gen` retired, D42), and dist/result.js to import nothing: the subpath is a
 // leaf that imports only types (DESIGN.md §7). Then requires dist/platform.d.ts,
@@ -84,7 +84,6 @@ const expected = new Map([
     'release',
     'releaseAll',
     'fork',
-    'call',
     'attempt',
     'all',
     'race',
@@ -121,7 +120,7 @@ const expected = new Map([
     'PlacementError',
     'OwnerInterrupt',
   ].map((n) => [n, ['value', './resource.js']]),
-  ...['createInjectionKey', 'setScope', 'setDependencies'].map((n) => [n, ['value', './context-key.js']]),
+  ...['createInjectionKey', 'createKeyFor', 'setScope', 'setDependencies'].map((n) => [n, ['value', './context-key.js']]),
   ['InjectionKey', ['type', './context-key.js']],
   ['CreateInjectionKeyOptions', ['type', './context-key.js']],
   ...['classProvider', 'factoryProvider', 'valueProvider', 'aliasProvider'].map((n) => [n, ['value', './provider-util.js']]),
@@ -133,12 +132,17 @@ const expected = new Map([
   ['NodeEvent', ['type', './lifecycle-events.js']],
 ]);
 
-/** The core names: the node and the free functions, task options, tasks, fibers, results and outcomes, pools, and the error classes. */
+/**
+ * The core names: the node and the free functions, task options, tasks, fibers, results and outcomes, pools, the
+ * error classes, and the key for an implementation.
+ */
 const coreNames = [
-  // the node and the free functions
+  // the node and the free functions; a task's call is the task's own (D44), so there is no free `call`
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
-  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
+  'current', 'signal', 'lookup', 'own', 'release', 'fork', 'attempt', 'all', 'race', 'settle', 'shield',
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
+  // an explicit key for an implementation, the seam between an interface and its class (D44)
+  'createKeyFor',
   // generator bodies (DESIGN.md §4.2, D41): the ops, what they yield, and the two verbs for foreign async code
   'Op', 'Operation', 'Instruction', 'wait', 'promised',
   // expected failures (D42): the fourth exit, and the type a helper that fails is named by
@@ -199,6 +203,8 @@ const absent = [
   'requireCurrent', 'captureAutoScoped', 'NodeImpl', 'NO_NODE', 'runInFrame', 'currentFrame', 'WorkOp', 'LifecycleOp',
   // retired with expected failures as a yielded channel (D42), and its internals
   'gen', 'FailYield', 'Expected', 'failOp',
+  // retired with callable tasks (D44): `yield* t(…)`; and the internals of a task's call
+  'call', 'taskCall', 'TaskCall', 'AnyMember',
 ];
 
 const problems = [];
@@ -379,8 +385,9 @@ if (JSON.stringify(subpaths) !== JSON.stringify(['.', './platform', './result'])
  * are generic over `E`, so their emitted types keep `Operation`'s distribution of `E` over `Fail`, which must be
  * written out inline: a name from a module the package's "exports" do not expose fails the emit (TS2883). `charge`
  * both calls a failing task and fails itself; its `E` must emit as the plain union, never wrapped (`NoInfer<…>`).
+ * `Api` binds its tasks to the instance (`task(this, …)`, D44) and `ClockKey` keys an implementation: both must emit.
  */
-const consumerSource = `import { call, fail, task } from 'ramme';
+const consumerSource = `import { createKeyFor, fail, task } from 'ramme';
 import type { Result, Task } from 'ramme';
 import { $ } from 'ramme/result';
 
@@ -389,7 +396,7 @@ export function* orFail<T, E>(x: T | undefined, e: E) {
   return x;
 }
 export function* retry<T, E>(t: Task<[], T, E>) {
-  return yield* call(t);
+  return yield* t();
 }
 export function* unwrapped<T, E>(r: Result<T, E>) {
   return yield* $(r);
@@ -405,10 +412,29 @@ const find = task(function* (id: string) {
   return id.length;
 });
 export const charge = task(function* (id: string) {
-  const n = yield* call(find, id);
+  const n = yield* find(id);
   if (n > 3) return yield* fail(new Declined());
   return 'charged';
 });
+export class Api {
+  readonly #base: string;
+  readonly get = task(this, function* get(path: string) {
+    if (path === '') return yield* fail(new NotFound());
+    return this.#base + path;
+  });
+  constructor(base: string) {
+    this.#base = base;
+  }
+}
+export interface Clock {
+  now(): number;
+}
+class SystemClock implements Clock {
+  now(): number {
+    return 0;
+  }
+}
+export const ClockKey = createKeyFor<Clock>(SystemClock);
 `;
 
 /**

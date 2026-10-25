@@ -223,6 +223,10 @@ states, and nothing in ramme is kilde-specific. DESIGN.md §1.1.
 
 ### D8′. A fiber is one run of a task, and the ambient node is the default
 
+*Amended by D44: a task is a function, and its call is the lazy op of one
+run; the free `call` and the task's own `call`, `bind`, `fork` and `attempt`
+are gone. What follows records the uncallable task.*
+
 A **task** (`task(body, opts)`) is a body plus options; it is an object,
 not a function, and can only be `fork`ed or `call`ed, each run being a new
 fiber, a child of the current node. A **fiber** is a node with a body; it
@@ -289,6 +293,47 @@ plain call would, and code that forks and then inspects the fiber
 synchronously sees it unstarted. Through `then` (`await app.call(main)` in
 top-level code) a call starts when `then` is first called, a job after the
 `await`. DESIGN.md §4.6.
+
+### D44. A task is callable, binds its receiver, and the combinators take ops
+
+*A stub: the full entry, its reasons, rejected alternatives and costs, is
+written with the documents' rewrite. The decisions it records are final.*
+
+1. **A task is callable.** `t(…args)` is the lazy op `call(t, …args)` was
+   (D41, decision 2): nothing runs until it is yielded, or awaited through
+   the node it was made through. Making it reads the slot, so outside any
+   node it throws `NoCurrentNodeError` and in a factory
+   `CreationViolationError`. D8′ kept a task uncallable because a bare call
+   ran as an untracked promise; a lazy op runs nothing, so the reason is gone,
+   and "this is a node" is still decided once, at `task`.
+2. **`task(self, body)` binds a receiver**: the body runs as
+   `body.call(self, …args)`, and `with` keeps it; a free body's `this` is
+   `void`. The second argument being a function makes the first the receiver.
+3. **The task's own `call`, `bind`, `fork` and `attempt` go**, and the free
+   `call` with them: `call` and `bind` are `Function.prototype`'s on a task,
+   `fork(t(…))` and `attempt(t(…))` replace the others. `with` and `name`
+   stay. `ctx.call(t, …)` and `ctx.fork(t, …)` stay, as plain async code's
+   explicit receiver; they take no op, since none can be made outside a node.
+4. **`fork`, `attempt`, `all`, `race`, `settle` and `pool.fork` take ops**,
+   and a task of no arguments as itself. A task's call is forked as its task,
+   so no node stands for the op; any other op runs in a fiber of its own,
+   named after its verb, and on it. `race([t(x), sleep(ms)])` is a deadline
+   on `t`'s success by D28's rules: the loser is aborted and waited for, and a
+   failing `t` beats nothing, so the race waits out the `ms` and drops the
+   failure as a loser's; `t.with({ timeoutMs: ms })(x)` is the deadline that
+   lets `t`'s failure through.
+5. **No helpers**: a generator function is a task body, a `promised` body or
+   an `own` release, and the lint `no-generator-helper` says so. The runtime
+   still drives a helper's generator, and decision 29 of D41 stands.
+6. **`createKeyFor(impl, opts?)`**: an explicit key whose factory is
+   `impl`'s, `new impl(…)` or `impl(…)` with the arguments `setDependencies`
+   declares, named and scoped by `impl` unless `opts` says otherwise, the
+   scope read at each read as D32 reads `impl`'s; a task is refused.
+7. **A task is not an injection key**: `inject(t)` is a type error and, with
+   `lookup(t)`, a `TypeError`.
+8. **The lints**: `no-unused-op` reads a dropped task's call where it has
+   type information, and a `style` preset holds `named-task` and
+   `no-function-key`. DESIGN.md §4.5, §4.8.
 
 ## Semantics
 

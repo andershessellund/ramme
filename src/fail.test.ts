@@ -9,7 +9,7 @@
 // `shield`, `wait(op)` and the groups re-yield a child's expected failure; `then` rejects with its error; a fiber's
 // `[Symbol.asyncDispose]()`, whose op carries no `E`, throws it. Each test compares one observation object.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { all, call, current, fail, fork, join, never, own, race, shield, sleep, wait } from './ambient.js';
+import { all, current, fail, fork, join, never, own, race, shield, sleep, wait } from './ambient.js';
 import type { Context, Fail, Instruction, Task } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
@@ -127,7 +127,7 @@ describe('the finally a fail runs: release work (D42)', () => {
             yield* never();
           } finally {
             t.push('finally');
-            yield* call(cleanup); // release work on the unwind fiber: its record stays with its holder
+            yield* cleanup(); // release work on the unwind fiber: its record stays with its holder
             t.push('after the cleanup');
           }
         },
@@ -283,7 +283,7 @@ describe('an expected failure through the verbs (D42)', () => {
           yield* shield(failing);
         }),
         via('wait(op)', function* () {
-          yield* wait(call(failing));
+          yield* wait(failing());
         }),
         via('helper join', function* () {
           yield* joinOf(failing);
@@ -303,17 +303,17 @@ describe('an expected failure through the verbs (D42)', () => {
       return 1;
     });
     const viaCall = task(function* () {
-      return yield* wait(() => call(failing));
+      return yield* wait(() => failing());
     });
     const viaMethod = task(function* () {
-      return yield* wait((_signal) => failing.call());
+      return yield* wait((_signal) => current().call(failing)); // a node's call: the task's call made through a named node
     });
     const viaJoin = task(function* () {
       const f = fork(failing);
       return yield* wait(() => join(f));
     });
     const viaNode = task(function* () {
-      return yield* current().wait(() => call(failing));
+      return yield* current().wait(() => failing());
     });
     const viaPromise = task(function* () {
       return yield* wait(() => Promise.resolve('resolved'));
@@ -362,19 +362,19 @@ describe('an expected failure through the verbs (D42)', () => {
     const outcomes = await within(
       Promise.all([
         root.attempt(function* () {
-          return yield* all([succeeds.bind(), failsLate.bind()]);
+          return yield* all([succeeds, failsLate]);
         }),
         root.attempt(function* () {
-          return yield* all([failsLate.bind(), failsEarly.bind()]);
+          return yield* all([failsLate, failsEarly]);
         }),
         root.attempt(function* () {
-          return yield* all([failsLate.bind(), throws.bind()]);
+          return yield* all([failsLate, throws]);
         }),
         root.attempt(function* () {
-          return yield* race([aborted.bind(), failsEarly.bind()]);
+          return yield* race([aborted, failsEarly]);
         }),
         root.attempt(function* () {
-          return yield* race([failsLate.bind(), failsEarly.bind()]);
+          return yield* race([failsLate, failsEarly]);
         }),
       ]),
     );
@@ -560,7 +560,7 @@ describe('an expected failure through the verbs (D42)', () => {
           yield* fail(ownFail);
         }),
         run('callee', function* () {
-          yield* call(failingCallee);
+          yield* failingCallee();
         }),
       ]),
     );
@@ -608,7 +608,7 @@ describe('an expected failure through the verbs (D42)', () => {
           yield* fail(second);
         }),
         run(function* () {
-          yield* call(failingCallee);
+          yield* failingCallee();
         }),
         run(function* () {
           throw thrown;

@@ -54,14 +54,15 @@ package.json names exactly that file); the floor is A2 (§10).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its helpers and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `task` and a task's call `t(…)`, `task(this, …)`, `fork`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its helpers and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | generator bodies (§4.2, §4.5): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback; `ramme/platform`'s `fetch`, `listen`, `nextFrame` and `each` (§4.9) | `Operation`, to type a helper that is only `yield*`ed (`Operation<T, E>`), and `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of a helper a body returns and of an annotated body |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
-| `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`, `runSync`; keys with default factories (§8) |
+| `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `createKeyFor`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`, `runSync`; keys with default factories (§8) |
 
-The **work verbs**, whose op is lazy (§4.2), are `call`, `attempt`, `all`,
-`race`, `settle`, `shield`, `unshield`, `join`, `result`, `sleep`,
-`interrupted`, `never` and `wait`; the **lifecycle verbs**, which are eager,
+The **work verbs**, whose op is lazy (§4.2), are a task's call (`t(…)`, and
+`ctx.call(t, …)` through a node), `attempt`, `all`, `race`, `settle`,
+`shield`, `unshield`, `join`, `result`, `sleep`, `interrupted`, `never` and
+`wait`; the **lifecycle verbs**, which are eager,
 are `release`, `releaseAll`, `close` and `[Symbol.asyncDispose]`.
 
 ---
@@ -122,10 +123,10 @@ Nodes differ in three independent bits, plus a `kind` tag (`context`,
 | --- | --- | --- | --- | --- |
 | `createRootContext(opts)` | context | root | no | the only free constructor; carries `RootScope`; `[Symbol.dispose]` throws |
 | `child(opts)` | context | explicit / yes | no | a request scope |
-| `call(t, …)` / `t.call(…)` | fiber, joined | explicit / yes | yes | starts synchronously at its `yield*` (§4.6) |
-| `attempt(t, …)` / `t.attempt(…)` | fiber, joined | explicit / yes | yes | as `call`; resolves with the outcome (§4.5) |
+| `t(…)` / `ctx.call(t, …)` | fiber, joined | explicit / yes | yes | starts synchronously at its `yield*` (§4.6) |
+| `attempt(t, …)` / `attempt(t(…))` | fiber, joined | explicit / yes | yes | as a call; resolves with the outcome (§4.5) |
 | `unshield(t, …)` | fiber, joined | explicit / yes | yes | as `attempt`, inside a shield; also linked to the signal of the shield's owner (§4.2) |
-| `fork(t, …)` / `t.fork(…)` | fiber | explicit / yes | yes | starts in a microtask, or after placement in creation; with `call`, handlers, workers, sessions |
+| `fork(t, …)` / `fork(t(…))` | fiber | explicit / yes | yes | starts in a microtask, or after placement in creation; with a call, handlers, workers, sessions |
 | `own(fork(t, …))` | fiber | explicit / **no** | yes | an owned fiber (§2.6 C5): a reaper |
 | `pool(opts)` | pool | explicit / no | no | its forks are its subscribers (§4.10) |
 | a DI value's node | value | **provided** / no | no | auto-hoisted: pending until placed; declared: live from the start (§3.3) |
@@ -378,9 +379,14 @@ child that does not is reported (`node:stalled`, §5).
 
 ### 3.1 Keys, providers, scopes
 
-An `InjectionKey<T>` is a class, a function, or a token made by
-`createInjectionKey(name, { factory?, scope? })`; a class or function key,
-and a token with a `factory`, is its own **default factory**.
+An `InjectionKey<T>` is a class, a function (never a task, which `inject`
+and `lookup` refuse, by type and with a `TypeError`), or a token made by
+`createInjectionKey(name, { factory?, scope? })` or by
+`createKeyFor(impl, { name?, scope? })`, whose factory is `impl`'s own
+(`new impl(…)` for a class, `impl(…)` for a function, with the arguments
+`setDependencies` declares for `impl`) and whose scope defaults to `impl`'s,
+read at each read of it as `impl`'s is (D32); a class or function key, and
+a token with a `factory`, is its own **default factory**.
 `setDependencies(target, ...keys)` declares constructor or function
 arguments. Providers (`valueProvider`, `factoryProvider`, `classProvider`,
 `aliasProvider`) bind keys on a node, at construction (`providers` on a
@@ -681,7 +687,8 @@ the star is a type error in a body (and a `TypeError` at run time, below).
   `.catch` and `.finally` work. A `then` consumes a failure as a work op's
   does (below).
 - **Construction reads the slot** (decision 17): a free-function op is
-  `current().verb(…)` evaluated when it is made, so its receiver is fixed and
+  `current().verb(…)` evaluated when it is made (a task's call `t(…)` is
+  `current().call(t, …)`, D44), so its receiver is fixed and
   its **guards** run then: the receiver is not complete
   (`NodeCompletedError`), not pending (`PendingNodeError`), no creation is
   current (`CreationViolationError`; `lookup`, `get`, `call`, `attempt`, the
@@ -692,7 +699,7 @@ the star is a type error in a body (and a `TypeError` at run time, below).
   op where it is yielded. What fails when the op runs lands at the `yield*`,
   or rejects the `then`: `wait`'s function returning no promise, a source
   whose `then` throws (a `Promise` subclass that overrides it, I10), a
-  receiver completed since (a stored `call`, `attempt`, `join` or `result`
+  receiver completed since (a stored call, `attempt`, `join` or `result`
   run after its receiver completed throws `NodeCompletedError`: no wait
   begins on a node after its `node:complete`, §5). `fork`, `child`, `pool`,
   `own` and `release` need no body frame (§3.5), and `fork(t)` or
@@ -725,9 +732,9 @@ the body may run plain code, and everything it does is legitimate (I8).
 | The body waits on | Halted |
 | --- | --- |
 | `sleep`, `never`, its own `interrupted()`; a `join` or `result` of a fiber not subscribed below it (an owned fork, a pool's, another tree's); `wait(p, { abandon: true })`; a `close()` or `[Symbol.asyncDispose]()` of itself, an ancestor or an unrelated node; a `release` or `releaseAll` whose wait includes the body | at once: a job queued at the delivery under no frame, never inside `abort()`; a sleep's timer cleared |
-| `call`, `attempt`, `unshield`, `all`, `race`, `settle`; a `join` or `result` of a fiber subscribed below it | once the awaited fiber has completed; its resume step does not run, so nothing is consumed and its failure surfaces from its holder (§4.12). A fiber the delivery did not reach (a `ctx.call` child of a node outside the delivered subtree, one below an `observe` node that has not exited, one born undelivered) is delivered then, with the body's reason |
+| a task's call, `attempt`, `unshield`, `all`, `race`, `settle`; a `join` or `result` of a fiber subscribed below it | once the awaited fiber has completed; its resume step does not run, so nothing is consumed and its failure surfaces from its holder (§4.12). A fiber the delivery did not reach (a `ctx.call` child of a node outside the delivered subtree, one below an `observe` node that has not exited, one born undelivered) is delivered then, with the body's reason |
 | release work (`release`, `releaseAll`, `close()` or `[Symbol.asyncDispose]()` of a node strictly below it, `shield`); `wait(p)`, `wait((signal) => p)` | not at the delivery: on success it is resumed with the value and halted at its next `yield*`; on failure it is halted there, the failure unconsumed (a release failure surfaces at completion, §4.12; `p`'s own is discarded, as a halted body's throw is, D24) |
-| an op not yet started, yielded after the delivery (in the step that delivered the node, by a body resumed by release work, by a body born delivered) | not run: halted there (a `call` made then makes no child). A started one (a `wait(p)` over a promise, a lifecycle op) is subscribed, and the rows above decide |
+| an op not yet started, yielded after the delivery (in the step that delivered the node, by a body resumed by release work, by a body born delivered) | not run: halted there (a task's call made then makes no child). A started one (a `wait(p)` over a promise, a lifecycle op) is subscribed, and the rows above decide |
 
 `attempt`, `unshield`, `settle` and `result` on an interrupted caller never
 resolve with an outcome: the caller is halted, so `aborted` in an outcome
@@ -763,9 +770,9 @@ decision 11):
 - The ops the `finally` yields run for the unwind fiber, and one made through
   the node (the free functions, `current().call(…)`, made before the halt or
   after it) runs on it; so does one made there through the node and run by
-  its `then` (`yield* wait(Promise.all([call(a), call(b)]))`, an async helper
+  its `then` (`yield* wait(Promise.all([a(), b()]))`, an async helper
   waiting for an op made there), whose failure the `then` consumes and the
-  `wait(p)` records, once. A `call`, an `attempt`, a group, a `wait`'s
+  `wait(p)` records, once. A task's call, an `attempt`, a group, a `wait`'s
   function or a `promised` callback made there is not born delivered, and
   only the deadline reaches it (§2.4). `wait((signal) => p)` there is
   handed the unwind fiber's signal, which the deadline fires, and so are
@@ -790,7 +797,7 @@ decision 11):
   development-mode warning (decision 12). So is `wait(fn)` whose `fn` returns
   such an op. The predicate does not ask whether the fiber would end on its
   own: an `observe` fork there that ends by itself is returned all the same;
-  run such cleanup as `yield* call(t)`, release work on the unwind fiber.
+  run such cleanup as `yield* t()`, release work on the unwind fiber.
 - Only the body's own generator function keeps the halt across a yield. A
   `yield*` in a *helper's* `finally` loses it, by the `yield*` algorithm:
   once the helper's `finally` ends, the body is resumed normally and runs
@@ -799,7 +806,7 @@ decision 11):
   any value other than the sentinel (a lost halt, or a `return` in a
   `finally`) is reported, naming the body, and so is any use of the sentinel,
   once per halt (decision 29). Waiting cleanup in a helper belongs in an
-  entry (`own(value, function* (v) { … })`) or behind `yield* call(helper)`.
+  entry (`own(value, function* (v) { … })`) or in a task, `yield* task(helper)()`.
 
 **`wait`.** `wait(p)` waits for a foreign promise, which the halt lets
 finish (the table's third row), so what `p` produced can still be owned
@@ -816,7 +823,7 @@ decision 12 and for a failure handler's detach (§4.7), and its failure is
 its holder's.
 
 **`shield(body, …args)`** and `ctx.shield` run `body` (a `Body` or a `Task`,
-with its arguments, as `call` takes them) in a **release fiber** of the
+with its arguments, as `ctx.call` takes them) in a **release fiber** of the
 node, not for an entry, as any release runs (§2.4). The waiter is resumed
 with the body's value, or its error, which the resume step consumes, except
 for an applied waiter (above). The node **holds every shield it ran** (§2.4,
@@ -824,7 +831,7 @@ steps 2 and 4), with no ordering against entries already released. A
 shield's failure is routed to the node as a `'join'` fiber's is: consumed by
 the waiter's resume step, or surfaced from the node (I11). A shield is the
 non-cancellable region on the normal path
-(`yield* shield(function* () { yield* call(charge); yield* call(record); })`,
+(`yield* shield(function* () { yield* charge(); yield* record(); })`,
 D41 decision 13); cleanup after a halt belongs in the body's own `finally`,
 which may wait.
 
@@ -841,10 +848,10 @@ fiber, which is not a shield, and taking its parent.
 
 ```ts
 yield* shield(function* () {
-  yield* call(flushBuffer);                         // runs to its end
+  yield* flushBuffer();                             // runs to its end
   const r = yield* unshield(notifyPeer, event);     // the one step the owner's interruption still stops
   if (r.status === 'defect') throw r.error;         // a real failure stays one (notifyPeer yields no fail)
-  yield* call(writeOffset);                         // runs to its end, whatever the hole did
+  yield* writeOffset();                             // runs to its end, whatever the hole did
 });
 ```
 
@@ -898,7 +905,7 @@ release fibers, top-level code and a body waiting on another node.
 `observe` is the resource author's mode: the body sees the interrupt
 (`signal()`, `yield* interrupted()`), runs a controlled shutdown and settles
 on its own. `restore` re-opens a cancellable window inside an `observe`
-region. `task(fn, { interrupt: 'observe', timeoutMs: 5000 }).call()` is a
+region. `yield* task(fn, { interrupt: 'observe', timeoutMs: 5000 })()` is a
 critical section with a deadline: at 5 s its `signal()` fires and the body
 decides how to stop; nothing ends it if it ignores the signal.
 
@@ -918,7 +925,7 @@ is handed the unwind fiber's. Release fibers are nodes, so a stuck release,
 a long shield, a slow halted `finally` (its unwind fiber) and a draining
 `close()` show up the same way.
 
-**Unbounded work in a halted `finally`.** A `call` there of an `observe`
+**Unbounded work in a halted `finally`.** A call there of an `observe`
 task that waits for its own interruption (`yield* interrupted()`) never
 ends: `root.abort()` stops at the node, delivered already, and only
 aborting that task ends it.
@@ -928,9 +935,9 @@ body runs on from that `yield*` to its next one: a debounced
 `show(yield* wait(img.decode()))` shows a stale result. Guard such code with
 `signal().aborted`, or wait with `{ abandon: true }` (§4.2).
 
-**A forgotten `yield*`.** `call(sendEmail, user);` sends nothing, silently
-(§4.2). `ramme/no-unused-op` flags a work verb as an expression statement
-(§9); an op kept in a variable and never yielded is not flagged, nor is a
+**A forgotten `yield*`.** `sendEmail(user);` sends nothing, silently
+(§4.2). `ramme/no-unused-op` flags a work verb as an expression statement,
+and a task's call with type information (§9); an op kept in a variable and never yielded is not flagged, nor is a
 `fail(e);` or a `$(r);` without its `yield*`, which ends nothing: the body
 runs on past it, and the error never joins the task's `E` (D42).
 
@@ -962,34 +969,39 @@ function* parse(req: Request): Generator<Instruction, Order, unknown> { /* … *
 const handle = task(function* (req: Request, res: Response) { /* … */ });           // a task: a new node per run
 
 yield* parse(req);                        // plain call, same node
-yield* handle.call(req, res);             // new child node, joined
-yield* handle.attempt(req, res);          // the same, resolving with the outcome instead of throwing
-handle.fork(req, res);                    // new child node, concurrent
-yield* call(function* () { /* … */ });    // inline task: block scope for temporaries
+yield* handle(req, res);                  // new child node, joined
+yield* attempt(handle(req, res));         // the same, resolving with the outcome instead of throwing
+fork(handle(req, res));                   // new child node, concurrent
+yield* task(function* () { /* … */ })();  // inline task: block scope for temporaries
 fork(function* () { /* … */ });           // inline task: ad-hoc concurrency
 ```
 
-`task(body, opts)` returns a `Task`: `name`, `fork(...args)`,
-`call(...args)`, `attempt(...args)`, `with(opts)` (the same task with
-per-use option overrides) and `bind(...args)` (fixes the whole argument
-list, giving the `Task<[], T>` that `all`, `race` and `settle` take;
-arguments later passed to its `fork`, `call` or `attempt` are ignored). A
-`Task` is an object, not a function: invoking it is a `TypeError` at compile
-time and at runtime. Options (`TaskOptions` = `NodeOptions` + `onFailure`)
+`task(body, opts)` returns a `Task`, which is a function (D44): `t(...args)`
+is the lazy op of one run of the body in a new child node, a work op (§4.2);
+`name` is the task's name and `with(opts)` the same task with per-use option
+overrides; `call`, `bind` and `apply` are `Function.prototype`'s, so
+`t.bind(null, x)` is no task but a function whose op is `t(x)`'s, a body
+(its `with` a `TypeError`). Making the
+op reads the slot, as every work op's construction does: outside any node a
+call throws `NoCurrentNodeError`, in a factory `CreationViolationError`, and
+one made and never yielded runs nothing (I26). `task(self, body, opts)` binds
+a receiver: the body runs as `body.call(self, ...args)`, so a class field
+`readonly get = task(this, function* get(path: string) { … })` reads the
+instance, `#private` fields included, and `with` keeps it; a free body's
+`this` is typed `void`. Options (`TaskOptions` = `NodeOptions` + `onFailure`)
 live at the definition. Anything that should be a node (handlers, jobs,
 workers, sessions; anything whose temporaries must be released on return, or
 that must be separately interruptible or visible) is a task; everything else
 is a function. A function that acquires temporaries either releases them
 before returning or is a task.
 
-**Bodies.** `task`, `fork`, `call`, `attempt`, `shield`, `unshield`, the
-members of `all`, `race` and `settle`, `pool.fork` and `promised` take a
-generator function, or a synchronous one. An `async` function is no body
+**Bodies.** `task`, `fork`, `ctx.call`, `attempt`, `shield`, `unshield`,
+`pool.fork` and `promised` take a generator function, or a synchronous one. An `async` function is no body
 (D41, decision 5): `Body`'s type refuses its promise, and the runtime fails
 the node with a `TypeError` naming `function*`, every node kind but an
 entry's release fiber. The runtime decides by what the body returned: an op
 is driven as the body's own `yield*` of it, in its frame, so
-`task(() => call(leaf))` and a body returning a helper's generator work
+`task(() => leaf())` and a body returning a helper's generator work
 (decision 28), and so is a `fail(e)` (D42), so a release or a handler that
 returns one fails as one that yields it does; a generator object is driven;
 a thenable is refused; an `async function*` is refused; anything else is the
@@ -1024,11 +1036,12 @@ failure re-yielded, a defect thrown) or `result(f)` (the four-way outcome,
 never the failure propagated; an interrupted waiter is halted as §4.2
 says). A body that returns a fiber fails with `FiberNotAwaitableError`.
 
-**`attempt`** is `call` with `result`'s resume step, as `call` is `fork`
-plus `join`. `attempt(t, …args)`, `ctx.attempt(t, …args)` and
-`t.attempt(…args)` make the child `call` makes and resolve with its four-way
+**`attempt`** is a task's call with `result`'s resume step, as a call is
+`fork` plus `join`. `attempt(t, …args)`, `ctx.attempt(t, …args)` and
+`attempt(t(…args))` make the child the call makes and resolve with its four-way
 `Outcome<T, E>` instead of its value: a `failure` or a `defect` is delivered
-as a value and consumed on resume, never propagated (D42). As for `call`,
+as a value and consumed on resume, never propagated (D42); any other op,
+`attempt(wait(p))`, runs in a child of its own (§4.8). As for a call,
 the child runs as a `'join'` fiber whatever its task's `onFailure`. A
 `freeze` or `restore` caller that is itself interrupted is halted (§4.2) and
 never sees an outcome, so `aborted` reports the child's own delivery: its
@@ -1051,7 +1064,7 @@ later. An outcome nobody inspects is a failure dropped silently (D31).
 
 ### 4.6 Start semantics (D22)
 
-- `call` and `attempt` start the body synchronously at their `yield*`, with
+- A task's call and `attempt` start the body synchronously at their `yield*`, with
   the child current, before the yielding step returns; so do `all`, `race`
   and `settle` for their group fiber, whose members are forks. Through
   `then` (top-level code, an explicit receiver: `await app.call(main)`)
@@ -1108,9 +1121,9 @@ awaits such a completion holds the parent forever.
 
 ### 4.8 `all`, `race` and `settle` (D28, D31)
 
-All three run the tasks as subscribers of a fresh child fiber, the *group*
-(a `call`; `opts` apply to the group):
-`all([fetchUser.bind(id), fetchOrders.bind(id)])` resolves with the tuple of
+All three run their members as subscribers of a fresh child fiber, the *group*
+(a call; `opts` apply to the group):
+`all([fetchUser(id), fetchOrders(id)])` resolves with the tuple of
 values in order, and rejects with an `AggregateError` of **every** real
 failure; `aborted` members are excluded from it, and an aborted member with
 no failure rejects with `FiberAbortedError`. `race` resolves with the first
@@ -1118,6 +1131,24 @@ no failure rejects with `FiberAbortedError`. `race` resolves with the first
 `AggregateError` of the failures (or `FiberAbortedError` if every member was
 aborted); `race([])` is a `TypeError`. Members always run as `'join'` fibers
 of the group, whatever their own destination.
+
+A member is an op or a task of no arguments, taken as itself (D44). A task's
+call is forked as its task: `all([fetchUser(id), fetchOrders(id)])` makes one
+fiber per task under the group, named after it, and no node for the op. Any
+other op runs in a fiber of its own whose body is `yield* op`, named after
+the op's verb (`sleep`, `wait`, `fetch`, …; else `op`), and run on that fiber:
+a `wait((signal) => p)` member is handed its signal, a group or a call made
+elsewhere makes its child under it. So `race([t(x), sleep(ms)])` is a
+deadline on `t`'s success by the rules above: the `sleep` winning aborts `t`
+and waits for it, its `finally` run before the `race` returns, and `t`
+succeeding aborts the `sleep`, whose timer the halt clears. A failing `t`
+beats nothing, since the first success wins: the race waits out the `ms`,
+resolves `undefined`, and drops `t`'s failure as a loser's, a defect
+included. The deadline that lets `t`'s failure through is the task's own,
+`t.with({ timeoutMs: ms })(x)`: its failure comes back as itself, and the
+deadline as `FiberAbortedError`, or under `attempt` as `aborted` with a
+`TimeoutError` reason (§4.1). `fork(op)`, `attempt(op)` and `pool.fork(op)`
+take an op by the same rule.
 
 An expected failure fails `all` as a defect does (D28, D42), once every member
 has completed, and every failure is reported: when one member failed, and by
@@ -1131,7 +1162,7 @@ dropped. A body that branches on each member's expected failure uses
 beat; with none, `all`'s rule decides, and its `E` is the union too.
 
 `settle` is `all` that resolves with every member's outcome instead of
-rejecting. `settle([fetchUser.bind(id), fetchOrders.bind(id)])` waits for
+rejecting. `settle([fetchUser(id), fetchOrders(id)])` waits for
 every member as `all` does, aborting none on a sibling's account (D28), and
 resolves with the tuple of their outcomes in order (`SettleResult`:
 `[Outcome<User, UserNotFound>, Outcome<Order[], never>]` for a `fetchUser`
@@ -1174,7 +1205,7 @@ reads the platform's globals when its ops run. Timers are the core's `sleep`
 | Platform | ramme |
 | --- | --- |
 | `fetch` | `yield* fetch(input, init)`, the global's parameters: a `wait` whose function calls `globalThis.fetch` with `init` and a signal combining the caller's own (a `Request` input's signal, `init.signal`) with the one the wait hands it, the body's `signal()` (in a halted `finally` the unwind fiber's deadline, so cleanup can still fetch). A `Request` input keeps its signal, `referrer` and `referrerPolicy`, which a non-empty `init` would replace or reset (the Fetch standard's `Request(input, init)`). A halt aborts the request; the wait finishes, by its rejection, and the body is returned (§4.2's third row), the `AbortError` discarded |
-| `addEventListener`, an emitter's `on`/`off`, `on*` properties | `listen(target, type, handler, opts?)`: the handler runs synchronously inside the node current at registration, as `node.run` does (`current()`, `lookup`, `own`, `fork`, `child`, `signal()`, `preventDefault()`; nothing waits: it forks a task, which reports by the node's destination rules, so a bodiless node's fork names `onFailure`, D14). A generator or `async` handler is a `TypeError`. Every call is its own registration, as an emitter's `on` is: the same handler listened twice runs twice per event, where `addEventListener` registers one `(type, callback, capture)` once. Removed at the node's delivery through the native `{ signal }` (an `AbortSignal.any` of the node's signal and `opts.signal`; on an emitter, or a target that ignores `signal` such as ws's `WebSocket`, by removal at the signal's `abort`), and at an end without one (`close()`, a natural exit) by its entry; `opts.signal` and `once` remove it early with its entry; an event that reaches it after the delivery (an emitter's call of a listener removed during the same `emit`, an earlier listener of the node's signal dispatching) is dropped; a node already delivered, or an `opts.signal` already fired, registers nothing. A throw from the handler never reaches the target: it aborts the node, the error as the reason, and is the entry's release failure, so the node ends `defect(e)`, as a `'link'` child's failure ends it; when the handler ended its own registration first (`close()`, `abort()`, `releaseAll()`, its `opts.signal`), that release waits for the handler to return and fails with its throw. An event dispatched during a creation runs no handler: `node.run` refuses the frame (I16), and its `CreationViolationError` goes to the dispatcher, as a bare listener's `node.run` would throw it, so the creation fails, never the registering node |
+| `addEventListener`, an emitter's `on`/`off`, `on*` properties | `listen(target, type, handler, opts?)`: the handler runs synchronously inside the node current at registration, as `node.run` does (`current()`, `lookup`, `own`, `fork`, `child`, `signal()`, `preventDefault()`; nothing waits: it forks a task, which reports by the node's destination rules, so a bodiless node's fork names `onFailure`, D14). A generator or `async` handler is a `TypeError`, and a handler that returns an op (a task as the handler, `(e) => save(e)`) throws one at the event, since nothing runs the op. Every call is its own registration, as an emitter's `on` is: the same handler listened twice runs twice per event, where `addEventListener` registers one `(type, callback, capture)` once. Removed at the node's delivery through the native `{ signal }` (an `AbortSignal.any` of the node's signal and `opts.signal`; on an emitter, or a target that ignores `signal` such as ws's `WebSocket`, by removal at the signal's `abort`), and at an end without one (`close()`, a natural exit) by its entry; `opts.signal` and `once` remove it early with its entry; an event that reaches it after the delivery (an emitter's call of a listener removed during the same `emit`, an earlier listener of the node's signal dispatching) is dropped; a node already delivered, or an `opts.signal` already fired, registers nothing. A throw from the handler never reaches the target: it aborts the node, the error as the reason, and is the entry's release failure, so the node ends `defect(e)`, as a `'link'` child's failure ends it; when the handler ended its own registration first (`close()`, `abort()`, `releaseAll()`, its `opts.signal`), that release waits for the handler to return and fails with its throw. An event dispatched during a creation runs no handler: `node.run` refuses the frame (I16), and its `CreationViolationError` goes to the dispatcher, as a bare listener's `node.run` would throw it, so the creation fails, never the registering node |
 | `requestAnimationFrame` | `yield* nextFrame()`, the frame's timestamp (a 16 ms timer where frames are absent): a halt returns the body at once and cancels the frame; an `observe` body, which no halt returns, has the wait rejected with the reason at its delivery (where `sleep` runs its full duration, D34) |
 | `for await` | `for (const x of yield* each(source)) { …; yield* each.next(); }`: `yield* each(source)` waits for the first item and is a synchronous iterable over the current one, and `yield* each.next()` waits for the next item of the innermost loop. When the body leaves the loop early (`break`, `return`, a throw, a `fail`) or is halted in it, the source's `return()` is called once, as release work: the loop is an entry the node owns, and the loop iterator's `return()` releases it, an eager `release(x)` that calls the source's `return()` at once; nothing is waited for inside that `return()` (decision 29): the node waits for the entry's release, and completes after it; a `return()` that fails is the node's release failure. An exhausted source, or one whose read failed, is never returned. A halt stops waiting for a read at once, and the release then returns the source; an async generator queues that `return()` behind a read in flight, so a read not handed `signal()` holds the node until it settles (`node:stalled`). A pass that skips `each.next()` throws a `TypeError` at the loop's head, and the source is returned |
 
@@ -1323,7 +1354,7 @@ never declared, `never` for a body with no `fail`. It is written
 `yield*` of `never`. Propagation is `yield*`, as README's `getUser` and
 `getOrder` show ([README](README.md#expected-failures)).
 
-`call`, a helper's `yield*`, `join`, `shield` and `wait(op)` re-yield a
+A task's call, a helper's `yield*`, `join`, `shield` and `wait(op)` re-yield a
 child's expected failure into the caller's union, and `all` and `race` as
 §4.8 says; `attempt`, `result`, `unshield` and `settle` deliver the four-way
 outcome as a value (§4.12). A `then` rejects with the error, and so does a
@@ -1378,7 +1409,7 @@ union. It takes a `Result`, not a promise of one: wait for that first,
 `yield* $(yield* wait(p))`; anything that is no `Result` is a `TypeError` at
 the `yield*`. A task that returns a `Result` succeeds with it, data, and its
 caller's `$` turns it back into the caller's own failure:
-`const n = yield* $(yield* call(parse, text))`.
+`const n = yield* $(yield* parse(text))`.
 
 For ramme work, use `attempt`, which keeps the four statuses (§4.5).
 `fromThrowing` is for foreign code: over an op it runs the op through its
@@ -1507,7 +1538,7 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `pool.ts` | the pool's concurrency queue and intake rules |
 | `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, alias redirects, decided markers, placement by view, the value node's creation and placement |
 | `fiber.ts` | `task()` |
-| `ambient.ts` | the free functions: `current`, `signal`, `lookup`, `own`, `release`, `fork`, `call`, `shield`, … |
+| `ambient.ts` | the free functions: `current`, `signal`, `lookup`, `own`, `release`, `fork`, `attempt`, `shield`, …, and a task's call |
 | `lifecycle-events.ts` | `NodeEvent`, `NodeTopic` |
 | `create-context.ts` | `createRootContext` |
 | `index.ts` | the public surface |
@@ -1550,7 +1581,7 @@ development mode on and off alike to within a few percent.
 | `yield* wait(Promise.resolve())` | ~190 |
 | `yield*` of a settled op (`join(f)` of a completed fiber) | ~210 |
 | a `promised` round trip from top-level code: a node per call | ~540 |
-| `yield* call(syncTask)`: a node made, its body run, the node completed | ~600 |
+| `yield* syncTask()`: a node made, its body run, the node completed | ~600 |
 | `own(x, release)` and `yield* release(x)` of a passive entry: a release fiber | ~800 |
 | `yield* sleep(0)` | ~1,140,000: the platform's timer, clamped to about a millisecond |
 
@@ -1590,14 +1621,18 @@ its emitted declaration, which is why both are public (§1.3).
 
 - **The lint rules** ship in this repository as a separate package,
   `eslint-plugin-ramme` (`packages/eslint-plugin-ramme`, §7; D35), whose
-  `configs.recommended` turns all nine on, as errors (D41, decision 14; D43):
-  `ramme/no-async-body` (§4.5), `ramme/no-unused-op` (§4.4),
-  `ramme/no-unused-outcome` (§4.5, D31), `ramme/no-timers` (§4.4, §4.9),
-  `ramme/no-stored-borrow` (§3.2), `ramme/no-owned-provider` (the wiring
-  error of §2.5), and the platform rules of §4.9 (decision 26),
-  `ramme/no-bare-listener`, `ramme/no-bare-fetch` and
-  `ramme/no-bare-async-iteration`, each message naming the `ramme/platform`
-  replacement. They are syntactic; the package's
+  `configs.recommended` turns ten on, as errors (D41, decision 14; D43;
+  D44): `ramme/no-async-body` (§4.5), `ramme/no-unused-op` (§4.4),
+  `ramme/no-generator-helper` (§4.5, D44), `ramme/no-unused-outcome` (§4.5,
+  D31), `ramme/no-timers` (§4.4, §4.9), `ramme/no-stored-borrow` (§3.2),
+  `ramme/no-owned-provider` (the wiring error of §2.5), and the platform
+  rules of §4.9 (decision 26), `ramme/no-bare-listener`,
+  `ramme/no-bare-fetch` and `ramme/no-bare-async-iteration`, each message
+  naming the `ramme/platform` replacement; `configs.style`, chosen
+  separately, turns the style rules `ramme/named-task` and
+  `ramme/no-function-key` on as warnings (D44). They are syntactic, but for
+  `no-unused-op`'s type-aware half, which with type information also flags
+  a dropped call of a task; the package's
   [README](packages/eslint-plugin-ramme/README.md#rules) states what each
   rule flags and its approximations. Recommended alongside, type-aware:
   `@typescript-eslint/no-floating-promises` (a forgotten `await` in
@@ -1681,7 +1716,7 @@ current node is the default owner. I22 escape fails loudly. I23 every
 acquisition is releasable early. I24 only resolution attaches to the
 provided stack. I25 every asynchronous hook is a fiber, or a synchronous
 re-entry of its node through a ramme wrapper. I26 fibers are not awaitable;
-tasks are not callable. Each has a named test in `src/invariants.test.ts`;
+a task's call is a lazy op, never a bare promise. Each has a named test in `src/invariants.test.ts`;
 the last clause of I16 is tested in `src/creation.test.ts`.
 
 **Assumptions.** A1 abandoned promises are collectable (a `never()` nobody

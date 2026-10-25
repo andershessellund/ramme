@@ -12,11 +12,11 @@
 //
 // - `own`, `release`, `releaseAll`, `fork`, `pool`, `child`, `current` and
 //   `signal` materialise the value's (pending or live) node and act on it.
-// - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
-//   `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`, `never`,
-//   `sleep`, `wait` and `runSync`, throw `CreationViolationError` first,
-//   before touching any node (DESIGN.md §3.2, §3.5, I16): a refused call never
-//   creates the value's node. `promised` is in the first group: it runs
+// - The body-shaped ones, `lookup`, a task's call `t(…)`, `attempt`, `all`,
+//   `race`, `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`,
+//   `never`, `sleep`, `wait` and `runSync`, throw `CreationViolationError`
+//   first, before touching any node (DESIGN.md §3.2, §3.5, I16): a refused call
+//   never creates the value's node. `promised` is in the first group: it runs
 //   nothing when it is made.
 //
 // Outside any node every one of them throws `NoCurrentNodeError`, whose
@@ -49,7 +49,7 @@ import type {
   Task,
 } from './context.js';
 import { currentCreation, currentFrame } from './context-storage.js';
-import type { AnyTask, BodyOf, ErrorOf, FailedWith, ValueOf, Yields } from './internal-context.js';
+import type { AnyMember, BodyOf, ErrorOf, FailedWith, TaskLike, ValueOf, Yields } from './internal-context.js';
 import { failOp } from './managed.js';
 import type { NodeImpl } from './node-impl.js';
 import { CreationViolationError, NoCurrentNodeError } from './resource.js';
@@ -77,6 +77,32 @@ function requireBodyShaped(op: string): NodeImpl {
   if (currentCreation() !== undefined)
     throw new CreationViolationError(op === 'lookup' ? 'lookup() during creation; use inject()' : `${op}() during creation`);
   return requireCurrent(op);
+}
+
+/**
+ * @internal A task's call `t(…args)` (D44, decision 1): `current().call(t, …args)`, the lazy op of one run of `t` in a
+ * new child of the current node, made when it is yielded. Body-shaped: the guards name the task (`getUser() during
+ * creation`, `getUser() called with no current node`), and so do the node's own, which `call` raises naming `call()`
+ * (`getUser() in release:entry#4 during the creation of Svc#3`). The op carries `t` and its arguments, so `fork`, the
+ * groups and a pool fork `t` itself when they are handed it.
+ */
+export function taskCall<T>(t: TaskLike<unknown[], T>, args: unknown[]): Op<T, unknown> {
+  const node = requireBodyShaped(t.name);
+  try {
+    return node.call(t as unknown as Task<unknown[], T, unknown>, ...args);
+  } catch (e) {
+    throw namingTask(e, t.name);
+  }
+}
+
+/**
+ * A guard's error from `call` (`call() …`: a `CreationViolationError`, `NodeCompletedError` or `PendingNodeError`, each
+ * made from its message), raised again, of its class, naming the task the caller called, as `ramme/platform` names its
+ * primitives.
+ */
+function namingTask(e: unknown, name: string): unknown {
+  if (!(e instanceof Error) || !e.message.startsWith('call()')) return e;
+  return new (e.constructor as new (message: string) => Error)(`${name}()${e.message.slice('call()'.length)}`);
 }
 
 // --- identity -----------------------------------------------------------------
@@ -138,30 +164,25 @@ export function releaseAll(): Op<void> & Promise<void> {
 
 // --- running bodies in a child of the current node (DESIGN.md §4.5) -----------------
 
-/** Run `t` concurrently in a new child of the current node; the body starts in a microtask (I20). */
+/**
+ * Run `t` concurrently in a new child of the current node; the body starts in a microtask (I20). `fork(op)` (D44,
+ * decision 4) forks a task's call `t(…args)` as `fork(t, …args)`, and runs any other op in a new child of its own,
+ * named after the op (`sleep`, `wait`, …), whose body is `yield* op`.
+ */
 export function fork<T, A extends unknown[], Y extends Yields = never, E = never>(
   t: Task<A, T, E> | BodyOf<T, A, Y>,
   ...args: A
-): Fiber<T, FailedWith<Y> | E> {
-  return requireCurrent('fork').fork(t, ...args);
+): Fiber<T, FailedWith<Y> | E>;
+export function fork<T, E = never>(op: Op<T, E>): Fiber<T, E>;
+export function fork(t: unknown, ...args: unknown[]): Fiber<unknown, unknown> {
+  return requireCurrent('fork').fork(t as Task<unknown[], unknown, unknown>, ...args);
 }
 
 /**
- * Run `t` in a new child of the current node and wait for it: `yield* call(t, …)` is its value, or re-yields its
- * expected failure into this body, which ends with it (D42); its defect is thrown at the `yield*`. Lazy: the child is
- * made, and its body starts synchronously, when the op is yielded (D22); an op nobody yields runs nothing
- * (DESIGN.md §4.2).
- */
-export function call<T, A extends unknown[], Y extends Yields = never, E = never>(
-  t: Task<A, T, E> | BodyOf<T, A, Y>,
-  ...args: A
-): Op<T, FailedWith<Y> | E> {
-  return requireBodyShaped('call').call(t, ...args);
-}
-
-/**
- * `call`, resolving with the child's four-way outcome (D42): `success`, `failure` (its `fail`), `defect` (its throw)
- * or `aborted`; a failure or a defect is delivered as a value and consumed, never thrown. A `freeze` or `restore` caller that is itself interrupted is halted here, as on `call`, once the child
+ * A task's call `t(…)`, resolving with the child's four-way outcome (D42): `success`, `failure` (its `fail`), `defect`
+ * (its throw) or `aborted`; a failure or a defect is delivered as a value and consumed, never thrown. `attempt(t(…args))`
+ * and `attempt(t, …args)` are one; any other op runs in a new child of its own, named after it, whose outcome it is
+ * (D44, decision 4). A `freeze` or `restore` caller that is itself interrupted is halted here, as on a call, once the child
  * has completed, and sees no outcome, so `aborted` is the child's own abort (its `timeoutMs`, its `signal`, an
  * explicit abort). A `restore` child is the exception: it also hears an `observe` caller's interruption, and an
  * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted`. The `observe`
@@ -171,35 +192,42 @@ export function call<T, A extends unknown[], Y extends Yields = never, E = never
 export function attempt<T, A extends unknown[], Y extends Yields = never, E = never>(
   t: Task<A, T, E> | BodyOf<T, A, Y>,
   ...args: A
-): Op<Outcome<T, FailedWith<Y> | E>> {
-  return requireBodyShaped('attempt').attempt(t, ...args);
+): Op<Outcome<T, FailedWith<Y> | E>>;
+export function attempt<T, E = never>(op: Op<T, E>): Op<Outcome<T, E>>;
+export function attempt(t: unknown, ...args: unknown[]): Op<Outcome<unknown, unknown>> {
+  return requireBodyShaped('attempt').attempt(t as Task<unknown[], unknown, unknown>, ...args);
 }
 
 /**
- * Run the tasks as subscribers of a fresh child and await every one (D28): the tuple of their values; with one
+ * Run the members as subscribers of a fresh child and await every one (D28): the tuple of their values; with one
  * member failed, and that by an expected failure, its failure re-yielded, so `E` is the union of the members' (D42);
- * with a defect, or two failures or more, an `AggregateError` of every real failure in task order (DESIGN.md §4.8).
+ * with a defect, or two failures or more, an `AggregateError` of every real failure in member order (DESIGN.md §4.8).
+ * A member is an op or a task of no arguments (D44, decision 4): a task's call `t(…)` forks `t` itself, so
+ * `all([a(1), b('x')])` makes one fiber per task under the group; any other op runs in a fiber named after it.
  * `const T` keeps an array literal a tuple.
  */
-export function all<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>> {
+export function all<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>> {
   return requireBodyShaped('all').all(tasks, opts);
 }
 
 /**
- * The first success among the tasks; the rest are aborted and awaited (DESIGN.md §4.8). With no success, `all`'s rule:
- * a lone expected failure re-yielded (D42), else the `AggregateError` of every failure, else `FiberAbortedError`.
+ * The first success among the members; the rest are aborted and awaited (DESIGN.md §4.8). With no success, `all`'s
+ * rule: a lone expected failure re-yielded (D42), else the `AggregateError` of every failure, else
+ * `FiberAbortedError`. `race([t(x), sleep(ms)])` is a deadline on `t`'s success: the sleep winning aborts `t` and waits
+ * for it, and a failing `t` beats nothing, so the race waits out the `ms`, resolves `undefined` and drops `t`'s failure,
+ * a defect included, as a loser's. `t.with({ timeoutMs: ms })(x)` is the deadline that lets `t`'s failure through.
  */
-export function race<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<ValueOf<T[number]>, ErrorOf<T[number]>> {
+export function race<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<ValueOf<T[number]>, ErrorOf<T[number]>> {
   return requireBodyShaped('race').race(tasks, opts);
 }
 
 /**
- * `all` that resolves with every four-way outcome instead of rejecting: run the tasks as subscribers of a fresh
+ * `all` that resolves with every four-way outcome instead of rejecting: run the members as subscribers of a fresh
  * child, wait for every one (as `all` does; neither aborts a sibling), and resolve with the tuple of their outcomes
  * in order. Failures, defects and aborts are values; it never rejects on a member's account (DESIGN.md §4.8). `const T`
  * keeps an array literal a tuple.
  */
-export function settle<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>> {
+export function settle<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>> {
   return requireBodyShaped('settle').settle(tasks, opts);
 }
 
@@ -207,7 +235,7 @@ export function settle<const T extends readonly AnyTask[]>(tasks: T, opts?: Node
  * A non-cancellable region (D39, D41 decision 13, DESIGN.md §4.2): run `t` in a release fiber of the current node
  * and wait for it. Its `signal()` is the release deadline (`releaseTimeoutMs`), `own` attaches to it and `lookup`
  * resolves through the current node, and a halt lets it finish (release work): the body is returned at its next
- * `yield*` after it (`yield* shield(function* () { yield* call(charge); yield* call(record); })`). Cleanup after a
+ * `yield*` after it (`yield* shield(function* () { yield* charge(); yield* record(); })`). Cleanup after a
  * halt belongs in the body's own `finally`, which may wait. The current node completes after every shield it ran; a
  * shield's failure is the waiter's, or surfaces from the current node (I11).
  */
@@ -331,7 +359,7 @@ export function promised<T, A extends unknown[], Y extends Yields = never, E = n
  * An expected failure, the fourth way a body ends (D42): `yield* fail(e)` ends the body at once with the outcome
  * `failure(e)`, typed `E` on its task (`Task<A, T, E>`, inferred from what it yields), and returns its generator as a
  * halt does, so its `finally` blocks run, and may wait, as release work; no `catch` sees it. A caller's
- * `yield* call(t)` re-yields it, so it ends the caller too, and joins its `E`; `attempt`, `result` and `settle` deliver
+ * `yield* t(…)` re-yields it, so it ends the caller too, and joins its `E`; `attempt`, `result` and `settle` deliver
  * it as an outcome. In a halted `finally` it is a release failure, which amends `aborted` to `defect`. Pure: it reads
  * no node, so it may be made anywhere.
  *

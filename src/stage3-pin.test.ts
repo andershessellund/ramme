@@ -21,7 +21,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   all,
   attempt,
-  call,
   fail,
   fork,
   join,
@@ -278,7 +277,7 @@ describe('stage 3: propagation through call and join', () => {
     const callFail = await within(
       root.attempt(function* () {
         try {
-          yield* call(failing);
+          yield* failing();
           logs.callFail.push('after call');
         } catch (x) {
           logs.callFail.push(`catch ${label(x, known)}`);
@@ -291,7 +290,7 @@ describe('stage 3: propagation through call and join', () => {
     const callDefect = await within(
       root.attempt(function* () {
         try {
-          yield* call(throwing);
+          yield* throwing();
           logs.callDefect.push('after call');
         } catch (x) {
           logs.callDefect.push(`catch ${label(x, known)}`);
@@ -379,7 +378,7 @@ describe('stage 3: all, race and settle', () => {
       const o = await within(
         root.attempt(function* () {
           try {
-            yield* all([member.bind(), other.bind()]);
+            yield* all([member, other]);
             caller.push('after all');
           } catch (x) {
             caller.push(`catch ${label(x, known)}`);
@@ -412,14 +411,14 @@ describe('stage 3: all, race and settle', () => {
               return 'fast';
             },
             { name: 'fast' },
-          ).bind(),
+          ),
           task(
             function* () {
               yield* sleep(5);
               return 'won';
             },
             { name: 'slow' },
-          ).bind(),
+          ),
         ]);
       }),
     );
@@ -434,7 +433,7 @@ describe('stage 3: all, race and settle', () => {
                 return 'never';
               },
               { name: 'only' },
-            ).bind(),
+            ),
           ]);
         } catch (x) {
           return `caught ${label(x, { e })}`;
@@ -460,21 +459,21 @@ describe('stage 3: all, race and settle', () => {
             yield* sleep(0);
             yield* fail(e);
             return 1;
-          }).bind(),
+          }),
           task(function* () {
             yield* sleep(0);
             throw d;
-          }).bind(),
+          }),
           task(
             function* () {
               yield* never();
             },
             { signal: ac.signal },
-          ).bind(),
+          ),
           task(function* () {
             yield* sleep(0);
             return 1;
-          }).bind(),
+          }),
         ]);
         return outcomes.map((o) => show(o, known));
       }),
@@ -710,14 +709,14 @@ describe('stage 3: the surface', () => {
     });
     /** A helper: shares the caller's node, and its failures join the caller's union. */
     function* loadOrder(id: string) {
-      const user = yield* call(getUser, id);
-      return yield* call(getOrder, user);
+      const user = yield* getUser(id);
+      return yield* getOrder(user);
     }
     const order = task(function* (id: string) {
       return yield* loadOrder(id);
     });
     const checkout = task(function* (id: string) {
-      const o = yield* order.call(id);
+      const o = yield* order(id);
       if (o.total > 100) yield* fail(new PaymentDeclined());
       const receipt: Receipt = { order: o };
       return receipt;
@@ -739,32 +738,32 @@ describe('stage 3: the surface', () => {
     });
     const viaAll = task(function* (id: string) {
       const user: User = { id };
-      return yield* all([getUser.bind(id), getOrder.bind(user)]);
+      return yield* all([getUser(id), getOrder(user)]);
     });
     const viaRace = task(function* (id: string) {
-      return yield* race([getUser.bind(id), getAdmin.bind(id)]);
+      return yield* race([getUser(id), getAdmin(id)]);
     });
     const viaSettle = task(function* (id: string) {
       const user: User = { id };
-      return yield* settle([getUser.bind(id), getOrder.bind(user)]);
+      return yield* settle([getUser(id), getOrder(user)]);
     });
     // A middle level that both calls a failing task and fails itself, twice over, and the groups over such tasks.
     const getAccount = task(function* (id: string) {
-      const user = yield* call(getUser, id);
+      const user = yield* getUser(id);
       if (user.id === 'locked') yield* fail(new NotAnAdmin());
       return user;
     });
     const getAccountOrder = task(function* (id: string) {
-      const user = yield* call(getAccount, id);
+      const user = yield* getAccount(id);
       if (user.id === 'unpaid') yield* fail(new PaymentDeclined());
       const accountOrder: Order = { user, total: 1 };
       return accountOrder;
     });
     const allMiddle = task(function* (id: string) {
-      return yield* all([getAccount.bind(id), getAccountOrder.bind(id), plain.bind(1)]);
+      return yield* all([getAccount(id), getAccountOrder(id), plain(1)]);
     });
     const raceMiddle = task(function* (id: string) {
-      return yield* race([getAccount.bind(id), getAccountOrder.bind(id)]);
+      return yield* race([getAccount(id), getAccountOrder(id)]);
     });
     const caughtMiddle = task(function* (id: string) {
       return yield* attempt(getAccountOrder, id);
@@ -777,11 +776,17 @@ describe('stage 3: the surface', () => {
           if (Math.random() > 1) yield* fail(new UserNotFound());
           return 1;
         }),
-        plain.bind(2),
+        plain(2),
       ]);
     });
     function forked(id: string) {
       return fork(getUser, id);
+    }
+    function _forkedCall(id: string) {
+      return fork(getUser(id));
+    }
+    function _attempted(id: string) {
+      return attempt(getUser(id));
     }
     function resulted(f: Fiber<User, UserNotFound>) {
       return result(f);
@@ -824,12 +829,11 @@ describe('stage 3: the surface', () => {
     >;
     // Task<A, T, E = never> and Fiber<T, E>
     type _TaskDefault = Expect<Equal<Task<[], number>, Task<[], number, never>>>;
-    type _Bind = Expect<Equal<ReturnType<typeof getUser.bind>, Task<[], User, UserNotFound>>>;
     type _With = Expect<Equal<ReturnType<typeof getUser.with>, Task<[id: string], User, UserNotFound>>>;
-    type _Fork = Expect<Equal<ReturnType<typeof getUser.fork>, Fiber<User, UserNotFound>>>;
+    type _Fork = Expect<Equal<ReturnType<typeof _forkedCall>, Fiber<User, UserNotFound>>>;
     type _FreeFork = Expect<Equal<ReturnType<typeof forked>, Fiber<User, UserNotFound>>>;
-    type _Call = Expect<Equal<Awaited<ReturnType<typeof getUser.call>>, User>>;
-    type _Attempt = Expect<Equal<Awaited<ReturnType<typeof getUser.attempt>>, Outcome<User, UserNotFound>>>;
+    type _Call = Expect<Equal<Awaited<ReturnType<typeof getUser>>, User>>;
+    type _Attempt = Expect<Equal<Awaited<ReturnType<typeof _attempted>>, Outcome<User, UserNotFound>>>;
     type _Result = Expect<Equal<Awaited<ReturnType<typeof resulted>>, Outcome<User, UserNotFound>>>;
     type _FiberOutcome = Expect<Equal<Fiber<User, UserNotFound>['outcome'], Outcome<User, UserNotFound> | undefined>>;
     // Outcome<T, E = unknown>: success(T) | failure(E) | defect(unknown) | aborted; minus defect and aborted, a Result
@@ -842,10 +846,10 @@ describe('stage 3: the surface', () => {
     type _AbortedReason = Expect<Equal<Extract<O, { status: 'aborted' }>['reason'], unknown>>;
     type _IsResult = Expect<Equal<Exclude<O, { status: 'defect' | 'aborted' }>, Result<number, UserNotFound>>>;
     type _OutcomeDefault = Expect<Equal<Outcome<number>, Outcome<number, unknown>>>;
-    // Making a task runs nothing: each is a Task object, and no body above ran.
+    // Making a task runs nothing: each is a task, a function, and no body above ran.
     const made = [checkout, failsOnly, plain, sync, caught, viaJoin, viaAll, viaRace, viaSettle];
     const middle = [getAccountOrder, allMiddle, raceMiddle, caughtMiddle, inlineAll];
-    expect([...made.map((t) => typeof t.fork), ...middle.map((t) => typeof t.fork), typeof forked, typeof resulted]).toEqual(
+    expect([...made.map((t) => typeof t.with), ...middle.map((t) => typeof t.with), typeof forked, typeof resulted]).toEqual(
       Array(16).fill('function'),
     );
   });

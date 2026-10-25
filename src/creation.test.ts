@@ -222,7 +222,7 @@ describe('creation is pure (DESIGN.md §3.2, §3.5)', () => {
       lookup: () => lookup(K),
       'root.get': () => root.get(K),
       'root.call': () => root.call(() => 1),
-      'task.call': () => task(() => 1).call(),
+      't()': () => task(() => 1)(), // a task's call (D44)
       'root.run': () => root.run(() => 1),
       'root.runSync': () => root.runSync(() => 1),
       'root.all': () => root.all([]),

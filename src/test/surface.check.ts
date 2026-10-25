@@ -80,9 +80,9 @@ type Not<B extends boolean> = B extends true ? false : true;
 
 /** The free `all`, the method `all` on a named node, and `current().all` all infer the tuple (DESIGN.md §4.8). */
 export function d58(ctx: Context, a: Task<[number], number>, b: Task<[string], string>): void {
-  const _viaFree = all([a.bind(1), b.bind('x')]);
-  const _viaMethod = ctx.all([a.bind(1), b.bind('x')]);
-  const _viaCurrent = current().all([b.bind('x'), a.bind(1)]);
+  const _viaFree = all([a(1), b('x')]);
+  const _viaMethod = ctx.all([a(1), b('x')]);
+  const _viaCurrent = current().all([b('x'), a(1)]);
   type _Free = Expect<Equal<typeof _viaFree, Op<[number, string]>>>;
   type _Method = Expect<Equal<typeof _viaMethod, Op<[number, string]>>>;
   type _Current = Expect<Equal<typeof _viaCurrent, Op<[string, number]>>>;
@@ -92,7 +92,7 @@ export function d58(ctx: Context, a: Task<[number], number>, b: Task<[string], s
 export function attemptTypes(ctx: Context, a: Task<[number], number>): void {
   const _viaFree = attempt(a, 1);
   const _viaMethod = ctx.attempt(a, 1);
-  const _viaTask = a.attempt(1);
+  const _viaTask = attempt(a(1));
   const _inline = attempt(function* (s: string) {
     return s.length;
   }, 'x');
@@ -106,8 +106,8 @@ export function attemptTypes(ctx: Context, a: Task<[number], number>): void {
 
 /** `settle` infers the tuple of four-way outcomes, free and as a method; `SettleResult` names it (DESIGN.md §4.8). */
 export function settleTypes(ctx: Context, a: Task<[number], number>, b: Task<[string], string>): void {
-  const _viaFree = settle([a.bind(1), b.bind('x')]);
-  const _viaMethod = ctx.settle([b.bind('x'), a.bind(1)], { timeoutMs: 100 });
+  const _viaFree = settle([a(1), b('x')]);
+  const _viaMethod = ctx.settle([b('x'), a(1)], { timeoutMs: 100 });
   const _empty = settle([]);
   type _Free = Expect<Equal<typeof _viaFree, Op<[Outcome<number, never>, Outcome<string, never>]>>>;
   type _Method = Expect<Equal<typeof _viaMethod, Op<[Outcome<string, never>, Outcome<number, never>]>>>;
@@ -115,12 +115,18 @@ export function settleTypes(ctx: Context, a: Task<[number], number>, b: Task<[st
   type _Named = Expect<Equal<SettleResult<[Task<[], number>]>, [Outcome<number, never>]>>;
 }
 
-/** I26: a task is an object, never a callable bare promise. */
+/** I26: a task's call is the lazy op, never a bare promise (D44); a task has no `fork` or `attempt` of its own, nor a key's place. */
 export function i27(t: Task<[number], number>): void {
-  // @ts-expect-error -- I26: a Task has no call signature
-  t(1);
-  // @ts-expect-error -- I26: nor has one made by bind()
-  t.bind(1)();
+  type _Call = Expect<Equal<ReturnType<typeof t>, Op<number>>>;
+  type _NoPromise = Expect<Not<ReturnType<typeof t> extends Promise<number> ? true : false>>;
+  // @ts-expect-error -- the arguments are the task's
+  void t('one');
+  // @ts-expect-error -- Task.fork is gone: fork(t(…)) (D44, decision 3)
+  void t.fork(1);
+  // @ts-expect-error -- Task.attempt is gone: attempt(t(…)) (D44, decision 3)
+  void t.attempt(1);
+  // @ts-expect-error -- a task is not an injection key (D44, decision 7)
+  void ramme.inject(t);
 }
 
 /** `Fiber` is an interface only; there is no `Fiber` namespace object (DESIGN.md §4.5). */
@@ -158,7 +164,8 @@ export function unshields(ctx: Context, t: Task<[number], string>): void {
   type _Free = Expect<Equal<typeof _free, Op<Outcome<string, never>>>>;
   type _Body = Expect<Equal<typeof _body, Op<Outcome<number, never>>>>;
   type _Method = Expect<Equal<typeof _method, Op<Outcome<string, never>>>>;
-  type _AsAttempt = Expect<Equal<typeof ramme.unshield, typeof ramme.attempt>>;
+  const _asAttempt = ramme.attempt(t, 1);
+  type _AsAttempt = Expect<Equal<typeof _free, typeof _asAttempt>>; // attempt takes an op too (D44); unshield a task or a body
   // @ts-expect-error -- the arguments are the task's, as for attempt
   void ramme.unshield(t, 'one');
 }
@@ -186,13 +193,13 @@ export function generatorBodies(t: Task<[string], number>): void {
     return String(n);
   }
   const _fromGenerator = ramme.task(function* (id: string) {
-    const n = yield* ramme.call(t, id);
+    const n = yield* t(id);
     return yield* helper(n);
   });
   const _throws = ramme.task(function* (): Generator<Instruction, never, unknown> {
     throw new Error('x');
   });
-  const _returnsOp = ramme.task(() => ramme.call(t, 'x'));
+  const _returnsOp = ramme.task(() => t('x'));
   const _plain = ramme.task(() => [1, 2]);
   const _text = ramme.task(() => 'x');
   type _Helper = Expect<Equal<ReturnType<typeof helper>, Generator<Instruction, string, unknown>>>;
@@ -249,7 +256,7 @@ type _CoreValues = Expect<
   Equal<
     keyof typeof ramme,
     | 'createRootContext' | 'task'
-    | 'current' | 'signal' | 'lookup' | 'own' | 'release' | 'releaseAll' | 'fork' | 'call' | 'attempt' | 'all'
+    | 'current' | 'signal' | 'lookup' | 'own' | 'release' | 'releaseAll' | 'fork' | 'attempt' | 'all'
     | 'race' | 'settle' | 'shield' | 'unshield' | 'pool' | 'child' | 'join' | 'result' | 'interrupted' | 'never'
     | 'sleep' | 'wait' | 'promised' | 'fail' | 'runSync'
     | 'inject' | 'ContextKey'
@@ -257,7 +264,7 @@ type _CoreValues = Expect<
     | 'FiberNotAwaitableError' | 'FiberAbortedError' | 'PoolClosedError'
     | 'PoolFullError' | 'CreationViolationError' | 'FactoryReturnedUndefinedError' | 'AsyncRunError'
     | 'PlacementError' | 'OwnerInterrupt'
-    | 'createInjectionKey' | 'setScope' | 'setDependencies'
+    | 'createInjectionKey' | 'createKeyFor' | 'setScope' | 'setDependencies'
     | 'classProvider' | 'factoryProvider' | 'valueProvider' | 'aliasProvider'
     | 'createScope' | 'SelfScope' | 'RootScope' | 'RequestScope'
     | 'createTopic' | 'NodeTopic'
@@ -268,8 +275,8 @@ type _CoreValues = Expect<
 export function asyncBodiesRefused(ctx: Context): void {
   // @ts-expect-error -- an async task body
   void ramme.task(async () => 1);
-  // @ts-expect-error -- an async call body
-  void ramme.call(async () => 1);
+  // @ts-expect-error -- an async call body, through a node (the free call is a task's own, D44)
+  void ctx.call(async () => 1);
   // @ts-expect-error -- an async fork body, through a node
   void ctx.fork(async () => 1);
   // @ts-expect-error -- an async promised body
@@ -280,8 +287,8 @@ export function asyncBodiesRefused(ctx: Context): void {
   void ramme.task(async function* () {
     yield 1;
   });
-  // @ts-expect-error -- an async generator call body that yields nothing
-  void ramme.call(async function* () {});
+  // @ts-expect-error -- an async generator call body that yields nothing, through a node
+  void ctx.call(async function* () {});
   // @ts-expect-error -- an async generator fork body, through a node
   void ctx.fork(async function* () {});
   // @ts-expect-error -- an async generator promised body
@@ -484,7 +491,7 @@ type _This = Expect<Equal<ReturnType<Repo['load']>, Generator<Fail<UserNotFound>
 /** A release may yield any `E`: its expected failure is a release failure of its owner, a defect there (D42). */
 export function releasesTakeAnyE(ctx: Context, t: Task<[], void, UserNotFound>): void {
   ctx.own({ id: 1 }, function* () {
-    yield* ramme.call(t);
+    yield* t();
   });
   const _release: Release<object> = function* () {
     yield* fail(new UserNotFound());
@@ -513,13 +520,13 @@ export function inlineMembers(): void {
 /** An annotated helper: `Operation<T, E>` for one that is only `yield*`ed, `Generator<Instruction | Fail<E>, T, unknown>` for a body. */
 export function annotations(t: Task<[string], User, UserNotFound>): void {
   function* loadUser(id: string): Operation<User, UserNotFound> {
-    return yield* ramme.call(t, id);
+    return yield* t(id);
   }
   const _body = ramme.task(function* (id: string): Generator<Instruction | Fail<UserNotFound>, string, unknown> {
     return (yield* loadUser(id)).id;
   });
   type _Body = Expect<Equal<typeof _body, Task<[id: string], string, UserNotFound>>>;
-  type _OpE = Expect<Equal<ReturnType<typeof t.call>, Op<User, UserNotFound>>>;
+  type _OpE = Expect<Equal<ReturnType<typeof t>, Op<User, UserNotFound>>>;
 }
 
 

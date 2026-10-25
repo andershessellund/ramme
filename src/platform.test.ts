@@ -6,7 +6,8 @@
 //   otherwise replace.
 // - `listen`: a handler's throw is routed to the node, never rethrown into the target (decision 21), even when the
 //   handler released its own listener first (`close()`, `abort()`, `releaseAll()`, its `opts.signal`); async handlers,
-//   non-functions and foreign targets are refused before anything is registered; the listener is gone from the target
+//   non-functions and foreign targets are refused before anything is registered, and a handler that returns an op (a
+//   task as the handler) throws a TypeError at the event, since nothing runs the op; the listener is gone from the target
 //   at the delivery, before the node's release (decision 22), on a target that ignores `{ signal }` too, and an
 //   event that reaches it after the delivery (an emitter's same-`emit` call, an earlier listener of the node's signal
 //   dispatching) is dropped; `opts.signal` and `once` remove it early with its entry, and leave no listener on a signal
@@ -456,6 +457,47 @@ describe('platform: listen', () => {
       registered: 0,
       entries: 0,
     });
+  });
+
+  it('a handler that returns an op (a task as the handler, an arrow that returns a task’s call) runs nothing: the event throws a TypeError, which ends the node defect(e), on a target and on an emitter', async () => {
+    const ran: string[] = [];
+    const onClick = task(function* onClick(e: Event) {
+      ran.push(e.type);
+      yield* sleep(0);
+    });
+    const onData = task(function* onData(x: string) {
+      ran.push(x);
+    });
+    const root = app();
+    // Each registers on a bodiless node and returns the dispatch (DESIGN.md §4.9): it type-checks, since an op is a value.
+    const cases: Record<string, (box: Context) => () => unknown> = {
+      task: (box) => {
+        const target = new EventTarget();
+        box.run(() => listen(target, 'click', onClick));
+        return () => target.dispatchEvent(new Event('click'));
+      },
+      arrow: (box) => {
+        const target = new EventTarget();
+        box.run(() => listen(target, 'click', (e) => onClick(e)));
+        return () => target.dispatchEvent(new Event('click'));
+      },
+      emitter: (box) => {
+        const em = new EventEmitter();
+        box.run(() => listen(em, 'data', onData));
+        return () => em.emit('data', 'x');
+      },
+    };
+    const seen: Record<string, unknown> = {};
+    for (const [name, register] of Object.entries(cases)) {
+      const box = root.child({ name });
+      const fire = register(box);
+      const firing = outcomeOf(fire);
+      const error = (box.outcome as { error?: unknown } | undefined)?.error;
+      seen[name] = { firing, outcome: box.outcome?.status, saysOp: error instanceof TypeError && /returned an op/.test(error.message) };
+    }
+    await within(root.call(function* () { yield* sleep(5); })); // time for an op wrongly run to run
+    const refused = { firing: 'returned', outcome: 'defect', saysOp: true };
+    expect({ ...seen, ran }).toEqual({ task: refused, arrow: refused, emitter: refused, ran: [] });
   });
 
   it("the listener is gone from the target at the node's delivery, before its release (decision 22): an event while the halted body's finally waits reaches no handler", async () => {

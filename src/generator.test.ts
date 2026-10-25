@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   all,
   attempt,
-  call,
   child,
   current,
   fork,
@@ -155,7 +154,7 @@ describe('U3: the halted finally, against the review probes', () => {
           yield* never();
         } finally {
           try {
-            yield* call(failing('rollback'));
+            yield* failing('rollback')();
           } catch {
             // caught
           }
@@ -475,7 +474,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
     const leaf = task(function* () {
       return 'leaf';
     });
-    const returned = await root.attempt(task(() => call(leaf)));
+    const returned = await root.attempt(task(() => leaf()));
     const released = await root.attempt(
       task(function* () {
         own({}, () => sleep(5));
@@ -502,10 +501,10 @@ describe('the driver: returned ops, handlers, refusals', () => {
       }
     });
     const twice = await root.call(function* () {
-      const p = call(function* () {
+      const p = task(function* () {
         yield* sleep(1);
         return 7;
-      });
+      })();
       return [yield* p, yield* p];
     });
     expect({ o: o.status, log, twice }).toEqual({ o: 'aborted', log: ['after abort', 'finally'], twice: [7, 7] });
@@ -581,7 +580,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
         function* () {
           yield* interrupted(); // delivered: an observe body runs on
           try {
-            yield* call(failing('step'));
+            yield* failing('step')();
           } catch (e) {
             return `observer caught ${(e as Error).message}`;
           }
@@ -814,11 +813,9 @@ describe('the fixes of the PR 1 review', () => {
         yield* never();
       } finally {
         try {
-          yield* call(
-            task(function* () {
-              yield* never();
-            }, { timeoutMs: 5 }), // release work on the unwind fiber, which its own timeout aborts
-          );
+          yield* task(function* () {
+            yield* never();
+          }, { timeoutMs: 5 })(); // release work on the unwind fiber, which its own timeout aborts
         } catch (e) {
           seen = (e as Error).name;
         }
@@ -871,7 +868,7 @@ describe('the fixes of the PR 1 review', () => {
       yield* wait(lib.transaction(promised(body)));
     });
     const viaCall = await halt(function* () {
-      yield* call(body, 'tx');
+      yield* task(body)('tx');
     });
     expect({ viaPromised, viaCall }).toEqual({
       viaPromised: 'defect: ROLLBACK failed: connection reset',
@@ -974,14 +971,14 @@ describe('the fixes of the stage 2 review', () => {
         try {
           yield* never();
         } finally {
-          yield* wait(Promise.all([call(cleanup('a')), call(cleanup('b'))]));
+          yield* wait(Promise.all([cleanup('a')(), cleanup('b')()]));
         }
       }),
       'async helper': await halt(function* () {
         try {
           yield* never();
         } finally {
-          const op = call(cleanup('c'));
+          const op = cleanup('c')();
           yield* wait((async () => await op)());
         }
       }),
@@ -996,7 +993,7 @@ describe('the fixes of the stage 2 review', () => {
         try {
           yield* never();
         } finally {
-          yield* wait(Promise.all([call(failing('f', 20)), call(cleanup('g'))])); // f fails after g has cleaned
+          yield* wait(Promise.all([failing('f', 20)(), cleanup('g')()])); // f fails after g has cleaned
         }
       }),
     };
@@ -1060,7 +1057,7 @@ describe('the fixes of the stage 2 review', () => {
     };
     const cases = {
       call: await interrupted('call', function* () {
-        yield* wait(Promise.all([call(child), call(other)]));
+        yield* wait(Promise.all([child(), other()]));
       }),
       release: await interrupted('release', function* () {
         const x = own({}, slowRollback);
@@ -1188,7 +1185,7 @@ describe('the fixes of the stage 2 review', () => {
           try {
             yield* never();
           } finally {
-            yield* call(obs);
+            yield* obs();
           }
         },
         { name: 'halted', onFailure: () => {} },
@@ -1319,7 +1316,7 @@ describe('the fixes of the stage 2 review', () => {
             );
             stored.join = join(f);
             stored.result = result(f);
-            stored.call = call(task(() => 1));
+            stored.call = task(() => 1)();
             yield* sleep(5);
             return 1;
           },

@@ -21,7 +21,6 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import {
   all,
   attempt,
-  call,
   child,
   current,
   fork,
@@ -159,7 +158,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
       task(
         function* () {
           own(t.at('entry released'));
-          return yield* withTx(() => call(slow));
+          return yield* withTx(() => slow());
         },
         { name: 'request', ...quiet },
       ),
@@ -192,7 +191,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
       task(
         function* () {
           try {
-            yield* call(slow);
+            yield* slow();
             t.push('after the call');
           } catch (e) {
             caught = e; // never: the halt is a return(), not a throw
@@ -201,7 +200,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
             t.push(`finally; slow ${String(state())}`);
           }
           t.push('after the try');
-          yield* call(other);
+          yield* other();
         },
         { name: 'halted', ...quiet },
       ),
@@ -304,7 +303,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
             inShield.push({ kind: impl(c).kind, mode: impl(c).mode, underBody: isBelow(c, body), aborted: signal().aborted });
           };
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             // U3: the synchronous verbs address the halted node, whose signal has fired.
             inFinally = { currentIsBody: current() === body, signalAborted: signal().aborted };
@@ -404,7 +403,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
     const request = task(
       function* () {
         const uow = lookup(UnitOfWork); // stored on this fiber, which carries RequestScope
-        return yield* mutex.run(() => call(insert, uow));
+        return yield* mutex.run(() => insert(uow));
       },
       { name: 'request', scopes: [RequestScope], ...quiet },
     );
@@ -537,7 +536,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
           try {
             yield* never();
           } finally {
-            after = call(quick); // made in the halted finally and never yielded: quick never runs
+            after = quick(); // made in the halted finally and never yielded: quick never runs
             t.push('body ends');
           }
         },
@@ -657,11 +656,11 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
         function* () {
           const body = current();
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             t.push(`finally; slow ${String(state())}`);
             inFinally = { currentIsBody: current() === body, signalAborted: signal().aborted, lookup: lookup(K) };
-            const v = yield* call(cleanup);
+            const v = yield* cleanup();
             t.push(`cleanup returned ${v}`);
             yield* sleep(5);
             t.push('slept in the finally');
@@ -709,7 +708,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     /** A helper whose finally waits: by the yield* algorithm its caller is resumed normally once that finally ends. */
     function* withCleanup(): Generator<Instruction, string, unknown> {
       try {
-        yield* call(slow);
+        yield* slow();
         return 'done';
       } finally {
         yield* wait(tick());
@@ -722,7 +721,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
         function* () {
           yield* withCleanup();
           t.push('body continued past the halt');
-          yield* call(charge);
+          yield* charge();
           return 'lost';
         },
         { name: 'lossy', ...quiet },
@@ -806,7 +805,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
         task(
           function* () {
             try {
-              yield* call(slow);
+              yield* slow();
             } finally {
               t.push(`${name}: finally starts`);
               yield* op();
@@ -984,7 +983,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
           yield* wait(bare(20)); // halted meanwhile: p finishes and the body is resumed, its node delivered
           t.push('resumed');
           fork(born); // a freeze child of a delivered node: born delivered (D12); fork is eager
-          yield* call(born); // not started: the parent is returned here, and born runs once
+          yield* born(); // not started: the parent is returned here, and born runs once
           t.push('unreachable');
         },
         { name: 'parent', ...quiet },
@@ -1111,9 +1110,9 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
                   yield* sleep(30); // a handler's sleep runs its full duration, outlasting the conn's release
                   t.push(`handler slept; parent current ${String(current() === parent)}`);
                   t.push(
-                    yield* call(function* () {
+                    yield* task(function* () {
                       return 'handler called'; // a call from a handler, which nothing halts
-                    }),
+                    })(),
                   );
                 },
               },
@@ -1167,7 +1166,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     const root = app();
     const outcomes = await within(
       root.call(function* () {
-        return [yield* attempt(double, 21), yield* failing.attempt(), yield* attempt(stuck)];
+        return [yield* attempt(double, 21), yield* attempt(failing()), yield* attempt(stuck)];
       }),
     );
     const timedOut = (o: Outcome<number>): unknown => (o.status === 'aborted' ? `aborted: ${(o.reason as Error).name}` : o);
@@ -1211,7 +1210,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
       const n = yield* double(id.length);
       return `${id}:${n}`;
     });
-    const returnsOp = task(() => call(byLength, 'x')); // a synchronous body returning an op (decision 28)
+    const returnsOp = task(() => byLength('x')); // a synchronous body returning an op (decision 28)
     const asyncBody = task(function* (n: number) { return n + 1; }); // still accepted in PR 1
     const throws = task(function* (): Generator<Instruction, never, unknown> {
       throw new Error('never returns'); // T is never, not the generator object
@@ -1247,10 +1246,10 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
       }),
     ).toEqualTypeOf<Task<[], number>>();
     function* probe() {
-      expectTypeOf(call(byLength, 'x')).toEqualTypeOf<Op<string>>();
-      expectTypeOf(yield* call(byLength, 'x')).toEqualTypeOf<string>();
+      expectTypeOf(byLength('x')).toEqualTypeOf<Op<string>>();
+      expectTypeOf(yield* byLength('x')).toEqualTypeOf<string>();
       expectTypeOf(yield* attempt(byLength, 'x')).toEqualTypeOf<Outcome<string, never>>(); // E = never: byLength yields no fail (D42)
-      expectTypeOf(yield* all([byLength.bind('x'), asyncBody.bind(1)])).toEqualTypeOf<[string, number]>();
+      expectTypeOf(yield* all([byLength('x'), asyncBody(1)])).toEqualTypeOf<[string, number]>();
       expectTypeOf(yield* wait(Promise.resolve(1))).toEqualTypeOf<number>();
       expectTypeOf(yield* wait((s: AbortSignal) => Promise.resolve(String(s.aborted)))).toEqualTypeOf<string>();
       const cb = promised(function* (tx: string) {
@@ -1376,7 +1375,7 @@ describe('generator bodies: promised', () => {
             db.transaction(
               promised(function* (tx: Tx) {
                 callbackNode = current();
-                yield* call(insert, tx);
+                yield* insert(tx);
                 return 'saved';
               }),
             ),
@@ -1423,7 +1422,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
       task(
         function* () {
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             inFinally = {
               callee: state(),
@@ -1434,10 +1433,10 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
               shield: yield* shield(function* () {
                 return lookup(K);
               }),
-              call: yield* call(function* () {
+              call: yield* task(function* () {
                 yield* sleep(1);
                 return `called; delivered ${String(signal().aborted)}`;
-              }),
+              })(),
             };
           }
         },
@@ -1478,7 +1477,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
             try {
               yield* wait(bare(20)); // halted meanwhile: resumed when p finishes
               t.push('resumed');
-              if (shape === 'call') yield* call(drain); // not started: returned here, drain never runs
+              if (shape === 'call') yield* drain(); // not started: returned here, drain never runs
               else yield* join((forked = fork(drain))); // fork is eager; the join is not started: returned here
               t.push('unreachable');
             } finally {
@@ -1518,7 +1517,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
             throw rollbackError;
           });
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             try {
               yield* release(tx); // release work under the unwind fiber: its failure is thrown in, not consumed
@@ -1558,7 +1557,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
           const scope = child({ name: 'scope' });
           scope.own(() => void t.push('scope released'));
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             yield* scope[Symbol.asyncDispose]();
             t.push('scope disposed');
@@ -1853,7 +1852,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
               throw rollbackError;
             });
             try {
-              yield* call(slow);
+              yield* slow();
             } finally {
               const p = release(x); // the halted body's release work
               try {
@@ -1911,7 +1910,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
                 t.push('returned to pool');
               });
               scope.child({ name: 'inner' }).own(t.at('inner released')); // a bodiless node below the scope: released with it
-              yield* withTx(conn, () => (work === 'call' ? call(insert) : sleep(1000)));
+              yield* withTx(conn, () => (work === 'call' ? insert() : sleep(1000)));
             },
             { name: 'request', ...quiet },
           ),
@@ -2030,7 +2029,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
       task(
         function* () {
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             try {
               yield* shield(function* (): Generator<Instruction, never, unknown> {
@@ -2074,7 +2073,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
           function* () {
             const stop = prepare();
             try {
-              yield* call(slow);
+              yield* slow();
             } finally {
               try {
                 yield* stop();
@@ -2203,7 +2202,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
       task(
         function* () {
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             yield* later[Symbol.asyncDispose](); // cannot be cancelled: the unwind waits for it (D21)
             seen.push('unwinder: disposed in its finally');
@@ -2502,7 +2501,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
             outer = yield* unshield(function* () {
               n.outerHole = current();
               try {
-                yield* call(function* () {
+                yield* task(function* () {
                   n.innerOwner = current();
                   yield* shield(function* () {
                     n.innerShield = current();
@@ -2515,7 +2514,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
                   });
                   t.push('inner owner after its shield'); // resumed after its release work
                   yield* sleep(1); // returned here: the inner owner is interrupted
-                });
+                })();
               } catch (e) {
                 callError = e;
               }
@@ -2576,7 +2575,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
           n.owner = current();
           yield* shield(function* () {
             n.shield = current();
-            r = yield* call(function* () {
+            r = yield* task(function* () {
               n.call = current();
               const o = yield* unshield(function* () {
                 n.hole = current();
@@ -2587,7 +2586,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
               });
               t.push('call goes on');
               return o;
-            });
+            })();
             t.push('shield goes on');
           });
         },
@@ -2847,7 +2846,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
       task(
         function* () {
           try {
-            yield* call(slow);
+            yield* slow();
           } finally {
             yield* shield(() => {
               n.outer = current();
@@ -2888,7 +2887,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
       task(
         function* () {
           yield* shield(function* () {
-            yield* call(function* () {
+            yield* task(function* () {
               callNode = current();
               yield* shield(function* () {
                 r = yield* unshield(function* () {
@@ -2899,7 +2898,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
                   return 'ran to end';
                 });
               });
-            });
+            })();
             t.push('shield goes on');
           });
         },

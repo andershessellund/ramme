@@ -34,6 +34,7 @@ import {
   getKeyScope,
   hasDefaultFactory,
   invokeDefaultFactory,
+  refuseTask,
 } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context, LookupOptions, Provider } from './context.js';
@@ -819,9 +820,10 @@ function resolveSelf<T>(
  * PlacementError iff the key is decided at `C` (not at construction: a fresh node has no decisions; D10′). A
  * provider is stored where it is registered, whatever the key's scope (D36), so its placement needs no other
  * check; the key's scope is still read, and discarded, so that a malformed `static scope` is a TypeError at
- * registration (D32).
+ * registration (D32). A task is no key: a TypeError (D44, decision 7).
  */
 export function assertProviderPlacement(C: NodeImpl, p: Provider<unknown>, atConstruction: boolean): void {
+  refuseTask(p.key);
   if (!atConstruction && C.decided.has(p.key))
     throw new PlacementError(
       `Cannot provide '${keyName(p.key)}' at ${describeNode(C)}: the key has already been decided here. ` +

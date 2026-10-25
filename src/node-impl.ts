@@ -55,6 +55,7 @@ import type {
   Release,
   SettleResult,
   Task,
+  TaskOptions,
 } from './context.js';
 import { NO_NODE, currentCreation, currentFrame, runDetached, runInFrame } from './context-storage.js';
 import type { Frame } from './context-storage.js';
@@ -63,7 +64,7 @@ import type { DriverExit, HandlerRun } from './driver.js';
 import { ContextKey, assertProviderPlacement, describeNode, resolveFrom, resolveReceiver } from './inject.js';
 import { TASK, toTask } from './internal-context.js';
 import type {
-  AnyTask,
+  AnyMember,
   BodyInfo,
   BodyOf,
   CacheEntry,
@@ -78,7 +79,7 @@ import type {
 } from './internal-context.js';
 import type { NodeEvent, NodeEventInput } from './lifecycle-events.js';
 import { Expected, LifecycleOp, WorkOp, abandoning, failOp, isFailOp, isOp, neverPromise, sleepRun, unwrapExpected } from './managed.js';
-import type { AwaitWatch, Deliver, HaltShape, Run, WaitsFor } from './managed.js';
+import type { AwaitWatch, Deliver, HaltShape, Run, TaskCall, WaitsFor } from './managed.js';
 import { PoolState, poolChildComplete, poolChildSettled, poolDelivered, poolFork } from './pool.js';
 import {
   AlreadyOwnedError,
@@ -318,10 +319,40 @@ function asFiber(f: unknown, op: string): NodeImpl {
   return f;
 }
 
-/** `all`/`race`/`settle` members run as `'join'` fibers of the group (DESIGN.md §4.8). */
-function asJoinMember(t: unknown): TaskLike {
-  const tl = toTask(t as TaskLike);
-  return { [TASK]: true, name: tl.name, body: tl.body, opts: { ...tl.opts, onFailure: 'join' } };
+/** `task` with `opts` in place of its options: its name, body and receiver kept (a task's own fields are not enumerable). */
+function withOpts(task: TaskLike, opts: TaskOptions): TaskLike {
+  return { [TASK]: true, name: task.name, body: task.body, opts, self: task.self, runsOp: task.runsOp };
+}
+
+/** What `fork`, `attempt`, a group or a pool runs: a task (or an inline body made one) and its arguments. */
+interface Runnable {
+  readonly task: TaskLike;
+  readonly args: unknown[];
+}
+
+/**
+ * What `fork`, `attempt`, a group and a pool run for `x` (D44, decision 4). A task or a body runs with `args`; a task's
+ * call op (`t(…args)`, `ctx.call(t, …args)`) runs as its task and arguments, so no node is made for the op itself; any
+ * other op runs as the body of a fiber of its own, `yield* op`, named after the op (`sleep`, `wait`, …, else `op`),
+ * which runs the op on itself (`hostFor`): a call, a group or a `wait`'s function made through another node runs
+ * under, and with the signal of, that fiber.
+ */
+function runnable(x: unknown, args: unknown[]): Runnable {
+  if (!isOp(x)) return { task: toTask(x as TaskLike), args };
+  const call: TaskCall | undefined = x instanceof WorkOp ? x.taskCall : undefined;
+  if (call !== undefined) return { task: call.task, args: [...call.args] };
+  const op = x;
+  const name = (x instanceof WorkOp ? x.name : undefined) ?? 'op';
+  const body = function* (): Generator<unknown, unknown, unknown> {
+    return yield* op as Op<unknown>;
+  };
+  return { task: { [TASK]: true, name, body: body as Body<unknown, unknown[]>, opts: {}, runsOp: true }, args: [] };
+}
+
+/** `all`/`race`/`settle` members run as `'join'` fibers of the group (DESIGN.md §4.8): an op or a task of no arguments. */
+function asJoinMember(x: unknown): Runnable {
+  const { task, args } = runnable(x, []);
+  return { task: withOpts(task, { ...task.opts, onFailure: 'join' }), args };
 }
 
 /**
@@ -982,7 +1013,7 @@ export class NodeImpl implements Context {
     let settlesLater = false;
     let driven: Iterator<unknown, unknown, unknown> | undefined;
     try {
-      r = runInFrame(frame, () => body.fn(...body.args));
+      r = runInFrame(frame, () => Reflect.apply(body.fn, body.self, body.args)); // a bound task's receiver (D44, decision 2)
       if (isNodeImpl(r) && r.kind === 'fiber')
         throw new FiberNotAwaitableError(
           `the body of ${describeNode(this)} returned a fiber; return join(f), or a value`,
@@ -1541,13 +1572,15 @@ export class NodeImpl implements Context {
    * U3 (DESIGN.md §4.2, D41 decision 11): the node a work op made through this node runs on, for `awaiter`, the
    * consumer that runs it. In a halted generator body's `finally` the driver runs ops for the body's unwind fiber, and
    * an op made through the body's own node (the free functions, `current().call(…)`) runs on that fiber, which the
-   * tree never delivers (only its release deadline does), so a `call`, an `attempt`, a group or a `wait`'s function
-   * made there is release work, not born delivered by the node's interruption; a `then` of an op made there passes the same fiber (`WorkOp`), so `Promise.all([call(a), call(b)])`
-   * in that `finally` runs both on it too; otherwise this node. A shield needs no host: it is a release fiber of this
-   * node anyway.
+   * tree never delivers (only its release deadline does), so a task's call, an `attempt`, a group or a `wait`'s function
+   * made there is release work, not born delivered by the node's interruption; a `then` of an op made there passes the same fiber (`WorkOp`), so `Promise.all([a(), b()])`
+   * in that `finally` runs both on it too. An op's own fiber (`fork(op)`, an op in a group, D44 decision 4) is the
+   * host of the op it runs: a race's `wait((signal) => p)` member is handed its fiber's signal, which the race's abort
+   * fires, and a group or call op's child is made under it. Otherwise this node. A shield needs no host: it is a
+   * release fiber of this node anyway.
    */
   private hostFor(awaiter: NodeImpl | undefined): NodeImpl {
-    return awaiter !== undefined && awaiter.unwindOf === this ? awaiter : this;
+    return awaiter !== undefined && (awaiter.unwindOf === this || awaiter.body?.runsOp === true) ? awaiter : this;
   }
 
   /**
@@ -1577,7 +1610,7 @@ export class NodeImpl implements Context {
     const f = asFiber(fiber, 'join');
     return new WorkOp<T>(
       (_, events) => this.joinRun<T>(f, events, (applied) => take<T>(f, !applied), 'join'), // an unwind fiber consumes nothing
-      { waitsFor: joinOf(f) },
+      { waitsFor: joinOf(f), name: 'join' },
     );
   }
 
@@ -1597,7 +1630,7 @@ export class NodeImpl implements Context {
           },
           'result',
         ),
-      { waitsFor: joinOf(f) },
+      { waitsFor: joinOf(f), name: 'result' },
     );
   }
 
@@ -1623,7 +1656,7 @@ export class NodeImpl implements Context {
   sleep(ms: number): Op<void> {
     this.assertBodyGuards('sleep');
     checkSleepMs(ms);
-    return new WorkOp<void>(() => sleepRun(ms));
+    return new WorkOp<void>(() => sleepRun(ms), { name: 'sleep' });
   }
 
   /**
@@ -1657,7 +1690,7 @@ export class NodeImpl implements Context {
         if (fromFunction || source !== p) runDetached(() => void source.then(undefined, noop)); // only ramme holds it (I10)
         return { source, shape: () => shape, user: true };
       },
-      { started: !fromFunction, receiver: this },
+      { started: !fromFunction, receiver: this, name: 'wait' },
     );
   }
 
@@ -1785,17 +1818,27 @@ export class NodeImpl implements Context {
       subscribed: true,
       stack: 'explicit',
       opts: task.opts,
-      body: { fn: task.body as Body<unknown, unknown[]>, args, destination, taskName: task.name },
+      body: {
+        fn: task.body as Body<unknown, unknown[]>,
+        args,
+        destination,
+        taskName: task.name,
+        self: task.self,
+        runsOp: task.runsOp,
+      },
     });
   }
 
+  /** A task or a body with its arguments, or an op (D44, decision 4: `runnable`), forked as a new child of this node. */
   fork<T, A extends unknown[], Y extends Yields = never, E = never>(
     t: Task<A, T, E> | BodyOf<T, A, Y>,
     ...args: A
-  ): Fiber<T, FailedWith<Y> | E> {
+  ): Fiber<T, FailedWith<Y> | E>;
+  fork<T, E = never>(op: Op<T, E>): Fiber<T, E>;
+  fork(t: unknown, ...rest: unknown[]): Fiber<unknown, unknown> {
     this.assertOpen('fork'); // pending allowed; a creation frame allowed (DESIGN.md §3.5)
-    const task = toTask(t as unknown as TaskLike);
-    if (this.poolState !== undefined) return poolFork(this, task, args) as unknown as Fiber<T, FailedWith<Y> | E>;
+    const { task, args } = runnable(t, rest);
+    if (this.poolState !== undefined) return poolFork(this, task, args) as unknown as Fiber<unknown, unknown>;
     const dest = task.opts.onFailure ?? 'join';
     if (dest === 'join' && !this.hasBody && this.creationOwner() === undefined)
       // Nothing would join it (D14): checked synchronously for live bodiless nodes; forks under a node in creation are checked at the end of creation.
@@ -1805,33 +1848,42 @@ export class NodeImpl implements Context {
       );
     const child = this.makeFiber(task, args, dest);
     if (child.state !== 'complete') child.scheduleStart(); // I20: never in the forker's frame
-    return child as unknown as Fiber<T, FailedWith<Y> | E>;
+    return child as unknown as Fiber<unknown, unknown>;
   }
 
+  /**
+   * A task's call (D44, decision 1): `t(…args)` is `current().call(t, …args)`. The op carries `t` and its arguments
+   * (`taskCall`), so `fork`, the groups and a pool fork `t` itself when handed it, and no node stands for the op.
+   */
   call<T, A extends unknown[], Y extends Yields = never, E = never>(
     t: Task<A, T, E> | BodyOf<T, A, Y>,
     ...args: A
   ): Op<T, FailedWith<Y> | E> {
     this.assertBodyShaped('call');
-    return this.callOp<T>(toTask(t as unknown as TaskLike), args, (child) => (_, applied) => take<T>(child, !applied));
+    const task = toTask(t as unknown as TaskLike);
+    return this.callOp<T>(task, args, (child) => (_, applied) => take<T>(child, !applied), { name: task.name, taskCall: { task, args } });
   }
 
   /**
-   * `call` with `result`'s resume step instead of `join`'s (DESIGN.md §4.5, D31): the outcome as a value, a
+   * A call with `result`'s resume step instead of `join`'s (DESIGN.md §4.5, D31): the outcome as a value, a
    * failure consumed rather than thrown, and the join events on the waiting body's node. An interrupted `freeze`
    * or `restore` caller is halted once the child has completed, and never resumed (D39), so for it `aborted`
    * describes the child, unless the child is `restore`: it hears every delivery on its subscription path, so an
    * `observe` caller's interruption, or an `observe` ancestor's that a `freeze` caller below it never hears, reaches it
-   * and comes back as `aborted`.
+   * and comes back as `aborted`. `attempt(op)` (D44, decision 4): a task's call as its task, any other op in a child
+   * of its own (`runnable`).
    */
   attempt<T, A extends unknown[], Y extends Yields = never, E = never>(
     t: Task<A, T, E> | BodyOf<T, A, Y>,
     ...args: A
-  ): Op<Outcome<T, FailedWith<Y> | E>> {
+  ): Op<Outcome<T, FailedWith<Y> | E>>;
+  attempt<T, E = never>(op: Op<T, E>): Op<Outcome<T, E>>;
+  attempt(t: unknown, ...rest: unknown[]): Op<Outcome<unknown, unknown>> {
     this.assertBodyShaped('attempt');
-    return this.callOp<Outcome<T, FailedWith<Y> | E>>(toTask(t as unknown as TaskLike), args, (child, events) =>
-      this.outcomeResume<T, FailedWith<Y> | E>(child, events),
-    );
+    const { task, args } = runnable(t, rest);
+    return this.callOp<Outcome<unknown, unknown>>(task, args, (child, events) => this.outcomeResume<unknown, unknown>(child, events), {
+      name: 'attempt',
+    });
   }
 
   /**
@@ -1862,7 +1914,7 @@ export class NodeImpl implements Context {
     const owner = region.up!.signal; // a shield's release fiber always has a parent: the node it was started on
     const own = task.opts.signal;
     const signal = own === undefined ? owner : AbortSignal.any([own, owner]); // the task's own signal still delivers it
-    const hole: TaskLike = { [TASK]: true, name: task.name, body: task.body, opts: { ...task.opts, signal } };
+    const hole = withOpts(task, { ...task.opts, signal });
     return this.callOp<Outcome<T, FailedWith<Y> | E>>(hole, args, (child, events) => this.outcomeResume<T, FailedWith<Y> | E>(child, events));
   }
 
@@ -1877,13 +1929,18 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * `call`, `attempt` and `unshield`, and the group fiber of `all`, `race` and `settle`: a lazy op (D41, decision 2)
+   * A task's call, `attempt` and `unshield`, and the group fiber of `all`, `race` and `settle`: a lazy op (D41, decision 2)
    * whose run makes the child on the host (`hostFor`), makes the resume step (D13′), and starts the child's body
    * synchronously, with the child current, before the yielding step returns (D22). Call-shaped (D39, A.2): a halted
    * caller is returned once the child has completed, and a child the caller's delivery did not reach (a child of
-   * another node, one born undelivered) is delivered by the shape.
+   * another node, one born undelivered) is delivered by the shape. `as` names the op, and marks a task's call (D44).
    */
-  private callOp<R>(task: TaskLike, args: unknown[], resume: (child: NodeImpl, events: NodeImpl | undefined) => Deliver<void, R>): Op<R> {
+  private callOp<R>(
+    task: TaskLike,
+    args: unknown[],
+    resume: (child: NodeImpl, events: NodeImpl | undefined) => Deliver<void, R>,
+    as?: { readonly name?: string; readonly taskCall?: TaskCall },
+  ): Op<R> {
     return new WorkOp<R>((awaiter, events) => {
       const child = this.hostFor(awaiter).makeFiber(task, args, 'join');
       const step = resume(child, events);
@@ -1896,7 +1953,7 @@ export class NodeImpl implements Context {
           return 'call';
         },
       };
-    }, { receiver: this }); // a `then` of one made in this body's halted `finally` runs it on the unwind fiber (U3)
+    }, { receiver: this, name: as?.name, taskCall: as?.taskCall }); // a `then` of one made in this body's halted `finally` runs it on the unwind fiber (U3)
   }
 
   /**
@@ -1922,7 +1979,7 @@ export class NodeImpl implements Context {
         subscribed: false,
         stack: 'none', // not on a stack: releaseNodeEntry would abort it at its turn, firing a signal that is only the deadline here
         opts: { name: `shield:${task.name}`, interrupt: 'observe', signal: releaseDeadline(this.releaseTimeoutMs) },
-        body: { fn: task.body as Body<unknown, unknown[]>, args, destination: noop, taskName: task.name },
+        body: { fn: task.body as Body<unknown, unknown[]>, args, destination: noop, taskName: task.name, self: task.self },
       });
       rf.isShield = true;
       const holds = (this.shieldHolds ??= new Set());
@@ -1931,10 +1988,10 @@ export class NodeImpl implements Context {
       outsideFrames(() => void hold.then(() => holds.delete(hold))); // before any wait's reaction (waitForShields)
       rf.startBody(); // synchronous up to its first yield*, with rf current
       return { source: rf.completion, deliver: (_, applied) => take<T>(rf, !applied), shape: () => 'release' };
-    });
+    }, { name: 'shield' });
   }
 
-  all<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>> {
+  all<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>> {
     this.assertBodyShaped('all');
     const members = tasks.map(asJoinMember);
     const name = opts?.name ?? 'all';
@@ -1944,7 +2001,7 @@ export class NodeImpl implements Context {
       opts: { ...opts, name },
       body: function* () {
         const g = currentFrame()!.node!; // the group fiber
-        const fibers = members.map((m) => g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
+        const fibers = members.map((m) => g.fork(m.task as unknown as Task<unknown[], unknown>, ...m.args) as unknown as NodeImpl);
         // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt, so no member's
         // failure is consumed before every member has completed, nor by an interrupted group.
         yield* settledOp(Promise.all(fibers.map((f) => f.completion)));
@@ -1956,10 +2013,13 @@ export class NodeImpl implements Context {
         return fibers.map((f) => (f.outcome as { value: unknown }).value);
       },
     };
-    return this.callOp<unknown[]>(group, [], (g) => (_, applied) => take<unknown[]>(g, !applied)) as unknown as Op<AllResult<T>, ErrorOf<T[number]>>;
+    return this.callOp<unknown[]>(group, [], (g) => (_, applied) => take<unknown[]>(g, !applied), { name }) as unknown as Op<
+      AllResult<T>,
+      ErrorOf<T[number]>
+    >;
   }
 
-  race<const R extends readonly AnyTask[]>(tasks: R, opts?: NodeOptions): Op<ValueOf<R[number]>, ErrorOf<R[number]>> {
+  race<const R extends readonly AnyMember[]>(tasks: R, opts?: NodeOptions): Op<ValueOf<R[number]>, ErrorOf<R[number]>> {
     type T = ValueOf<R[number]>;
     this.assertBodyShaped('race');
     if (tasks.length === 0) throw new TypeError('race() needs at least one task');
@@ -1971,7 +2031,7 @@ export class NodeImpl implements Context {
       opts: { ...opts, name },
       body: function* () {
         const g = currentFrame()!.node!;
-        const fibers = members.map((m) => g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
+        const fibers = members.map((m) => g.fork(m.task as unknown as Task<unknown[], unknown>, ...m.args) as unknown as NodeImpl);
         const first = Promise.withResolvers<void>();
         let winner: NodeImpl | undefined;
         let remaining = fibers.length;
@@ -1998,10 +2058,10 @@ export class NodeImpl implements Context {
         throw new FiberAbortedError((fibers[0].outcome as { reason: unknown }).reason, 'every task was aborted'); // every member aborted (DESIGN.md §4.8)
       },
     };
-    return this.callOp<T>(group, [], (g) => (_, applied) => take<T>(g, !applied));
+    return this.callOp<T>(group, [], (g) => (_, applied) => take<T>(g, !applied), { name });
   }
 
-  settle<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>> {
+  settle<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>> {
     this.assertBodyShaped('settle');
     const members = tasks.map(asJoinMember);
     const name = opts?.name ?? 'settle';
@@ -2017,7 +2077,7 @@ export class NodeImpl implements Context {
           g.memberFailuresTo = g.up;
           // One at a time: a fork that throws leaves the members already running in `fibers`, so the resume step
           // consumes their failures instead of leaving them on the receiver (I11, D31).
-          for (const m of members) settleFibers(g).push(g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
+          for (const m of members) settleFibers(g).push(g.fork(m.task as unknown as Task<unknown[], unknown>, ...m.args) as unknown as NodeImpl);
           // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt. No member is
           // aborted on a sibling's account: the group waits for every one.
           yield* settledOp(Promise.all(settleFibers(g).map((f) => f.completion)));
@@ -2050,6 +2110,7 @@ export class NodeImpl implements Context {
         // Delivered as values: the caller's now (DESIGN.md §4.12).
         return members.map((_, i): Outcome<unknown> => (i < fibers.length ? fibers[i].outcome! : { status: 'aborted', reason }));
       },
+      { name },
     ) as unknown as Op<SettleResult<T>>;
   }
 
@@ -2239,12 +2300,12 @@ export class NodeImpl implements Context {
       handleRejection(r, noop);
       throw new AsyncRunError(
         'run(fn) returned a promise: the node is current only for the synchronous part of fn, and ramme has no async ' +
-          'context after its first await; use call(function* …) for work that waits',
+          'context after its first await; run work that waits as a task, node.call(function* …)',
       ); // development mode only (DESIGN.md §4.11, §4.4)
     }
     if (dev() && isGenerator(r))
       throw new AsyncRunError(
-        'run(fn) returned a generator, which nothing steps: run is synchronous; use call(fn) to run a generator body',
+        'run(fn) returned a generator, which nothing steps: run is synchronous; use node.call(fn) to run a generator body',
       ); // its twin for a generator function (DESIGN.md §4.11), development mode only
     return r;
   }

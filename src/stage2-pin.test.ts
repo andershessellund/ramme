@@ -21,7 +21,6 @@ import {
   NoCurrentNodeError,
   all,
   attempt,
-  call,
   createInjectionKey,
   createRootContext,
   current,
@@ -148,7 +147,7 @@ describe('stage 2: work ops are lazy (decisions 2, 3)', () => {
     } as unknown as Promise<number>;
     const cases: Record<string, () => Generator<Instruction, void, unknown>> = {
       call: function* () {
-        drop('call', () => call(work(ran, 'call')));
+        drop('call', () => work(ran, 'call')());
       },
       attempt: function* () {
         drop('attempt', () => attempt(work(ran, 'attempt')));
@@ -216,7 +215,7 @@ describe('stage 2: work ops are lazy (decisions 2, 3)', () => {
     const root = app();
     const yielded = await within(
       root.call(function* () {
-        const op = call(count);
+        const op = count();
         const first = yield* op;
         const second = yield* op;
         const w = wait(() => Promise.resolve(++calls));
@@ -251,7 +250,7 @@ describe('stage 2: construction reads the slot; there is no async context (decis
     const f = root.fork(v.with(quiet));
     await within(root.result(f));
     const makers: Record<string, () => unknown> = {
-      call: () => call(v),
+      call: () => v(),
       attempt: () => attempt(v),
       all: () => all([v]),
       race: () => race([v]),
@@ -349,7 +348,7 @@ describe('stage 2: construction reads the slot; there is no async context (decis
             fork: () => fork(v),
             sleep: () => sleep(1),
             wait: () => wait(Promise.resolve(1)),
-            call: () => call(v),
+            call: () => v(),
           };
           seen.after = Object.fromEntries(Object.entries(after).map(([name, make]) => [name, thrownBy(make)]));
         })();
@@ -441,7 +440,7 @@ describe('stage 2: the thenable (decisions 4, 16)', () => {
       task(
         function* () {
           workHost = current();
-          handed.work = call(handedWork); // made in the step, never yielded: runs nothing yet
+          handed.work = handedWork(); // made in the step, never yielded: runs nothing yet
           yield* never();
         },
         { name: 'hands out work', ...quiet },
@@ -451,7 +450,7 @@ describe('stage 2: the thenable (decisions 4, 16)', () => {
       task(
         function* () {
           slowHost = current();
-          handed.slow = call(slow);
+          handed.slow = slow();
           yield* never();
         },
         { name: 'hands out slow', ...quiet },
@@ -523,7 +522,7 @@ describe('stage 2: async bodies are refused (decision 5)', () => {
       root.call(function* () {
         const seen: Record<string, string> = {};
         try {
-          seen.call = `value ${yield* call(asyncBody)}`;
+          seen.call = `value ${yield* task(asyncBody)()}`;
         } catch (e) {
           seen.call = refusal(e);
         }
@@ -574,12 +573,12 @@ describe('stage 2: async bodies are refused (decision 5)', () => {
           seen.promised = refusal(e);
         }
         // Still waited for: a release or a failure handler may return a promise, a bare wait (spec A.1).
-        yield* call(function* () {
+        yield* task(function* () {
           own({}, async () => {
             await Promise.resolve();
             log.push('async release ran to its end');
           });
-        });
+        })();
         return seen;
       }),
     );
@@ -649,7 +648,7 @@ describe('stage 2: what goes (decisions 10, 16, 2, 18)', () => {
       // @ts-expect-error -- an async function is no body
       fork(async () => 1);
       // @ts-expect-error -- an async function is no body
-      call(async () => 1);
+      task(async () => 1)();
       // @ts-expect-error -- an async function is no body
       attempt(async () => 1);
       // @ts-expect-error -- an async function is no body
@@ -769,7 +768,7 @@ describe('stage 2: the halt with lazy ops (decisions 8, 9; DESIGN.md §4.2)', ()
     const f = root.fork(
       task(
         function* () {
-          const c = call(slow);
+          const c = slow();
           t.push('made');
           try {
             yield* c; // slow starts here
@@ -804,7 +803,7 @@ describe('stage 2: the halt with lazy ops (decisions 8, 9; DESIGN.md §4.2)', ()
           t.push('waiting');
           const v = yield* wait(bare(20).then(() => 'driver value'));
           t.push(`bare work with ${v}`); // runs: the halt let p finish (decision 10)
-          yield* call(work(ran, 'late call')); // returned here: not run
+          yield* work(ran, 'late call')(); // returned here: not run
           t.push('unreachable');
         },
         { name: 'bare-after-halt', ...quiet },
@@ -836,7 +835,7 @@ describe('stage 2: the halt with lazy ops (decisions 8, 9; DESIGN.md §4.2)', ()
           try {
             current().abort(reason); // delivered inside its own step
             t.push('after the abort');
-            yield* call(work(ran, 'after own abort')); // returned here: not run
+            yield* work(ran, 'after own abort')(); // returned here: not run
             t.push('unreachable');
           } finally {
             t.push('finally');
@@ -869,7 +868,7 @@ describe('stage 2: the halt with lazy ops (decisions 8, 9; DESIGN.md §4.2)', ()
         const v = yield* wait(bare(5).then(() => 'v')); // a wait(p) on the way: subscribed, and it finishes
         t.push(`born: resumed with ${v}`);
         try {
-          yield* call(work(ran, 'born’s call')); // returned here: not run
+          yield* work(ran, 'born’s call')(); // returned here: not run
           t.push('born: unreachable');
         } finally {
           t.push('born: finally');

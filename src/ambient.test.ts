@@ -11,7 +11,6 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   all,
   attempt,
-  call,
   child,
   current,
   fork,
@@ -143,11 +142,11 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
           expectVia(resulted, [f], 'result');
           expect(yield* (resulted.ret as Op<unknown>)).toEqual({ status: 'success', value: 1 });
 
-          const called = viaPrototype('call', () => call(echo, 2));
+          const called = viaPrototype('call', () => echo(2));
           expectVia(called, [echo, 2], 'call');
           expect(yield* (called.ret as Op<number>)).toBe(2);
 
-          const members = [echo.bind(3)];
+          const members = [echo(3)];
           const alled = viaPrototype('all', () => all(members, { name: 'g' }));
           expectVia(alled, [members, { name: 'g' }], 'all');
           expect(yield* (alled.ret as Op<number[]>)).toEqual([3]);
@@ -213,9 +212,9 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
         seen.fork = probe();
       });
       yield* join(f);
-      yield* call(function* () {
+      yield* task(function* () {
         seen.call = probe();
-      });
+      })();
       const ctx = child({ name: 'ctx' });
       ctx.run(() => {
         seen.run = probe();
@@ -329,6 +328,9 @@ describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
 });
 
 describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
+  const ping = task(function* ping() {
+    return 1;
+  });
   const freeFunctions: Record<string, () => unknown> = {
     current: () => current(),
     signal: () => signal(),
@@ -338,7 +340,7 @@ describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
     release: () => release({}),
     releaseAll: () => releaseAll(),
     fork: () => fork(function* () { return 1; }),
-    call: () => call(function* () { return 1; }),
+    ping: () => ping(), // a task's call: its guard names the task (D44, decision 1)
     all: () => all([]),
     race: () => race([task(function* () { return 1; })]),
     pool: () => pool({ name: 'p', onFailure: () => {} }),
@@ -349,8 +351,7 @@ describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
     never: () => never(),
     wait: () => wait(Promise.resolve(1), { abandon: true }),
     runSync: () => runSync(() => 1),
-    'task.fork': () => task(function* () { return 1; }).fork(),
-    'task.call': () => task(function* () { return 1; }).call(),
+    'fork(ping())': () => fork(ping()), // the op is made first, so the task's call is what throws
   };
 
   it('every free function throws synchronously at top level, naming the operation and not the adapter import', () => {
@@ -362,7 +363,7 @@ describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
         err = e;
       }
       expect(err, op).toBeInstanceOf(NoCurrentNodeError);
-      const name = op.startsWith('task.') ? op.slice(5) : op.replace('(ContextKey)', '');
+      const name = op === 'fork(ping())' ? 'ping' : op.replace('(ContextKey)', '');
       expect((err as Error).message, op).toContain(`${name}() called with no current node`);
       expect((err as Error).message, op).not.toContain("import 'ramme/node'");
     }
@@ -584,14 +585,14 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
     await tick();
     const errors: Record<string, unknown> = {};
     let peeked: unknown = 'unset';
+    const ping = task(() => 1, { name: 'ping' });
     const V = createInjectionKey<{ made: string }>('V', {
       factory: () => {
         const refused: Record<string, () => unknown> = {
           lookup: () => lookup(K),
-          call: () => call(() => 1),
-          'task.call': () => task(() => 1).call(),
+          ping: () => ping(), // a task's call: its guard names the task (D44, decision 1)
           attempt: () => attempt(() => 1),
-          'task.attempt': () => task(() => 1).attempt(),
+          'attempt(ping())': () => attempt(ping()), // the op is made first, so the task's call is what throws
           all: () => all([]),
           race: () => race([task(() => 1)]),
           settle: () => settle([]),
@@ -615,10 +616,10 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
       },
     });
     expect(root.get(V)).toEqual({ made: 'v' });
-    expect(Object.keys(errors)).toHaveLength(14);
+    expect(Object.keys(errors)).toHaveLength(13);
     for (const [op, e] of Object.entries(errors)) {
       expect(e, op).toBeInstanceOf(CreationViolationError);
-      const name = op.replace(/^task\./, '');
+      const name = op === 'attempt(ping())' ? 'ping' : op;
       expect((e as Error).message, op).toBe(name === 'lookup' ? 'lookup() during creation; use inject()' : `${name}() during creation`);
     }
     expect(peeked).toBeUndefined();

@@ -18,7 +18,7 @@
 // Written in ramme's idiom (law 2): the free functions of ambient.ts inside
 // bodies, the method form only where a node that is not current is named.
 import { describe, expect, it } from 'vitest';
-import { call, current, fork, join, lookup, never, own, release, result, wait } from './ambient.js';
+import { current, fork, join, lookup, never, own, release, result, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber } from './context.js';
 import { currentCreation, currentFrame } from './context-storage.js';
@@ -196,11 +196,11 @@ describe('probes', () => {
     const t = trace();
     root.fork(
       task(function* () {
-        void call(function* () {
+        void task(function* () {
           child = current();
           yield* wait(gate.promise);
           t.push('child finished');
-        }); // the yield* was forgotten (eslint-plugin-ramme's no-unused-op reports it)
+        })(); // the yield* was forgotten (eslint-plugin-ramme's no-unused-op reports it, with type information)
         looked = lookup(K);
         t.push('body returned');
       }, link),

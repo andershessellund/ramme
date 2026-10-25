@@ -34,6 +34,16 @@ import type { Context, Instruction, Op, Operation } from './index.js';
 import { CreationViolationError, NoCurrentNodeError, current, wait } from './index.js';
 
 /**
+ * `op` named `name`: the fiber it runs in when `fork`, `attempt`, a group or a pool is handed it is named after the
+ * primitive (`fetch`, `nextFrame`), not after the core's `wait` under it (D44, decision 4). The core reads an op's
+ * `name` property when it runs one so; writing it is open to any code, so the layer still does nothing a user could not.
+ */
+function named<T>(op: Op<T>, name: string): Op<T> {
+  (op as { name?: string }).name = name;
+  return op;
+}
+
+/**
  * `make()`, the core's verb `verb` under the primitive `primitive`: its guards' errors (`NoCurrentNodeError` outside
  * any node, `CreationViolationError` during a creation) are thrown again naming the primitive the caller wrote.
  */
@@ -65,7 +75,7 @@ function guarded<T>(primitive: string, verb: string, make: () => T): T {
  * @throws NoCurrentNodeError outside any node; CreationViolationError during a creation (when the op is made).
  */
 export function fetch(input: string | URL | Request, init?: RequestInit): Op<Response> {
-  return guarded('fetch', 'wait', () =>
+  const op = guarded('fetch', 'wait', () =>
     wait((signal) => {
       // Read structurally: `Request` is no global this module names (the browser check), and a URL has no signal.
       const request = typeof input === 'object' && 'signal' in input ? input : undefined;
@@ -74,6 +84,7 @@ export function fetch(input: string | URL | Request, init?: RequestInit): Op<Res
       return globalThis.fetch(input, { ...kept, ...init, signal: signals.length === 1 ? signal : AbortSignal.any(signals) });
     }),
   );
+  return named(op, 'fetch');
 }
 
 // --- listen ------------------------------------------------------------------------
@@ -189,6 +200,16 @@ function failureOf(errors: readonly unknown[]): unknown {
   return errors.length === 1 ? errors[0] : new AggregateError(errors, 'listen(): the handler threw');
 }
 
+/**
+ * Whether `x` is an op, read by its shape as the layer can read it (the core's own test is internal): an `Operation`
+ * (`[Symbol.iterator]`) that is a thenable. A promise has no `Symbol.iterator` and an array no `then`.
+ */
+function isOpLike(x: unknown): boolean {
+  if ((typeof x !== 'object' && typeof x !== 'function') || x === null) return false;
+  const o = x as { then?: unknown; [Symbol.iterator]?: unknown };
+  return typeof o.then === 'function' && typeof o[Symbol.iterator] === 'function';
+}
+
 function isEventTarget(x: unknown): x is EventTarget {
   return typeof (x as { addEventListener?: unknown } | null | undefined)?.addEventListener === 'function';
 }
@@ -205,7 +226,8 @@ function isEmitter(x: unknown): x is EventEmitterLike {
  * node, `preventDefault()` works, and nothing waits: a handler that has work to wait for forks a task, which reports
  * by the node's own destination rules (a body's default `'join'`, a bodiless node's `onFailure`; `listen` takes no
  * `onFailure`). The handler is synchronous: a generator function or an `async` function is refused with a `TypeError`
- * and nothing is registered.
+ * and nothing is registered. A handler that returns an op (a task as the handler, `(e) => save(e)`) made work that
+ * nothing runs: its call throws a `TypeError`, which aborts the node as any throw from it does.
  *
  * The listener is removed when the node ends: at its delivery, through the native `{ signal }` (on an emitter, or a
  * target that ignores `signal` as ws's `WebSocket` does, `remove` at the signal's `abort`), and at an end without one
@@ -268,7 +290,14 @@ export function listen(
     try {
       node.run(() => {
         entered = true;
-        return Reflect.apply(handler, target, args);
+        const r: unknown = Reflect.apply(handler, target, args);
+        // A task as the handler, or `(e) => save(e)`: the op is made and nothing runs it (D44, decision 1).
+        if (isOpLike(r))
+          throw new TypeError(
+            'listen(): the handler returned an op, which nothing runs: a handler is synchronous and nothing waits on ' +
+              'what it returns; fork the work instead, (e) => void fork(save(e))',
+          );
+        return r;
       });
     } catch (e) {
       // Refused before the handler ran (a dispatch during a creation, I16): the dispatcher's error, not the handler's.
@@ -353,7 +382,10 @@ function frame(signal: AbortSignal): Promise<number> {
  * @throws NoCurrentNodeError outside any node; CreationViolationError during a creation (when the op is made).
  */
 export function nextFrame(): Op<number> {
-  return guarded('nextFrame', 'wait', () => wait(frame));
+  return named(
+    guarded('nextFrame', 'wait', () => wait(frame)),
+    'nextFrame',
+  );
 }
 
 // --- each ----------------------------------------------------------------------------

@@ -6,12 +6,12 @@
 // resumes the body with the op's value, or throws its failure in at the
 // `yield*`. Two kinds:
 //
-// - a **work op** (`WorkOp`: `call`, `attempt`, `all`, `race`, `settle`,
-//   `shield`, `unshield`, `join`, `result`, `sleep`, `interrupted`, `never`,
-//   `wait`) is lazy (decision 2): making it runs nothing; its consumer runs it,
-//   the driver at each `yield*` (afresh, as a description: decision 3) or its
-//   `then` once (a plain thenable, decision 4), as a child of the node it was
-//   made through, settling by the child's outcome;
+// - a **work op** (`WorkOp`: a task's call `t(…)`, `attempt`, `all`, `race`,
+//   `settle`, `shield`, `unshield`, `join`, `result`, `sleep`, `interrupted`,
+//   `never`, `wait`) is lazy (decision 2): making it runs nothing; its consumer
+//   runs it, the driver at each `yield*` (afresh, as a description: decision 3)
+//   or its `then` once (a plain thenable, decision 4), as a child of the node it
+//   was made through, settling by the child's outcome;
 // - a **lifecycle op** (`LifecycleOp`: `release`, `releaseAll`, `close`,
 //   `[Symbol.asyncDispose]`) is eager: the verb starts its work, and the op, a
 //   `Promise` subclass whose `then` is overridden, only waits for it; every
@@ -34,13 +34,14 @@
 // yields a `Fail` record, which the driver tells apart from an instruction and
 // ends the body with. A resume step that finds a child ended `failure(e)` throws
 // `Expected(e)`, which a consumer turns back into that `Fail`: the driver ends
-// the waiting body with it (the re-yield of `yield* call(t)`), and a `then`
+// the waiting body with it (the re-yield of `yield* t(…)`), and a `then`
 // rejects with `e`.
 // ---------------------------------------------------------------------------
 
 import type { Instruction, Op, Operation } from './context.js';
 import { currentCreation, currentFrame, runDetached } from './context-storage.js';
 import type { Frame } from './context-storage.js';
+import type { TaskLike } from './internal-context.js';
 import type { NodeImpl } from './node-impl.js';
 import { CreationViolationError } from './resource.js';
 
@@ -393,12 +394,19 @@ class OpIterator<T> implements Iterator<Instruction, T, unknown> {
  */
 export type Start<T> = (awaiter: NodeImpl | undefined, events: NodeImpl | undefined) => Run<unknown, T>;
 
+/** What a task's call op carries (D44, decision 4): the task and the arguments it was called with. */
+export interface TaskCall {
+  readonly task: TaskLike;
+  readonly args: readonly unknown[];
+}
+
 /**
  * A lazy op (decision 2): the verb ran its guards when it was made (decision 17), and its work runs at each `yield*`
  * and at most once through `then`. A plain thenable (decision 4): `then` only, no `catch` or `finally`, and not a
  * `Promise`. `started` marks a wait whose work began before the op was made (`wait(p)` over a promise): a halted body
  * that yields it still subscribes, as DESIGN.md §4.2's last halt row says. `receiver` is the node the verb was called
  * on, for U3's host when the op is made in a halted `finally` (`then` only; the driver passes its own awaiter).
+ * `name` and `taskCall` say how `fork`, `attempt`, a group or a pool runs the op when handed it (D44, decision 4).
  */
 export class WorkOp<T> implements Op<T> {
   readonly #start: Start<T>;
@@ -406,6 +414,13 @@ export class WorkOp<T> implements Op<T> {
   readonly started: boolean;
   /** @internal */
   readonly waitsFor: WaitsFor | undefined;
+  /**
+   * @internal The name of the fiber the op runs in when `fork`, `attempt`, a group or a pool runs it: its verb's
+   * (`sleep`, `wait`, `join`, `all`, …), or `undefined` (`'op'` then). `ramme/platform` names its own (`fetch`).
+   */
+  name: string | undefined;
+  /** @internal A task's call (`t(…args)`, `ctx.call(t, …args)`): the task and its arguments, which are forked as the task itself. */
+  readonly taskCall: TaskCall | undefined;
   /** The node of the step that made the op (`makerNode`), which `then` reads when the op's work settles. */
   readonly #maker: NodeImpl | undefined;
   /** Made in a halted `finally` through the body's own node: the unwind fiber, which `then` runs the op on (U3). */
@@ -413,10 +428,21 @@ export class WorkOp<T> implements Op<T> {
   /** `then`'s one run: its consumers while it runs, then its outcome. */
   #then: { consumers: ((r: Resumed<T>) => void)[] } | { result: Resumed<T> } | undefined = undefined;
 
-  constructor(start: Start<T>, opts?: { readonly started?: boolean; readonly waitsFor?: WaitsFor; readonly receiver?: NodeImpl }) {
+  constructor(
+    start: Start<T>,
+    opts?: {
+      readonly started?: boolean;
+      readonly waitsFor?: WaitsFor;
+      readonly receiver?: NodeImpl;
+      readonly name?: string;
+      readonly taskCall?: TaskCall;
+    },
+  ) {
     this.#start = start;
     this.started = opts?.started === true;
     this.waitsFor = opts?.waitsFor;
+    this.name = opts?.name;
+    this.taskCall = opts?.taskCall;
     const f = currentFrame();
     this.#maker = makerNode(f);
     this.#unwind = f?.unwind !== undefined && f.node === opts?.receiver ? f.unwind : undefined;

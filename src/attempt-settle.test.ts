@@ -8,7 +8,7 @@
 // account; its members' failures wait on the group's parent for the caller's resume step, so a halted caller
 // consumes nothing.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { all, attempt, call, fork, interrupted, lookup, never, own, settle, signal, wait } from './ambient.js';
+import { all, attempt, fork, interrupted, lookup, never, own, settle, signal, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
@@ -184,10 +184,10 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     // A freeze caller under an observe ancestor is not delivered at all; its restore child is.
     const c = root.fork(
       task(function* () {
-        yield* call(function* () {
+        yield* task(function* () {
           const r = yield* attempt(hang);
           seen.ancestor = { r, mine: signal().aborted };
-        });
+        })();
       }, observe),
     );
     await tick();
@@ -303,7 +303,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     );
     const out = await root.call(function* () {
       me = here();
-      return [yield* probe.attempt(2), yield* attempt(probe, 3), yield* other.attempt(probe, 4)];
+      return [yield* attempt(probe(2)), yield* attempt(probe, 3), yield* other.attempt(probe, 4)];
     });
     expect(out).toEqual([
       { status: 'success', value: 4 },
@@ -317,7 +317,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     expect(await root.attempt(probe, 5)).toEqual({ status: 'success', value: 10 }); // no current node: the receiver's child
     expect(parents[3]).toBe(impl(root));
     expect(() => attempt(probe, 1)).toThrow(NoCurrentNodeError);
-    expect(() => probe.attempt(1)).toThrow(NoCurrentNodeError);
+    expect(() => attempt(probe(1))).toThrow(NoCurrentNodeError);
     await other.close();
     await root.close();
   });
@@ -790,7 +790,7 @@ describe('attempt and settle are body-shaped (DESIGN.md §3.5, §4.7)', () => {
       factory: () => {
         errors = attemptEach({
           attempt: () => attempt(function* () { return 1; }),
-          'task.attempt': () => task(function* () { return 1; }).attempt(),
+          'attempt(t())': () => attempt(task(function* () { return 1; })()), // an op of a task's call (D44)
           'root.attempt': () => root.attempt(function* () { return 1; }),
           settle: () => settle([]),
           'root.settle': () => root.settle([]),
@@ -799,7 +799,7 @@ describe('attempt and settle are body-shaped (DESIGN.md §3.5, §4.7)', () => {
       },
     });
     root.child().get(V);
-    for (const op of ['attempt', 'task.attempt', 'root.attempt', 'settle', 'root.settle'])
+    for (const op of ['attempt', 'attempt(t())', 'root.attempt', 'settle', 'root.settle'])
       expect(errors[op], op).toBeInstanceOf(CreationViolationError);
   });
 
@@ -823,9 +823,9 @@ describe('attempt and settle are body-shaped (DESIGN.md §3.5, §4.7)', () => {
             },
           ),
         );
-        yield* call(function* () {
+        yield* task(function* () {
           yield* wait(tick(3));
-        });
+        })();
         return 'Y ok';
       }),
     );

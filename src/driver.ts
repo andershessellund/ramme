@@ -9,7 +9,7 @@
 // `TypeError` thrown back at that `yield`.
 //
 // Each yielded op is run here, for the yielding body, synchronously at its
-// `yield*` (so `yield* call(t)` starts `t` before the step returns, D22), and
+// `yield*` (so `yield* t()` starts `t` before the step returns, D22), and
 // subscribed to; the body resumes in the source's reaction (decision 7): with
 // the op's value, or with its failure thrown in at the `yield*`, consumed as
 // the op's resume step consumes it. The body's own interruption is never
@@ -144,7 +144,7 @@ function warnWaitsForItself(body: NodeImpl): void {
 /** The `TypeError` for a yielded value that is not an op's instruction (decision 1). */
 function notAnOp(where: string, value: unknown): TypeError {
   const what = value === null || (typeof value !== 'object' && typeof value !== 'function') ? String(value) : 'an object that is not an op';
-  return new TypeError(`${where} yielded ${what}: run an op with yield*, as in yield* sleep(1) or yield* call(t)`);
+  return new TypeError(`${where} yielded ${what}: run an op with yield*, as in yield* sleep(1) or yield* t(…)`);
 }
 
 function next(value?: unknown): Resume {
@@ -425,7 +425,7 @@ function lostHaltReport(body: string, cause: 'halt' | 'fail'): () => void {
       `ramme: the ${what} of ${body} was lost: its generator went on after the driver returned it, and finished with a ` +
         'value or used the one a yield* gave it. A yield* in the finally of a helper it called (or a return in a ' +
         'finally) resumes the body past the halt; wait in the body’s own finally, in an entry (own(value, function* …)), ' +
-        `or run the helper as yield* call(helper). The node is ${outcome} all the same`,
+        `or make the helper a task, yield* task(helper)(). The node is ${outcome} all the same`,
     );
   };
 }

@@ -6,7 +6,7 @@ ruleTester.run('no-owned-provider', noOwnedProvider, {
   valid: [
     {
       name: 'providers: binds on a new node',
-      code: 'const t = task(function* () { const uow = own(begin()); return yield* call(work.with({ providers: [ valueProvider(K, uow) ] })); });',
+      code: 'const t = task(function* () { const uow = own(begin()); return yield* work.with({ providers: [ valueProvider(K, uow) ] })(); });',
     },
     { name: 'providers: on a child, with own inline', code: 'const c = child({ providers: [valueProvider(K, own(x))] });' },
     { name: 'a value nobody owns', code: 'const x = makeX(); ctx.addProvider(valueProvider(K, x));' },

@@ -12,6 +12,7 @@
 //   inferred from the key alone (D37).
 // ---------------------------------------------------------------------------
 
+import { refuseTask } from './context-key.js';
 import type { ExplicitInjectionKey, InjectionKey } from './context-key.js';
 import type { Provider, Public } from './context.js';
 import { inject, markAlias, resolveDependencies } from './inject.js';
@@ -68,6 +69,7 @@ export function valueProvider<T>(key: InjectionKey<T>, value: NoInfer<Public<T>>
  */
 export function aliasProvider<T, U extends Public<T>>(key: InjectionKey<T>, target: AliasTarget<U>): Provider<T> {
   const targetKey = target as InjectionKey<unknown>;
+  refuseTask(targetKey); // no registration reads the target; `key` is refused where the provider is registered (D44, decision 7)
   const p: Provider<T> = { key, provide: () => inject(targetKey) as T }; // only for a caller of p.provide(): resolution redirects
   markAlias(p, targetKey);
   return p;

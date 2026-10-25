@@ -19,7 +19,7 @@
 // ramme's generics infer `unknown` from it (`yield* wait(db.query())`,
 // `lookup(Config)`), so a block whose example needs the value typed needs an
 // `ENVIRONMENT` entry. Never declared: a name the three entry points export,
-// the names D36, D41 and D42 retired (`RETIRED`), and a misspelling of a ramme
+// the names D36, D41, D42 and D44 retired (`RETIRED`), and a misspelling of a ramme
 // name the block has, which stay errors. A
 // block with no import at all is a fragment: the ramme names it uses are
 // imported for it, before a global of the same name (`fetch`). A block that
@@ -48,6 +48,7 @@ const DOCUMENTS = ['README.md', 'DESIGN.md'];
 const ENTRIES = ['ramme', 'ramme/platform', 'ramme/result'];
 /** Names ramme exported once and no longer does: never declared for a block. */
 const RETIRED = new Map([
+  ['call', 'retired by D44: a task is called, `yield* t(…)`'],
   ['managed', 'retired by D41: `yield* wait(p)`'],
   ['InterruptedError', 'retired by D41: an interruption halts the body'],
   ['UnawaitedCallError', 'retired by D41: work ops are lazy'],

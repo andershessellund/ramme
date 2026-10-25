@@ -916,7 +916,7 @@ describe('all and race outcomes (DESIGN.md §4.8, D13′)', () => {
     const e2 = new Error('two');
     const results = await app.call(function* () {
       const self = here();
-      const ok = yield* self.all([task(function* () { return 1; }), task(function* () { return 'x'; }).bind(), task(function* (n: number) { return n * 2; }).bind(21)]);
+      const ok = yield* self.all([task(function* () { return 1; }), task(function* () { return 'x'; }), task(function* (n: number) { return n * 2; })(21)]);
       const failed = yield* failureOf(
         self.all([
           task(function* () {

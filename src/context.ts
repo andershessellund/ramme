@@ -8,15 +8,15 @@
 // generator yields `Instruction`s and `Fail<E>`s, and `task` reads `E` off the
 // whole yield union (D42, D38's pattern), so two failure types are a union where
 // a separate `E` parameter would take one inference candidate and refuse the
-// other. `yield* call(t)` re-yields `t`'s `Fail<E>` into the caller's union.
+// other. `yield* t(…)` re-yields `t`'s `Fail<E>` into the caller's union.
 //
 // Types only: the one implementation of every interface here is `NodeImpl`
-// (node-impl.ts); tasks are `TaskImpl` (fiber.ts); a work op is a `WorkOp`
-// and a lifecycle op a `LifecycleOp` (managed.ts).
+// (node-impl.ts); a task is the callable fiber.ts makes; a work op is a
+// `WorkOp` and a lifecycle op a `LifecycleOp` (managed.ts).
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
-import type { AnyTask, BodyOf, ErrorOf, FailedWith, Plain, ValueOf, Yields } from './internal-context.js';
+import type { AnyMember, BodyOf, ErrorOf, FailedWith, Plain, TASK, ValueOf, Yields } from './internal-context.js';
 import type { Scope } from './scope.js';
 
 /** The brand of an `Instruction`. Declared only: no value outside ramme carries it. */
@@ -56,7 +56,7 @@ type Fails<E> = E extends unknown ? Fail<E> : never;
 /**
  * Anything a generator body runs with `yield*` to get a `T` (DESIGN.md §4.2): an op, or a generator helper, since a
  * `Generator<Instruction, T, unknown>` is an `Operation<T>`. `E` is what it may end the body with, re-yielded as
- * `Fail<E>` (D42): `yield* call(t)` is `t`'s value, or ends the caller with `t`'s expected failure. The type to annotate
+ * `Fail<E>` (D42): `yield* t(…)` is `t`'s value, or ends the caller with `t`'s expected failure. The type to annotate
  * a helper that is only `yield*`ed with. `Body` has no `Operation<T>` arm (D41), so a helper a body returns
  * (`task(() => helper(x))`), and a body that needs an annotation, is typed `Generator<Instruction | Fail<E>, T, unknown>`.
  */
@@ -67,7 +67,7 @@ export interface Operation<T, E = never> {
 /**
  * What every waiting verb returns (DESIGN.md §4.2, D41): an `Operation<T, E>`, run by `yield* op` in a body, and a
  * plain thenable (`then` only: no `catch` or `finally`, and no `Promise`), which `await` reaches from plain async code.
- * A work op (`call`, `attempt`, `all`, `race`, `settle`, `shield`, `unshield`, `join`, `result`, `sleep`,
+ * A work op (a task's call `t(…)`, `attempt`, `all`, `race`, `settle`, `shield`, `unshield`, `join`, `result`, `sleep`,
  * `interrupted`, `never`, `wait`) is lazy: making it runs nothing; `yield*` runs it for the yielding body, afresh each
  * time, and `then` runs it once, as a child of the node it was made through, settling with its value or its failure
  * (an expected failure's error as the rejection, D42), or `FiberAbortedError` when that child ended `aborted`. The
@@ -220,34 +220,37 @@ export interface Fiber<T, E = never> extends Context {
 }
 
 /**
- * A body plus options (DESIGN.md §4.5). Not callable: each `fork`/`call` runs the body
- * in a new fiber, a child of the current node. `E` is inferred from the body: the expected failures it yields (D42).
+ * A body plus options (DESIGN.md §4.5), and a function (D44): `t(…args)` is the lazy op of one run of the body in a
+ * new fiber, a child of the node it is made through, as every work op is (D41, decision 2). Making it reads the slot,
+ * so outside any node it throws `NoCurrentNodeError` and in a factory `CreationViolationError`; `yield* t(…)` is the
+ * body's value, or re-yields its `Fail<E>`. `fork(t(…))` and `attempt(t(…))` run it concurrently or for its outcome.
+ * `call`, `bind` and `apply` are `Function.prototype`'s. `E` is inferred from the body: the expected failures it
+ * yields (D42). A task is no injection key (decision 7): the brand lets the key types exclude it.
  */
 export interface Task<A extends unknown[], T, E = never> {
+  /** One run of the body, lazy: a new child of the node it is made through, made when the op is yielded. */
+  (...args: A): Op<T, E>;
   readonly name: string;
-  /** Run in a new child of the current node, concurrently. */
-  fork(...args: A): Fiber<T, E>;
-  /** Run in a new child of the current node and wait for it: `yield* t.call(…)` is its value, or re-yields its `Fail<E>` (DESIGN.md §4.5). */
-  call(...args: A): Op<T, E>;
-  /** `call`, resolving with the four-way outcome: a failure or a defect is delivered as a value, never thrown (DESIGN.md §4.5). */
-  attempt(...args: A): Op<Outcome<T, E>>;
-  /** Per-use option overrides. */
+  /** Per-use option overrides; a bound task keeps its receiver. */
   with(opts: TaskOptions): Task<A, T, E>;
-  /** Partial application; what `all`, `race`, `settle` and pools take. */
-  bind(...args: A): Task<[], T, E>;
+  readonly [TASK]: true;
 }
 
-/** The tuple of the tasks' values, in order; `all([a.bind(1), b.bind('x')])` is `Op<[A, B], EA | EB>`. */
-export type AllResult<T extends readonly AnyTask[]> = {
-  -readonly [K in keyof T]: T[K] extends Task<[], infer U, unknown> ? Awaited<U> : never;
+/** The tuple of the members' values, in order; `all([a(1), b('x')])` is `Op<[A, B], EA | EB>`. */
+export type AllResult<T extends readonly AnyMember[]> = {
+  -readonly [K in keyof T]: T[K] extends Op<infer U, unknown> ? Awaited<U> : T[K] extends Task<[], infer U, unknown> ? Awaited<U> : never;
 };
 
 /**
- * The tuple of the tasks' four-way outcomes, in order; `settle([a.bind(1), b.bind('x')])` is
+ * The tuple of the members' four-way outcomes, in order; `settle([a(1), b('x')])` is
  * `Op<[Outcome<A, EA>, Outcome<B, EB>]>` (DESIGN.md §4.8).
  */
-export type SettleResult<T extends readonly AnyTask[]> = {
-  -readonly [K in keyof T]: T[K] extends Task<[], infer U, unknown> ? Outcome<Awaited<U>, ErrorOf<T[K]>> : never;
+export type SettleResult<T extends readonly AnyMember[]> = {
+  -readonly [K in keyof T]: T[K] extends Op<infer U, unknown>
+    ? Outcome<Awaited<U>, ErrorOf<T[K]>>
+    : T[K] extends Task<[], infer U, unknown>
+      ? Outcome<Awaited<U>, ErrorOf<T[K]>>
+      : never;
 };
 
 export interface PoolOptions extends NodeOptions {
@@ -267,6 +270,8 @@ export interface Pool extends Context {
     t: Task<A, T, E> | BodyOf<T, A, Y>,
     ...args: A
   ): Fiber<T, FailedWith<Y> | E>;
+  /** An op forked into the pool (D44, decision 4): a task's call `t(…)` as the task itself, any other op in a fiber named after it. */
+  fork<T, E = never>(op: Op<T, E>): Fiber<T, E>;
   readonly running: number;
   readonly pending: number;
 }
@@ -307,7 +312,13 @@ export interface Context {
 
   // --- running bodies in a child of THIS node (DESIGN.md §4.5); E is the body's expected failures (D42) ---
   fork<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>, ...args: A): Fiber<T, FailedWith<Y> | E>;
-  /** The child's value, or its expected failure re-yielded into this body (D42); its defect is thrown. */
+  /**
+   * The child's value, or its expected failure re-yielded into this body (D42); its defect is thrown. `ctx.call(t, …args)`
+   * is `t(…args)` made through `ctx`: the explicit receiver plain async code names (`await app.call(profile, '42')`).
+   * It takes a task or a body, never an op, and so does `fork`: an op is made through the current node, so where code
+   * has an op it has a current node, and the free `fork(op)` and `yield*` serve it; outside every node no op can be
+   * made at all (D44, decision 1).
+   */
   call<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>, ...args: A): Op<T, FailedWith<Y> | E>;
   /**
    * `call` with the four-way outcome delivered as a value: the child's failure or defect is consumed, never thrown. An interrupted
@@ -338,15 +349,15 @@ export interface Context {
     ...args: A
   ): Op<Outcome<T, FailedWith<Y> | E>>;
   /**
-   * `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Op<[A, B], EA | EB>`
+   * `const T` makes an array literal infer as a tuple, so `all([a(1), b('x')])` is `Op<[A, B], EA | EB>`
    * (DESIGN.md §4.8): a lone member's expected failure is re-yielded; two failures or more, or a defect, throw the
-   * `AggregateError` of every failure (D28, D42).
+   * `AggregateError` of every failure (D28, D42). A member is an op or a task of no arguments (D44, decision 4).
    */
-  all<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>>;
+  all<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>>;
   /** The first success; with none, `all`'s rule: a lone expected failure re-yielded, else the `AggregateError` of every failure (D42). */
-  race<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<ValueOf<T[number]>, ErrorOf<T[number]>>;
-  /** `all` resolving with every four-way outcome instead of rejecting: waits for every task, as `all` does, and resolves with their outcomes in order; never rejects on a member's account (DESIGN.md §4.8). */
-  settle<const T extends readonly AnyTask[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>>;
+  race<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<ValueOf<T[number]>, ErrorOf<T[number]>>;
+  /** `all` resolving with every four-way outcome instead of rejecting: waits for every member, as `all` does, and resolves with their outcomes in order; never rejects on a member's account (DESIGN.md §4.8). */
+  settle<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<SettleResult<T>>;
   pool(opts: PoolOptions): Pool;
   child(opts?: NodeOptions): Context;
 

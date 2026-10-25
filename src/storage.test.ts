@@ -2,7 +2,7 @@
 // module slot that `runInFrame` sets for a synchronous `fn` and restores, re-entrant and on throw. Nothing carries
 // it across an `await`, a microtask or a timer: ramme registers no async context on any platform.
 import { describe, it, expect } from 'vitest';
-import { call, current, fork, lookup, own, signal } from './ambient.js';
+import { current, fork, lookup, own, signal } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import {
   NO_NODE,
@@ -19,6 +19,7 @@ import type { CreationState } from './inject.js';
 import type { NodeImpl } from './node-impl.js';
 import { NoCurrentNodeError } from './resource.js';
 import { deferred, micro, tick } from './test/util.js';
+import { task } from './fiber.js';
 
 function fakeNode(id: number): NodeImpl {
   return { id } as unknown as NodeImpl;
@@ -56,7 +57,7 @@ describe('the slot (DESIGN.md §6, D41 decision 18)', () => {
       lookup: () => lookup(createInjectionKey<string>('K')),
       own: () => own(() => {}),
       fork: () => fork(function* () {}),
-      call: () => call(function* () {}),
+      call: () => task(function* () {})(),
     };
     for (const [op, fn] of Object.entries(ops)) {
       expect(fn, op).toThrow(NoCurrentNodeError);

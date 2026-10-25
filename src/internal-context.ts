@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
-import type { Body, Fail, FailureDestination, Instruction, NodeOptions, Task, TaskOptions } from './context.js';
+import type { Body, Fail, FailureDestination, Instruction, NodeOptions, Op, Task, TaskOptions } from './context.js';
 import type { NodeImpl } from './node-impl.js';
 import type { PoolState } from './pool.js';
 import type { Scope } from './scope.js';
@@ -39,19 +39,28 @@ export interface OpYielding<T, Y> extends PromiseLike<T> {
  * whole `Result`: an `E` read from `Generator<Instruction | Fail<E>, …>` takes one inference candidate and refuses a
  * second failure type. `E` appears only under `FailedWith`, a conditional type, which inference from a contextual
  * return type does not reach: a `task(…)` inside the array `all` takes keeps its body's `E` rather than inferring
- * `unknown` from `Task<[], unknown, unknown>`. No `NoInfer` either: over an object type it stays in the type, so each
+ * `unknown` from the element type `AnyMember`'s `Task<[], unknown, unknown>`. No `NoInfer` either: over an object type it stays in the type, so each
  * level of propagation would wrap `E` once more, and the union would no longer be exact.
  */
 export type BodyOf<T, A extends unknown[], Y> = (...args: A) => Generator<Y, T, unknown> | OpYielding<T, Y> | Plain<T>;
 
-/** Any task of no arguments, whatever its value and its expected failures: what `all`, `race` and `settle` take. */
-export type AnyTask = Task<[], unknown, unknown>;
+/**
+ * `BodyOf` with its receiver typed (D44, decision 2): `this: void` for a free body, so a stray `this` in it is a type
+ * error, and `this: S` for one bound by `task(self, body)`.
+ */
+export type BodyWith<S, T, A extends unknown[], Y> = (this: S, ...args: A) => Generator<Y, T, unknown> | OpYielding<T, Y> | Plain<T>;
 
-/** The value type of a task (each member of a union of tasks). */
-export type ValueOf<X> = X extends Task<[], infer V, unknown> ? V : never;
+/**
+ * What `all`, `race` and `settle` take as a member (D44, decision 4), whatever its value and its expected failures:
+ * an op (`t(…args)`, `sleep(ms)`, `wait(p)`, …), or a task of no arguments, taken as itself.
+ */
+export type AnyMember = Op<unknown, unknown> | Task<[], unknown, unknown>;
 
-/** The expected failures of a task (each member of a union of tasks): what `all` and `race` re-yield (D42). */
-export type ErrorOf<X> = X extends Task<[], unknown, infer E> ? E : never;
+/** The value type of a member (each member of a union of ops and tasks). */
+export type ValueOf<X> = X extends Op<infer V, unknown> ? V : X extends Task<[], infer V, unknown> ? V : never;
+
+/** The expected failures of a member (each member of a union of ops and tasks): what `all` and `race` re-yield (D42). */
+export type ErrorOf<X> = X extends Op<unknown, infer E> ? E : X extends Task<[], unknown, infer E> ? E : never;
 
 /** `'value'`: a DI value's node (DESIGN.md §5, D10′). */
 export type NodeKind = 'context' | 'fiber' | 'pool' | 'release' | 'value';
@@ -126,7 +135,10 @@ export interface Redirected {
   readonly node: NodeImpl;
 }
 
-/** The brand of a task definition (fiber.ts `TaskImpl`, or an inline body made anonymous by `toTask`). */
+/**
+ * The brand of a task definition (fiber.ts's callable task, or an inline body made anonymous by `toTask`). The type
+ * `Task` declares it too, so a key type can exclude a task (D44, decision 7: `FunctionInjectionKey`).
+ */
 export const TASK: unique symbol = Symbol('ramme.task');
 
 export interface TaskLike<A extends unknown[] = unknown[], T = unknown> {
@@ -134,13 +146,25 @@ export interface TaskLike<A extends unknown[] = unknown[], T = unknown> {
   readonly name: string;
   readonly body: Body<T, A>;
   readonly opts: TaskOptions;
+  /** The receiver a bound task's body runs with (`task(self, body)`, D44 decision 2); `undefined` for a free one. */
+  readonly self?: unknown;
+  /** The body is `yield* op` for an op `fork`, `attempt`, a group or a pool was handed (D44, decision 4: node-impl.ts `runnable`). */
+  readonly runsOp?: boolean;
 }
 
+/**
+ * A task: a function (fiber.ts's callable) or an object (an internal `TaskLike`) carrying the brand (D44, decision 8).
+ * Each carries it as an own property, beside its fields, and no prototype does: `t.bind(…)`, which shares a task's
+ * prototype and none of its fields, is no task.
+ */
 export function isTask(x: unknown): x is TaskLike {
-  return typeof x === 'object' && x !== null && (x as { readonly [TASK]?: unknown })[TASK] === true;
+  return (typeof x === 'object' || typeof x === 'function') && x !== null && (x as { readonly [TASK]?: unknown })[TASK] === true;
 }
 
-/** A task as is; an inline body becomes an anonymous task `{ name: body.name || 'anonymous', opts: {} }` (D8′). */
+/**
+ * A task as is; an inline body becomes an anonymous task `{ name: body.name || 'anonymous', opts: {} }` (D8′). A task
+ * is a function too, so the brand is tested first.
+ */
 export function toTask<A extends unknown[], T>(t: TaskLike<A, T> | Body<T, A>): TaskLike<A, T> {
   if (isTask(t)) return t as TaskLike<A, T>;
   if (typeof t !== 'function') throw new TypeError('expected a task or a function');
@@ -152,6 +176,10 @@ export interface BodyInfo {
   readonly args: unknown[];
   readonly destination: FailureDestination;
   readonly taskName: string;
+  /** `this` for `fn`: a bound task's receiver; `undefined` for every other body. */
+  readonly self?: unknown;
+  /** An op's fiber (`TaskLike.runsOp`): the op it yields runs on it, whatever node the op was made through. */
+  readonly runsOp?: boolean;
 }
 
 export interface NodeInit {

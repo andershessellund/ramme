@@ -6,16 +6,21 @@ A ramme body is a generator function that the runtime steps: every wait is a
 `yield*` where it waits. Most mistakes are type errors already; these rules
 flag what types do not see, or say it better: an `async` function passed as a
 body, a work op made and never yielded (it runs nothing), an outcome thrown
-away, a platform timer, a few wiring errors visible in the syntax, and the
+away, a platform timer, a generator helper (ramme has none: a generator
+function is a task body), a few wiring errors visible in the syntax, and the
 platform's bare waits and callbacks that `ramme/platform` spells: a listener,
-`fetch`, `for await`.
+`fetch`, `for await`. A [`style`](#style) preset adds the canonical style's
+two rules.
 
 The rules are syntactic: they need no type information and work on
 JavaScript and TypeScript alike. They recognize ramme's functions by name
 (`lookup`, `own`, `attempt`, …), not by where they were imported from, and
 each has known approximations, listed below. Where a rule has to choose, it
 is stricter than ramme's design; an inline disable with a reason marks a
-case that is fine.
+case that is fine. One rule has a type-aware half besides: with type
+information (typescript-eslint's `project`), [`no-unused-op`](#no-unused-op)
+also flags a dropped call of a task, `t(x);`, which syntax cannot tell from
+any other call.
 
 ## Install
 
@@ -28,7 +33,7 @@ ESLint 9 or later, flat config. The plugin has no runtime dependencies.
 ## Configure
 
 `configs.recommended` registers the plugin as `ramme` and turns every rule
-on, each as an error:
+on but the style rules, each as an error:
 
 ```js
 // eslint.config.js
@@ -40,6 +45,12 @@ export default [
   ramme.configs.recommended,
 ];
 ```
+
+`configs.style` turns the two style rules on, as warnings; add it beside
+`recommended` (`[…, ramme.configs.recommended, ramme.configs.style]`). For
+`no-unused-op`'s type-aware half, give the parser your project
+(`languageOptions: { parserOptions: { projectService: true } }`, or
+`project`); without it the rule keeps to the syntax.
 
 To pick rules yourself:
 
@@ -59,7 +70,8 @@ there, which resolves to the generator object (ramme's DESIGN.md §9).
 | Rule | Severity | Flags |
 | --- | --- | --- |
 | [`no-async-body`](#no-async-body) | error | an `async` function where a body is expected |
-| [`no-unused-op`](#no-unused-op) | error | a work op (`call(…)`, `sleep(…)`, …) as a statement, never yielded |
+| [`no-unused-op`](#no-unused-op) | error | a work op (`sleep(…)`, `app.call(…)`, …; with type information a task's call `t(…)`) as a statement, never yielded |
+| [`no-generator-helper`](#no-generator-helper) | error | a generator function that is no task body, `promised` body or release |
 | [`no-unused-outcome`](#no-unused-outcome) | error | `yield* attempt(…)`, `settle(…)` or `result(f)` whose outcome is discarded |
 | [`no-timers`](#no-timers) | error | `setTimeout`, `setInterval`, `setImmediate`, `requestAnimationFrame` |
 | [`no-stored-borrow`](#no-stored-borrow) | error | a `lookup(…)` result stored in a field, on `this` or in a module variable |
@@ -67,8 +79,11 @@ there, which resolves to the generator object (ramme's DESIGN.md §9).
 | [`no-bare-listener`](#no-bare-listener) | error | `addEventListener`, an emitter's `.on(…)`/`.once(…)`, `el.onclick = …` in ramme code |
 | [`no-bare-fetch`](#no-bare-fetch) | error | the global `fetch` in a body of a file that uses ramme |
 | [`no-bare-async-iteration`](#no-bare-async-iteration) | error | `for await` in a file that uses ramme, or inside a body |
+| [`named-task`](#named-task) | warn (style) | a `task(…)` whose body is anonymous and whose options give no `name` |
+| [`no-function-key`](#no-function-key) | warn (style) | a function used as an injection key |
 
-The severity is the one `configs.recommended` sets. Section numbers below are
+The severity is the one `configs.recommended` sets, or `configs.style` for
+the two style rules. Section numbers below are
 those of ramme's
 [DESIGN.md](https://github.com/andershessellund/ramme/blob/main/DESIGN.md)
 (§) and [DECISIONS.md](https://github.com/andershessellund/ramme/blob/main/DECISIONS.md) (D).
@@ -78,9 +93,9 @@ those of ramme's
 **Flags** an `async` function, `async` arrow or `async function*` that is the
 first argument of `task`, `fork`, `call`, `attempt`, `shield`, `unshield`,
 `promised` or `bind`, free or as a method (`ctx.call(…)`, `pool.fork(…)`,
-`root.promised(…)`), written inline or named by an identifier whose
-declaration in the file is one (a function declaration, or a `const` whose
-initializer is one).
+`root.promised(…)`), or the second argument of a bound `task(this, …)`,
+written inline or named by an identifier whose declaration in the file is one
+(a function declaration, or a `const` whose initializer is one).
 
 **Why.** ramme steps a body's generator and halts it by returning it at the
 `yield*` where it waits; it cannot see an `await` (D41). An async function is
@@ -90,7 +105,7 @@ with `yield*`, and wait for a foreign promise with `yield* wait(p)` (§4.2, §4.
 
 ```ts
 const handle = task(function* (req: Request) {   // instead of task(async (req) => …)
-  const user = yield* call(loadUser, req.id);
+  const user = yield* loadUser(req.id);
   return yield* wait(render(user));
 });
 ```
@@ -103,13 +118,14 @@ another object (`fn.call(async () => …)` is flagged, as `call`).
 
 ### no-unused-op
 
-**Flags** a call of a work verb (`call`, `attempt`, `all`, `race`, `settle`,
+**Flags** a call of a work verb (`attempt`, `all`, `race`, `settle`,
 `shield`, `unshield`, `join`, `result`, `sleep`, `interrupted`, `never`,
-`wait`), free or as a method (`app.call(…)`, a task's `t.call(…)` and
-`t.attempt(…)`), as an expression statement or under `void`: a free one inside
-a function, a method one anywhere, module level included (an explicit receiver
-needs no current node, so `app.call(main);` at the top of a script runs
-nothing). So are `ramme/platform`'s ops, `fetch(…)`, `nextFrame()`, `each(…)`
+`wait`), free or as a method, and a node's `call` (`app.call(…)`; there is no
+free `call`, since a task is called, D44), as an expression statement or
+under `void`: a free one inside a function, a method one anywhere, module
+level included (an explicit receiver needs no current node, so
+`app.call(main);` at the top of a script runs nothing). So are
+`ramme/platform`'s ops, `fetch(…)`, `nextFrame()`, `each(…)`
 and `each.next()`, inside a function, when the file imports them from
 `ramme/platform` (aliased too): a dropped `fetch('/beacon', …);` sends nothing.
 `fork(…)` and the lifecycle verbs (`release`, `releaseAll`, `close`)
@@ -120,35 +136,84 @@ are not flagged: they are eager. Nor are the platform's methods of those names:
 `null`, `undefined`, `void …` or `globalThis`, on a receiver the file declares
 as a function (or a parameter typed as one), and on a receiver the file does not
 show to be ramme's (a global, an untyped parameter, a property) whose first
-argument is no task or body (`handler.call(self, e)`).
+argument is no task or body (`handler.call(self, e)`). A task's own `call` and
+`apply` are `Function.prototype`'s, which call it: `t.call(self, x)` is `t(x)`,
+so on a `t` this file binds to `task(…)` it is flagged as the task's call,
+named `t`.
+
+**The type-aware half** (D44): where the parser has type information
+(`parserServices.program`), it also flags a call statement inside a function
+whose callee's type is a `Task` and whose value is an `Op`, however the callee
+is written: `getUser(id);`, `this.get(path);` and `this.#get(path);` on a
+bound task, `api.get(path);`, `api?.get(path);`, `getUser.with(opts)(id);`,
+`task(function* () { … })();`, and `t.call(self, x);` or `t.apply(self, [x]);`
+on any `t` typed a `Task`. A task is a function, so the syntax alone cannot
+tell such a call from any other; without type information it is not flagged.
+A function that returns an op without being a task (`makeOp(x);`), and a
+task-like callable whose call returns no op, are not flagged by it either.
 
 **Why.** A work op is lazy: making one runs nothing, and its consumer runs it,
-the driver at `yield*` or `then` at `await` (D41, decision 2). `call(sendEmail,
-user);` sends nothing. A forgotten `yield*` is missing work, silent at run
+the driver at `yield*` or `then` at `await` (D41, decision 2). `sendEmail(user);`
+sends nothing. A forgotten `yield*` is missing work, silent at run
 time; this rule is its report (§4.2, §4.4).
 
 ```ts
 const signup = task(function* (user: User) {
-  yield* call(sendEmail, user);   // instead of call(sendEmail, user);
+  yield* sendEmail(user);   // instead of sendEmail(user);
 });
 ```
 
-**Approximations.** Syntactic: an op kept in a variable or an array and never
-yielded (`const op = call(t);`, `[1, 2].map(() => sleep(1))`) is not flagged;
-a type-aware variant would see those. A free op at module level is not
+**Approximations.** An op kept in a variable or an array and never
+yielded (`const op = t(x);`, `[1, 2].map(() => sleep(1))`) is not flagged,
+with type information or without. A free op at module level is not
 flagged: no node is current there, so it throws `NoCurrentNodeError` when made.
 `fail(e)` and `ramme/result`'s `$(r)` written without their `yield*` are not
 flagged either, though they are lazy too: neither is a work verb, and the body
 simply runs on past the statement, so the failure ends nothing and never joins
 the task's `E` (ramme's D42).
 Whether `x.call(…)` is ramme's is read from `x`'s declaration and the first
-argument: an import, a variable made by `task`, `bind`, `createRootContext`,
-`current`, `child` or `pool`, and a parameter typed `Task`, `Context` or
-`Pool` are ramme's, and so is any receiver whose first argument is a function,
-a `task(…)`, or a name bound to one or imported. So a dropped `t.call(x)` on an
-untyped parameter `t`, with an `x` that is none of those, is not flagged, and
+argument: an import, a variable made by `createRootContext`, `current`,
+`child` or `pool`, and a parameter typed `Context` or `Pool` are ramme's,
+and so is any receiver whose first argument is a function, a `task(…)`, or a
+name bound to one or imported. So a dropped `n.call(x)` on an untyped
+parameter `n`, with an `x` that is none of those, is not flagged, and
 `handler.call(self, e)` on an imported `handler` is: write that one
 `Reflect.apply(handler, self, [e])`.
+
+### no-generator-helper
+
+**Flags** a generator function that is no task body, in a file that imports
+from `ramme` or a subpath: a generator declaration (`function* parse() { … }`),
+a generator method of a class or an object literal (`*parse() { … }`), and a
+generator expression anywhere but an argument of `task` (free or bound,
+`task(this, function* …)`, a `.with(…)` after it included), `fork`,
+`attempt`, `shield`, `unshield` or a node's `call` (an inline body),
+`promised` (a library's callback), `own` (a release entry,
+`own(tx, function* (tx) { … })`), or an `onFailure` option, as its value or as
+a generator method of the options (`{ *onFailure(e) { … } }`): a failure
+handler.
+
+**Why.** ramme has no helpers: the tree is the call tree (D44). A helper,
+`yield* parse(x)` of a generator function, runs in its caller's node: its
+temporaries are the caller's, it cannot be interrupted, timed or seen on its
+own, and a `yield*` in its `finally` loses the caller's halt (D41, decision
+29). Written as a task, it is called the same way and is a node of its own:
+
+```ts
+const parse = task(function* parse(req: Request) {   // instead of function* parse(req: Request)
+  return yield* wait(req.json());
+});
+// in a body: const order = yield* parse(req);
+```
+
+**Approximations.** An `async function*` is not flagged (it is no ramme
+generator; `no-async-body` reports one passed as a body), and neither is an
+iterator-protocol method (`*[Symbol.iterator]()`, `*[Symbol.asyncIterator]()`).
+A generator that only iterates data (`function* range(n)`) in a file that
+uses ramme is flagged all the same, and so is a generator handed to a
+wrapper of your own over `task`: disable it there with a reason. The verbs
+are recognized by name, as the other rules recognize them. A file that does
+not import ramme is not checked.
 
 ### no-timers
 
@@ -220,14 +285,14 @@ variable whose initializer, in the same function, is one:
 ```ts
 const tx = own(yield* wait(db.begin()));
 current().addProvider(valueProvider(Tx, tx));      // flagged
-yield* call(work.with({ providers: [valueProvider(Tx, tx)] }));  // fine: a new node
+yield* work.with({ providers: [valueProvider(Tx, tx)] })();      // fine: a new node
 ```
 
 **Why.** This is the wiring error of DESIGN.md §2.5. The value is owned by
 the node's explicit stack; values built from the provider are placed on the
 same node's provided stack, which is released after the explicit stack
 (§2.4, D16), so they outlive the resource they use. Provide it on a new node
-instead, with `providers:` on `call`, `child` or `task.with`: that node ends
+instead, with `providers:` on `child` or on a task's `with` before its call: that node ends
 inside the owner's lifetime. `providers:` options are never flagged.
 
 **Approximations.** Only `valueProvider`, and only those two shapes of `x`.
@@ -249,7 +314,7 @@ expression statement, under `void` too.
 **Why.** `attempt`, `settle` and `result` deliver the four-way outcome as a
 value and consume what it carries: an expected `failure` (a `yield* fail(e)`)
 or a `defect` (a throw) (§4.5, §4.8, §4.12). An outcome nobody reads is a
-failure or a defect dropped silently, where `call`, `all` or `join` would have
+failure or a defect dropped silently, where a call (`yield* t(…)`), `all` or `join` would have
 propagated it: the expected failure re-yielded into the caller, the defect
 thrown (D31, D42). Use those, or read the outcome. The op alone
 (`attempt(t);`) runs nothing: `no-unused-op` reports that.
@@ -393,11 +458,75 @@ const tail = task(function* (lines: AsyncIterable<string>) {
 plain async code's included (a script that reads lines before it calls
 `app.call(main)`); disable it there with a reason.
 
+## Style
+
+ramme accepts more than its canonical style, which `configs.style` checks, as
+warnings (D44). The style, in five rules:
+
+- **A service is a class** with `inject` fields for what it depends on and
+  `task(this, …)` fields for what it does:
+  `readonly get = task(this, function* get(path: string) { … })`.
+- **Separate an interface from its class only at two implementations**, and
+  then key it with `createKeyFor(Impl)` (`createKeyFor<Clock>(SystemClock)`).
+- **Every function that waits is a task**: there are no generator helpers
+  (`no-generator-helper`), and a task is called as a function is,
+  `yield* parse(x)`.
+- **A standalone task is an entry point**: a request handler, a job, `main`;
+  the rest of the work is a service's.
+- **`inject` for structural dependencies, `lookup` for contextual ones**: a
+  service's collaborators are injected where it is built; what the current
+  request or session holds is looked up in the body.
+
+### named-task
+
+**Flags** a `task(…)`, free or bound (`task(this, …)`), whose body is an
+anonymous generator or function expression or an arrow, and whose options
+are absent or an object literal with no `name` property (and no spread),
+unless a `.with(…)` chained on it gives the name
+(`task(function* () { … }).with({ name: 'poll' })`, whose nodes are `poll`).
+
+**Why.** A node is named `opts.name`, else its body's own name, else
+`anonymous`, and a function expression passed as an argument has no name of
+its own: `const poll = task(function* () { … })` makes nodes named
+`anonymous` in every event, stall warning and error message. Name the
+generator, or pass `{ name }`:
+
+```ts
+const poll = task(function* poll() { yield* sleep(1_000); });   // instead of task(function* () { … })
+```
+
+**Approximations.** A body passed by name (`task(parse)`) is taken as named,
+whatever the function's name is; options other than an object literal, in
+the call or in a chained `.with(…)`, are taken to name it. An inline body of `fork`, `attempt` or a node's `call` is
+not checked: it is no `task(…)`.
+
+### no-function-key
+
+**Flags** the key argument of `lookup`, `inject`, `createKeyFor`,
+`valueProvider`, `factoryProvider`, `classProvider`, `aliasProvider` (its key
+and its target) or `setScope`, when it is an identifier this file binds to a
+function declaration or to a `const` initialised with an arrow or a function
+expression.
+
+**Why.** A function key is accepted (§3.1: its call is its default factory),
+but it is not the ramme style: a service is keyed by its class, which can
+declare its lifetime with `static readonly scope`, a value by a token, and an
+interface by `createKeyFor` over its class (D44):
+
+```ts
+const ClockKey = createKeyFor<Clock>(SystemClock);   // instead of inject(makeClock)
+```
+
+**Approximations.** By this file's declarations only: an import, a parameter
+or a property is not checked, nor is a function given as a provider's value
+(`valueProvider(K, fn)`).
+
 ## Not covered
 
 - A `yield*` in a helper's `finally` loses the halt: the body runs on past it
-  as release work (D41, decision 29). Syntax could flag it; it is not in this
-  package yet. ramme's development mode reports a lost halt.
+  as release work (D41, decision 29). `no-generator-helper` reports the helper
+  itself; one it does not see (an imported helper, a disabled report) still
+  loses it, and ramme's development mode reports a lost halt.
 - An async function that uses ramme after its first `await` (an `async`
   release, a library callback) throws `NoCurrentNodeError` there; write it as
   a generator release or a `promised(function* …)` callback (§4.5, §6).

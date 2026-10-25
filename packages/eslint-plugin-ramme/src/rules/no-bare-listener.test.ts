@@ -79,7 +79,7 @@ ruleTester.run('no-bare-listener', noBareListener, {
     },
     {
       name: 'a class with a generator method uses ramme',
-      code: "class Feed {\n  constructor(el) { el.onscroll = () => this.more(); }\n  *more() { yield* call(load); }\n}",
+      code: "class Feed {\n  constructor(el) { el.onscroll = () => this.more(); }\n  *more() { yield* load(); }\n}",
       errors: [{ messageId: 'bare', data: { form: 'onscroll =' }, line: 2 }],
     },
   ],

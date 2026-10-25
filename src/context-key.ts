@@ -1,3 +1,5 @@
+import { isTask } from './internal-context.js';
+import type { TASK } from './internal-context.js';
 import { isScope } from './scope.js';
 import type { Scope } from './scope.js';
 
@@ -15,18 +17,30 @@ type Marker = typeof CLASS_MARKER | typeof FUNCTION_MARKER | typeof EXPLICIT_MAR
 const markers = new WeakMap<object, Marker>();
 const scopeMap = new WeakMap<object, Scope>();
 const depsMap = new WeakMap<object, InjectionKey<unknown>[]>();
+/**
+ * A `createKeyFor` token's implementation (D44, decision 6): the token's default factory, its dependencies and, unless
+ * `opts.scope` registered one, its scope are `impl`'s, read at each use as `impl`'s own are (D32).
+ */
+const implOf = new WeakMap<object, InjectionKey<unknown>>();
 
 // --- Key types ---
 
+/**
+ * What no task has (D44, decision 7): a `Task` declares the brand `[TASK]: true`, so a key type intersected with this
+ * excludes it. A task is a function with a `name`, which a function key and a token would otherwise both accept.
+ */
+type NotATask = { readonly [TASK]?: never };
+
 export type ClassInjectionKey<T> = new (...args: any[]) => T;
 
-export type FunctionInjectionKey<T> = (...args: any[]) => T;
+/** A function key: its call is its default factory. Never a task: `inject(t)` is a type error, and a `TypeError`. */
+export type FunctionInjectionKey<T> = ((...args: any[]) => T) & NotATask;
 
 export type ExplicitInjectionKey<T> = {
   __type?: T;
   name: string;
   __factory?: () => T;
-};
+} & NotATask;
 
 export type InjectionKey<T> =
   | ClassInjectionKey<T>
@@ -35,14 +49,30 @@ export type InjectionKey<T> =
 
 // --- Marking (key type detection) ---
 
+/** A class, as the markers tell one from a function: it has a prototype, and its source text starts with `class`. */
+function isClass(f: object): boolean {
+  return !!(f as { prototype?: unknown }).prototype && /^class[\s{]/.test(f.toString());
+}
+
+/**
+ * A task is no key (D44, decision 7): a `TypeError` wherever one enters as a key, at a provider's registration (inject.ts
+ * `assertProviderPlacement`), as an alias's target, in `setScope` and `setDependencies`, and at its marking, which a
+ * resolution that finds no provider reaches (`inject(t)`, `lookup(t)`). With no provider or scope ever given it, a
+ * task cannot be found by the walk, so every resolution of one ends in `mark`.
+ */
+export function refuseTask(key: unknown): void {
+  if (isTask(key))
+    throw new TypeError(
+      `${(key as { name: string }).name}: a task is not an injection key; inject the service it belongs to, ` +
+        'or call the task in a body: yield* t(…) (D44, decision 7)',
+    );
+}
+
 export function mark<T>(key: InjectionKey<T>): void {
   if (markers.has(key as object)) return;
+  refuseTask(key);
   if (typeof key === 'function') {
-    if (key.prototype && /^class[\s{]/.test(key.toString())) {
-      markers.set(key, CLASS_MARKER);
-    } else {
-      markers.set(key, FUNCTION_MARKER);
-    }
+    markers.set(key, isClass(key) ? CLASS_MARKER : FUNCTION_MARKER);
   } else {
     throw new Error('Invalid key');
   }
@@ -65,7 +95,9 @@ export function invokeDefaultFactory<T>(key: InjectionKey<T>, args?: unknown[]):
   if (m === CLASS_MARKER) {
     return args ? new (key as any)(...args) : new (key as ClassInjectionKey<T>)();
   } else if (m === EXPLICIT_MARKER) {
-    return (key as ExplicitInjectionKey<T>).__factory!();
+    const impl = implOf.get(key as object);
+    // A `createKeyFor` token makes its value as `impl` would, with the arguments `impl`'s dependencies resolved to.
+    return impl !== undefined ? invokeDefaultFactory(impl as InjectionKey<T>, args) : (key as ExplicitInjectionKey<T>).__factory!();
   } else {
     return args ? (key as any)(...args) : (key as FunctionInjectionKey<T>)();
   }
@@ -91,6 +123,30 @@ export function createInjectionKey<T>(
   if (options?.scope) {
     scopeMap.set(key, options.scope);
   }
+  return key;
+}
+
+/**
+ * An explicit key for an implementation (D44, decision 6): `createKeyFor<Clock>(SystemClock)` is a token of its own,
+ * typed `I`, whose default factory is `impl`'s: `new impl(…)` for a class and `impl(…)` for a function (told apart as a
+ * class key and a function key are), with the arguments `setDependencies(impl, …)` declares, resolved as `impl`'s own
+ * default resolves them. It is named `opts.name ?? impl.name`, and scoped `opts.scope`, else as `impl` is scoped, the
+ * registered scope or the declared `static readonly scope`, read at every read of the token's scope as D32 reads
+ * `impl`'s, so a `setScope(impl, …)` made after the key reaches it. The factory runs in the creation phase like any
+ * factory, so `inject` inside `impl` works, and the value is placed by `impl`'s dependencies (DESIGN.md §3.3). It
+ * separates an interface from its implementation: `inject(ClockKey)` is a `Clock`, never the `SystemClock` key's own
+ * value, and a test binds `ClockKey` to a fake. A task is refused: a `TypeError`.
+ */
+export function createKeyFor<I>(impl: ((new () => I) | (() => I)) & NotATask, opts?: { name?: string; scope?: Scope }): InjectionKey<I> {
+  if (isTask(impl))
+    throw new TypeError(
+      `createKeyFor(${(impl as { name: string }).name}): a task is not an implementation; pass a class or a function that makes the value`,
+    );
+  if (typeof impl !== 'function') throw new TypeError('createKeyFor(impl): impl must be a class or a function');
+  const target = impl as InjectionKey<I>;
+  // `invokeDefaultFactory` makes the token's value through `implOf`; the factory is what tells it has a default.
+  const key = createInjectionKey<I>(opts?.name ?? impl.name, { factory: () => invokeDefaultFactory(target), scope: opts?.scope });
+  implOf.set(key, target as InjectionKey<unknown>);
   return key;
 }
 
@@ -134,6 +190,7 @@ function declaredScope(key: InjectionKey<unknown>): Scope | undefined {
  * two declarations (D32).
  */
 export function setScope<T>(key: InjectionKey<T>, scope: Scope): void {
+  refuseTask(key);
   const v = scopeProperty(key as InjectionKey<unknown>);
   if (isScope(v)) {
     const name = getKeyDescription(key);
@@ -146,12 +203,15 @@ export function setScope<T>(key: InjectionKey<T>, scope: Scope): void {
 }
 
 /**
- * The key's scope: the registered one (`setScope`, `createInjectionKey`'s option), else its declaration, else
- * `undefined`. Throws TypeError when nothing is registered and the key's `scope` property is neither a declaration
- * nor ignored (D32).
+ * The key's scope: the registered one (`setScope`, `createInjectionKey`'s option), else its declaration, else, for a
+ * `createKeyFor` token, its `impl`'s scope, read now, else `undefined`. Throws TypeError when nothing is registered
+ * and the key's (or the `impl`'s) `scope` property is neither a declaration nor ignored (D32).
  */
 export function getKeyScope<T>(key: InjectionKey<T>): Scope | undefined {
-  return scopeMap.get(key as object) ?? declaredScope(key as InjectionKey<unknown>);
+  const registered = scopeMap.get(key as object);
+  if (registered !== undefined) return registered;
+  const impl = implOf.get(key as object);
+  return impl !== undefined ? getKeyScope(impl) : declaredScope(key as InjectionKey<unknown>);
 }
 
 // --- Dependencies ---
@@ -167,11 +227,16 @@ export function setDependencies<T extends (...args: any[]) => any>(
   ...keys: DependencyKeys<Parameters<T>>
 ): void;
 export function setDependencies(target: any, ...keys: InjectionKey<any>[]): void {
+  refuseTask(target);
   depsMap.set(target, keys);
 }
 
+/** The arguments a key's default factory is called with: its own, else, for a `createKeyFor` token, its `impl`'s. */
 export function getDependencies(key: InjectionKey<unknown>): InjectionKey<unknown>[] | undefined {
-  return depsMap.get(key as object);
+  const own = depsMap.get(key as object);
+  if (own !== undefined) return own;
+  const impl = implOf.get(key as object);
+  return impl === undefined ? undefined : depsMap.get(impl);
 }
 
 // --- Description ---

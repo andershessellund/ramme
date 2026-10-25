@@ -12,7 +12,6 @@ import { getEventListeners } from 'node:events';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   all,
-  call,
   current,
   fork,
   interrupted,
@@ -26,7 +25,7 @@ import {
   wait,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber, Op, Outcome, Task } from './context.js';
+import type { Context, Fiber, Op, Outcome } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { factoryProvider, valueProvider } from './provider-util.js';
@@ -62,17 +61,37 @@ function sleep(ms: number, s?: AbortSignal): Promise<void> {
 }
 
 describe('task() (DESIGN.md §4.5, I26)', () => {
-  it('a task is an object, not a function: calling it is a TypeError at compile time and at runtime', () => {
-    const t = task(function* (n: number) { return n; });
-    expect(typeof t).toBe('object');
-    // @ts-expect-error a Task has no call signature
-    expect(() => t(1)).toThrow(TypeError);
+  it('a task is a function whose call is a lazy op, never a bare promise (I26): outside any node it throws NoCurrentNodeError, and a task made by with() is one too', async () => {
+    let ran = 0;
+    const t = task(function* (n: number) {
+      ran++;
+      return n;
+    });
     const w = t.with({ name: 'w' });
-    // @ts-expect-error neither has a task made by with()
-    expect(() => w(1)).toThrow(TypeError);
-    const b = t.bind(1);
-    // @ts-expect-error nor one made by bind()
-    expect(() => b()).toThrow(TypeError);
+    const thrown = (f: () => unknown): string => {
+      try {
+        f();
+        return 'returned';
+      } catch (e) {
+        return e instanceof Error ? e.constructor.name : String(e);
+      }
+    };
+    const root = createRootContext();
+    const op = root.run(() => w(1)); // made through the root, run by its then
+    expect({
+      kinds: [typeof t, typeof w],
+      outside: [thrown(() => t(1)), thrown(() => w(1))],
+      op: { promise: op instanceof Promise, then: typeof op.then, ranWhenMade: ran },
+      value: await op,
+      ran,
+    }).toEqual({
+      kinds: ['function', 'function'],
+      outside: ['NoCurrentNodeError', 'NoCurrentNodeError'],
+      op: { promise: false, then: 'function', ranWhenMade: 0 },
+      value: 1,
+      ran: 1,
+    });
+    await root.close();
   });
 
   it('task(body) refuses something that is not a function', () => {
@@ -116,41 +135,40 @@ describe('task() (DESIGN.md §4.5, I26)', () => {
     await root.close();
   });
 
-  it('bind() partially applies; the bound task keeps the name and options and takes no arguments', async () => {
+  it('a call fixes the arguments: the op runs the task under its name and options, awaited through a node or forked, and with() keeps them', async () => {
     const add = task(function* (a: number, b: number) { return a + b; }, { name: 'add', interrupt: 'observe' });
-    const bound = add.bind(1, 2);
-    expectTypeOf(bound).toEqualTypeOf<Task<[], number>>();
-    expect(bound.name).toBe('add');
+    expectTypeOf<ReturnType<typeof add>>().toEqualTypeOf<Op<number>>();
+    expectTypeOf<Parameters<typeof add>>().toEqualTypeOf<[a: number, b: number]>();
     const root = createRootContext();
-    expect(await root.call(bound)).toBe(3);
+    expect(await root.run(() => add(1, 2))).toBe(3);
     expect(await root.call(add, 20, 22)).toBe(42);
     const modes = await root.call(function* () {
-      const f = bound.with({ name: 'b2' }).fork();
-      yield* join(f);
-      return [f.name, impl(f).mode];
+      const f = fork(add(1, 2));
+      const g = fork(add.with({ name: 'b2' })(3, 4));
+      return [f.name, impl(f).mode, yield* join(f), g.name, impl(g).mode, yield* join(g)];
     });
-    expect(modes).toEqual(['b2', 'observe']);
+    expect(modes).toEqual(['add', 'observe', 3, 'b2', 'observe', 7]);
     await root.close();
   });
 
-  it('t.fork() and t.call() are fork(t) and call(t): children of the current node; no current node → NoCurrentNodeError', async () => {
+  it('fork(t(…)) and t(…) make children of the current node; no current node → NoCurrentNodeError', async () => {
     const parents: unknown[] = [];
     const t = task(function* (x: number) {
       parents.push(impl(current()).parent); // the body's own node's parent
       return x;
     });
-    expect(() => t.fork(1)).toThrow(NoCurrentNodeError);
-    expect(() => t.call(1)).toThrow(NoCurrentNodeError);
+    expect(() => fork(t(1))).toThrow(NoCurrentNodeError);
+    expect(() => t(1)).toThrow(NoCurrentNodeError);
     const root = createRootContext();
     await root.call(function* () {
       const me = current();
-      const f = t.fork(7);
+      const f = fork(t(7));
       expect(impl(f).parent).toBe(me);
       expect(yield* join(f)).toBe(7);
-      expect(yield* t.call(8)).toBe(8);
+      expect(yield* t(8)).toBe(8);
       expect(parents).toHaveLength(2);
-      expect(parents[0], 't.fork').toBe(me);
-      expect(parents[1], 't.call').toBe(me);
+      expect(parents[0], 'fork(t(…))').toBe(me);
+      expect(parents[1], 't(…)').toBe(me);
     });
     await root.close();
   });
@@ -189,12 +207,12 @@ describe('start semantics (DESIGN.md §4.6, I20)', () => {
     await root.call(function* () {
       const me = current();
       let inner: Context | undefined;
-      const p = call(function* () {
+      const p = task(function* () {
         inner = current();
         t.push('body start');
         yield* wait(tick());
         return 42;
-      });
+      })();
       t.push('after call');
       expect(inner).toBeUndefined(); // nothing ran yet (D41, decision 2)
       queueMicrotask(() => t.push('a microtask queued before the yield*'));
@@ -230,8 +248,8 @@ describe('start semantics (DESIGN.md §4.6, I20)', () => {
     );
     const root = createRootContext();
     await root.call(function* () {
-      expect(yield* join(probe.fork())).toBe('done');
-      expect(yield* probe.call()).toBe('done');
+      expect(yield* join(fork(probe()))).toBe('done');
+      expect(yield* probe()).toBe('done');
     });
     expect(shapes).toHaveLength(2);
     expect(shapes[0]).toEqual(shapes[1]);
@@ -458,9 +476,9 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
                 yield* wait(go.promise);
                 own(() => t.push('handler entry released'));
                 try {
-                  yield* call(function* () {
+                  yield* task(function* () {
                     yield* never(); // only an interrupt ends it
-                  });
+                  })();
                   t.push('call returned');
                 } catch (e) {
                   const byOwner = e instanceof FiberAbortedError && e.reason instanceof OwnerInterrupt && e.reason.owner === Y;
@@ -616,11 +634,9 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
     await root.call(function* () {
       expect(
         yield* wait(rejection(
-          call(
-            task(function* () {
-              throw err;
-            }, { onFailure: handler }),
-          ),
+          task(function* () {
+            throw err;
+          }, { onFailure: handler })(),
         )),
       ).toBe(err);
     });
@@ -708,7 +724,7 @@ describe('join and result (DESIGN.md §4.5, §4.7)', () => {
     await root.call(function* () {
       const syncF = fork(() => fork(inner));
       const asyncF = fork(function* () { return fork(inner); });
-      const callErr = yield* wait(rejection(call(() => fork(inner))));
+      const callErr = yield* wait(rejection(task(() => fork(inner))()));
       const [o1, o2] = [yield* result(syncF), yield* result(asyncF)];
       expect(o1.status).toBe('defect');
       expect((o1 as { error: unknown }).error).toBeInstanceOf(FiberNotAwaitableError);
@@ -729,9 +745,9 @@ describe('all and race (DESIGN.md §4.8)', () => {
         task(function* () {
           yield* wait(tick(2));
           return 1;
-        }).bind(),
-        task(function* (s: string) { return s; }).bind('two'),
-        task(() => true).bind(),
+        }),
+        task(function* (s: string) { return s; })('two'),
+        task(() => true),
       ]);
       expectTypeOf(p).toEqualTypeOf<Op<[number, string, boolean]>>();
       return yield* p;
@@ -745,17 +761,17 @@ describe('all and race (DESIGN.md §4.8)', () => {
     const root = createRootContext();
     const a = task(function* (n: number) { return n; });
     const b = task((s: string) => s);
-    const viaRoot = root.all([a.bind(1), b.bind('x')]);
+    const viaRoot = root.run(() => root.all([a(1), b('x')])); // a task's call reads the slot: made where a node is current
     expectTypeOf(viaRoot).toEqualTypeOf<Op<[number, string]>>();
     expect(await viaRoot).toEqual([1, 'x']);
     const viaCurrent = await root.call(function* () {
-      const p = current().all([b.bind('y'), a.bind(2)]);
+      const p = current().all([b('y'), a(2)]);
       expectTypeOf(p).toEqualTypeOf<Op<[string, number]>>();
       return yield* p;
     });
     expect(viaCurrent).toEqual(['y', 2]);
     const ctx: Context = root;
-    expectTypeOf(ctx.all([a.bind(3)])).toEqualTypeOf<Op<[number]>>();
+    expectTypeOf(ctx.run(() => ctx.all([a(3)]))).toEqualTypeOf<Op<[number]>>();
     await root.close();
   });
 
@@ -768,16 +784,16 @@ describe('all and race (DESIGN.md §4.8)', () => {
         all([
           task(function* () {
             throw e1;
-          }).bind(),
-          task(function* () { return 'ok'; }).bind(),
+          }),
+          task(function* () { return 'ok'; }),
           task(function* () {
             current().abort('self');
             yield* never();
-          }).bind(),
+          }),
           task(function* () {
             yield* wait(tick());
             throw e2;
-          }).bind(),
+          }),
         ]),
       ),
     );
@@ -791,11 +807,11 @@ describe('all and race (DESIGN.md §4.8)', () => {
     const err = await rejection(
       root.call(() =>
         all([
-          task(function* () { return 1; }).bind(),
+          task(function* () { return 1; }),
           task(function* () {
             current().abort('gone');
             yield* never();
-          }).bind(),
+          }),
         ]),
       ),
     );
@@ -813,11 +829,11 @@ describe('all and race (DESIGN.md §4.8)', () => {
           own(() => t.push('slow released'));
           yield* never();
           return 'slow';
-        }).bind(),
+        }),
         task(function* () {
           yield* wait(tick());
           return 'fast';
-        }).bind(),
+        }),
       ]),
     );
     expect(v).toBe('fast');
@@ -834,11 +850,11 @@ describe('all and race (DESIGN.md §4.8)', () => {
         race([
           task(function* () {
             throw e1;
-          }).bind(),
+          }),
           task(function* () {
             yield* wait(tick());
             throw e2;
-          }).bind(),
+          }),
         ]),
       ));
       expect(failed).toBeInstanceOf(AggregateError);
@@ -848,7 +864,7 @@ describe('all and race (DESIGN.md §4.8)', () => {
           task(function* () {
             current().abort('x');
             yield* never();
-          }).bind(),
+          }),
         ]),
       ));
       expect(aborted).toBeInstanceOf(FiberAbortedError);
@@ -866,11 +882,11 @@ describe('all and race (DESIGN.md §4.8)', () => {
       const members = [
         task(function* () {
           throw e1;
-        }, link).bind(),
+        }, link),
         task(function* () {
           yield* wait(tick());
           throw e2;
-        }, { onFailure: handler }).bind(),
+        }, { onFailure: handler }),
       ];
       const fromAll = yield* wait(rejection(all(members)));
       expect(fromAll).toBeInstanceOf(AggregateError);
@@ -885,7 +901,7 @@ describe('all and race (DESIGN.md §4.8)', () => {
           task(function* () {
             yield* wait(tick());
             return 'ok';
-          }).bind(),
+          }),
         ]),
       ).toBe('ok');
     });
@@ -1063,15 +1079,15 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
       try {
         yield* wait(
           Promise.all([
-            call(function* () {
+            task(function* () {
               ran.push(current());
               yield* wait(tick());
               throw aErr;
-            }),
-            call(function* () {
+            })(),
+            task(function* () {
               ran.push(current());
               return 'b';
-            }),
+            })(),
           ]),
         ); // the structured form is yield* all([a, b]): Promise.all is the plain-async-code one
       } catch (e) {
@@ -1193,7 +1209,7 @@ describe('ported: call', () => {
       task(
         function* () {
           const a = lookup(KEY_A);
-          const b = yield* call(task(function* () { return lookup(KEY_B); }, { providers: [valueProvider(KEY_B, 'inner')] }));
+          const b = yield* task(function* () { return lookup(KEY_B); }, { providers: [valueProvider(KEY_B, 'inner')] })();
           return `${a}-${b}`;
         },
         { providers: [valueProvider(KEY_A, 'outer')] },
@@ -1207,16 +1223,16 @@ describe('ported: call', () => {
     const ctx = createRootContext();
     const order: string[] = [];
     await ctx.call(function* () {
-      const p1 = call(function* () {
+      const p1 = task(function* () {
         order.push('first ran');
         yield* wait(tick(3));
         return 'first';
-      });
+      })();
       yield* wait(tick());
-      order.push(yield* call(function* () {
+      order.push(yield* task(function* () {
         order.push('second ran');
         return 'second';
-      }));
+      })());
       order.push(yield* p1);
     });
     expect(order).toEqual(['second ran', 'second', 'first ran', 'first']);
@@ -1224,8 +1240,8 @@ describe('ported: call', () => {
   });
 
   it('throws NoCurrentNodeError when no node is current', () => {
-    expect(() => call(function* () { return 'hello'; })).toThrow(NoCurrentNodeError);
-    expect(() => call(function* () { return 'hello'; })).toThrow(/no current node/);
+    expect(() => task(function* () { return 'hello'; })()).toThrow(NoCurrentNodeError);
+    expect(() => task(function* () { return 'hello'; })()).toThrow(/no current node/);
   });
 
   it('a nested call uses the current node', async () => {
@@ -1233,15 +1249,13 @@ describe('ported: call', () => {
     const KEY = createInjectionKey<string>('test');
     const r = await ctx.call(function* () {
       const outer = current();
-      return yield* call(
-        task(
-          function* () {
-            expect(impl(current()).parent).toBe(outer);
-            return lookup(KEY);
-          },
-          { providers: [valueProvider(KEY, 'nested')] },
-        ),
-      );
+      return yield* task(
+        function* () {
+          expect(impl(current()).parent).toBe(outer);
+          return lookup(KEY);
+        },
+        { providers: [valueProvider(KEY, 'nested')] },
+      )();
     });
     expect(r).toBe('nested');
     await ctx.close();
@@ -1426,7 +1440,7 @@ describe('ported: spawn (fork with a destination, or inside a call)', () => {
     const ctx = createRootContext();
     const KEY = createInjectionKey<string>('inner');
     const r = await ctx.call(function* () {
-      const fiber = fork(function* () { return yield* call(task(function* () { return lookup(KEY); }, { providers: [valueProvider(KEY, 'from-call')] })); });
+      const fiber = fork(function* () { return yield* task(function* () { return lookup(KEY); }, { providers: [valueProvider(KEY, 'from-call')] })(); });
       return yield* join(fiber);
     });
     expect(r).toBe('from-call');
@@ -1685,7 +1699,7 @@ describe('ported: join, result, all', () => {
   it('all runs the tasks and returns a tuple', async () => {
     const ctx = createRootContext();
     const [a, b, c] = await ctx.call(
-      function* () { return yield* all([task(function* () { return 1; }).bind(), task(function* () { return 'two'; }).bind(), task(function* () { return true; }).bind()]); },
+      function* () { return yield* all([task(function* () { return 1; }), task(function* () { return 'two'; }), task(function* () { return true; })]); },
     );
     expect(a).toBe(1);
     expect(b).toBe('two');
@@ -1698,10 +1712,10 @@ describe('ported: join, result, all', () => {
     const err = await rejection(
       ctx.call(
         function* () { return yield* all([
-            task(function* () { return 'ok'; }).bind(),
+            task(function* () { return 'ok'; }),
             task(function* () {
               throw new Error('all-boom');
-            }).bind(),
+            }),
           ]); },
       ),
     );

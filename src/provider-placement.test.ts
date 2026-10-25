@@ -15,7 +15,7 @@ import { inject } from './inject.js';
 import { classProvider, factoryProvider, valueProvider } from './provider-util.js';
 import { PlacementError } from './resource.js';
 import { RequestScope, RootScope, SelfScope, createScope } from './scope.js';
-import { call, current, lookup } from './ambient.js';
+import { current, lookup } from './ambient.js';
 import { impl } from './test/util.js';
 
 const SessionScope = createScope('session');
@@ -80,10 +80,8 @@ describe('an explicit provider stores its value where it is registered, whatever
       task(
         function* () {
           const own = lookup(UnitOfWork); // the request's own, stored on the request node
-          const overridden = yield* call(
-            task(function* () { return lookup(UnitOfWork); }, { name: 'override', providers: [valueProvider(UnitOfWork, fake)] }),
-          );
-          const sibling = yield* call(task(function* () { return lookup(UnitOfWork); }, { name: 'sibling' }));
+          const overridden = yield* task(function* () { return lookup(UnitOfWork); }, { name: 'override', providers: [valueProvider(UnitOfWork, fake)] })();
+          const sibling = yield* task(function* () { return lookup(UnitOfWork); }, { name: 'sibling' })();
           return { own, overridden, sibling, again: lookup(UnitOfWork) };
         },
         { name: 'request', scopes: [RequestScope] },

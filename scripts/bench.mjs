@@ -8,7 +8,7 @@
 //
 // (a) `yield*` of a settled op: `join(f)` of a fiber that has completed, so
 //     the wait's source has settled and the body resumes in its reaction.
-// (b) `yield* call(syncTask)`: a node made, its synchronous body run, and the
+// (b) `yield* syncTask()`: a node made, its synchronous body run, and the
 //     node completed.
 // (c) `yield* sleep(0)`: a timer armed and fired (the platform clamps it to
 //     about a millisecond, so this one measures the platform).
@@ -32,7 +32,7 @@ if (!existsSync(fileURLToPath(entry))) {
   console.error('bench: dist/index.js is missing; run `pnpm build` first');
   process.exit(1);
 }
-const { createRootContext, fork, join, call, own, release, sleep, task, wait } = await import(entry.href);
+const { createRootContext, fork, join, own, release, sleep, task, wait } = await import(entry.href);
 
 const RUNS = 5;
 const scale = process.argv.includes('--quick') ? 0.1 : 1;
@@ -60,11 +60,11 @@ const cases = [
   },
   {
     id: 'b',
-    name: 'yield* call(syncTask): a node made and completed',
+    name: 'yield* syncTask(): a node made and completed',
     n: 100_000,
     body: function* (n) {
       const t0 = performance.now();
-      for (let i = 0; i < n; i++) yield* call(syncTask);
+      for (let i = 0; i < n; i++) yield* syncTask();
       return performance.now() - t0;
     },
   },
