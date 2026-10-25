@@ -31,8 +31,9 @@
 //    discarded, as a halted body's throw is).
 //
 // The driver reads the node's state, not a signal: a body that finds its node
-// applied at a `yield*` of an op that has not started (rows 4 and 5, a body
-// born delivered: decision 9) does not run it and is returned there; a started
+// applied at a `yield*` of an op that has not started (rows 4 and 5 of
+// decision 8's table, which DESIGN.md §4.2's last row merges; a body born
+// delivered: decision 9) does not run it and is returned there; a started
 // one (`wait(p)` over a promise, a lifecycle op) is subscribed and its shape
 // decides. A return at the delivery, or at such a `yield*`, is a job queued
 // under no frame, never inside `abort()` nor inside the step, so no body code
@@ -235,8 +236,9 @@ class BodyDriver {
         continue;
       }
       const op = ins.op;
-      // Rows 4 and 5, decision 9: delivered before this yield* (in its own step, born delivered, or resumed by release
-      // work), the body does not run an op that has not started; it is returned here.
+      // Decision 8's rows 4 and 5 (DESIGN.md §4.2's last row) and decision 9: delivered before this yield* (in its own
+      // step, born delivered, or resumed by release work), the body does not run an op that has not started; it is
+      // returned here.
       if (this.#halts() && !op.started) return this.#queueHalt();
       const unwind = this.#unwind?.fiber;
       if (unwind !== undefined) {

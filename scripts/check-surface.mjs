@@ -174,7 +174,7 @@ const platformExpected = new Map([
 ]);
 
 /**
- * The host APIs the browser entries may touch, beyond the ECMAScript 2022 globals (the floor, DESIGN.md §1.2): the
+ * The host APIs the browser entries may touch, beyond the ECMAScript 2022 globals (the floor, DESIGN.md §10, A2): the
  * timers and microtasks the core schedules with, the abort machinery, `DOMException` (an abort's default reason) and
  * `console` (development-mode reports), all present in every evergreen browser and in Node 22; ramme/platform adds
  * `performance` (its frame fallback). `process` is never named: development mode reads `globalThis.process?.env`.

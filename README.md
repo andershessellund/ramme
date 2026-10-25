@@ -594,8 +594,8 @@ flags, why, and where it is approximate.
 
 ## Documentation
 
-- [DESIGN.md](DESIGN.md): the model, the guarantees, and how each mechanism
-  works, including the second tier for resource and library authors (pools,
+- [DESIGN.md](DESIGN.md): the model, its rules and its guarantees,
+  including the second tier for resource and library authors (pools,
   shutdown-aware tasks, release deadlines, lifecycle events).
 - [DECISIONS.md](DECISIONS.md): why it is this way and not another way.
 

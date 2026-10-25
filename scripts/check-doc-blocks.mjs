@@ -63,10 +63,8 @@ const RETIRED = new Map([
  * block, so the examples share one database (`db`) and its types.
  */
 const ENVIRONMENT = new Map([
-  // DESIGN.md §1 and README's services: a configuration class.
+  // README's services: a configuration class.
   ['Config', 'declare class Config { readonly apiUrl: string; }'],
-  // DESIGN.md §1: a temporary file, a resource of the platform's protocol.
-  ['openTemp', 'declare function openTemp(): Promise<AsyncDisposable>;'],
   // The examples' database: a connection to own, a transaction to commit or roll back, a driver's transaction
   // callback, and the rows of the expected-failure examples.
   [
@@ -77,7 +75,7 @@ const ENVIRONMENT = new Map([
   ],
   ['Connection', 'interface Connection { query(sql: string, signal?: AbortSignal): Promise<unknown>; release(): void; }'],
   ['Transaction', 'interface Transaction { commit(): Promise<void>; rollback(): Promise<void>; }'],
-  // The unit of work's pool (DESIGN.md §2.6, README), which hands out a lease synchronously, and README's request's
+  // The unit of work's pool (README; DESIGN.md §2.6), which hands out a lease synchronously, and README's request's
   // pool, which hands one out asynchronously.
   ['DbPool', 'declare class DbPool { acquire(owner?: unknown): { readonly conn: Connection }; }'],
   ['Connections', 'declare class Connections { acquire(): Promise<AsyncDisposable & { readonly conn: Connection }>; }'],

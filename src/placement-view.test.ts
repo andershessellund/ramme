@@ -562,7 +562,7 @@ describe('captureAutoScoped', () => {
   });
 });
 
-describe('a released provided value fails loudly (I22, DESIGN.md §2.7)', () => {
+describe('a released provided value fails loudly (I22, DESIGN.md §2.7, §4.12)', () => {
   it("a cache hit whose value node completed throws NodeCompletedError", () => {
     class Svc {
       ctx: Context = inject(ContextKey);

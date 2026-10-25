@@ -15,7 +15,7 @@ extraction with one tree of nodes and tasks, and the generator runtime
 interruption its halt. D13′ is the one prime that is not a rewrite in
 place: it continues D13's surviving half, beside D13's stub.
 
-How the mechanisms work is [DESIGN.md](DESIGN.md)'s job; an entry here
+Stating the rules is [DESIGN.md](DESIGN.md)'s job; an entry here
 states the decision and points there. ramme is the extraction of the
 DI/fiber/lifecycle core of a private monorepo package (internally
 "spindle"); entries note where a choice was inherited from that lineage.
@@ -1102,56 +1102,37 @@ every `await` a `yield*`.
 
 ### D41. Bodies are generators; the runtime is a driver
 
-A body is a generator function the runtime steps, or a synchronous function
-run in one step, and every wait is a `yield*` of an **op** the driver sees.
-The **driver** runs each step (one `next`, `throw` or `return()` of the
-body's generator) with the body's frame in a synchronous module slot, runs
-each op the body yields for that body, and resumes the body in the reaction
-of the op's source. So an interruption no longer travels as a rejection: the
-driver **halts** the body by calling its generator's `return()` at the wait
-it is on, as that wait's shape says (decision 8). Its `finally` blocks run,
-and one in the body's own generator function may wait, as release work run
-to its end on the node's **unwind fiber** (U3); no `catch` sees the
-interruption, nothing is sticky, and the outcome is `aborted` by state
-(D24). The current node is the slot, and ramme has no async context, on any
-platform. Work ops are **lazy**, run by their consumer, the driver at
-`yield*` or a `then`; the lifecycle verbs stay eager. A foreign promise is
-waited for with **`wait(p)`**, which a halt lets finish, or
-`wait(p, { abandon: true })`, which it stops waiting for; a library's async
-callback is **`promised(body)`**. Plain async code reaches ramme through
-three entry points: an op with an explicit receiver (`await app.call(main)`),
-`promised`, and `listen` or `node.run` for a synchronous callback. An
-expected failure is a fourth way for a body to end, yielded (D42), and the
-platform's waits and callbacks have ramme spellings (D43). This supersedes
-D9′ (whose no-default-root half stands), D11, D13 (whose second half D13′
-continues), D39 and D40, and amends D3′. DESIGN.md §4.2, §4.5, §6, §10.
+A body is a generator function the runtime steps, every wait is a `yield*`
+of an **op** the driver sees, and an interruption no longer travels as a
+rejection: the driver **halts** the body by returning its generator at the
+wait it is on (DESIGN.md §4.2). This supersedes D9′ (whose no-default-root
+half stands), D11, D13 (whose second half D13′ continues), D39 and D40, and
+amends D3′. DESIGN.md §4.2, §4.5, §6, §10.
 
 **The decisions.** The proposal that specified this entry numbered its
 decisions, and the documents and the code cite them as "D41, decision n".
 Each, with its outcome; *decided* marks the author's decisions on the first
 draft, the rest were its recommendations, adopted.
 
-1. *What an op yields*: a private `Instruction`, never the op, so `yield op`
-   without the star is a type error (TS2769) and a run-time `TypeError`, an
-   `async function*` cannot run an op through `then`, and a `fail`'s yield is
-   told apart. Rejected: the op yields itself, as Effect's `SingleShotGen`
-   does.
-2. *When an op runs*: work ops lazily, at `yield*` or `then`; the lifecycle
-   verbs (`release`, `releaseAll`, `close`, `[Symbol.asyncDispose]`)
-   eagerly, returning an op that only waits, for C7 (`release(x)` runs `x`'s
-   release now), an early release from a factory, which cannot wait (D26),
-   and D16's promise that exists before any dispose code runs. Rejected:
-   every op eager, which keeps lending; lifecycle ops lazy too, after which
-   no synchronous code could release or close.
+1. *What an op yields*: a private `Instruction`, never the op (DESIGN.md
+   §4.2), so `yield op` without the star is a type error (TS2769) and a
+   run-time `TypeError`, an `async function*` cannot run an op through
+   `then`, and a `fail`'s yield is told apart. Rejected: the op yields
+   itself, as Effect's `SingleShotGen` does.
+2. *When an op runs*: work ops lazily, the lifecycle verbs eagerly (DESIGN.md
+   §4.2), for C7 (`release(x)` runs `x`'s release now), an early release
+   from a factory, which cannot wait (D26), and D16's promise that exists
+   before any dispose code runs. Rejected: every op eager, which keeps
+   lending; lifecycle ops lazy too, after which no synchronous code could
+   release or close.
 3. *A second consumption*: `yield*` runs a work op afresh, as a description,
-   and `then` runs it once per object, as a promise must. Rejected:
-   memoizing both (a loop spins after one sleep, a retry never retries);
-   single use (a second `await op` throws).
+   and `then` runs it once per object, as a promise must (DESIGN.md §4.2).
+   Rejected: memoizing both (a loop spins after one sleep, a retry never
+   retries); single use (a second `await op` throws).
 4. *The thenable*: a plain `PromiseLike` on a work op that knows its node;
-   the lifecycle ops stay promises. Rejected: a `Promise` subclass, eager by
-   contract.
-5. *Async bodies* (decided): refused, by the type, by a run-time
-   `TypeError` naming `function*` and by `no-async-body`; a release or a
+   the lifecycle ops stay promises (DESIGN.md §4.2). Rejected: a `Promise`
+   subclass, eager by contract.
+5. *Async bodies* (decided): refused (DESIGN.md §4.5); a release or a
    failure handler may still return a promise, a bare wait. Rejected: async
    bodies as Node-only sugar, and one deprecated release that still ran them
    (below).
@@ -1159,68 +1140,54 @@ draft, the rest were its recommendations, adopted.
    that needs `this` is a generator method or `.bind(this)`. Rejected:
    `call(this, function* () { … })`, after Effect's `gen(self, …)`, which
    cannot be told from `call(body, fnArg)` when `this` is a function.
-7. *Resumption*: in the source's reaction (S1), a microtask per wait.
-   Rejected: resuming within the step when an op completed during its start
-   (S2), which would save that microtask of a wait that costs about 200 ns
-   in all (DESIGN.md §7.1); a
-   scheduler of ramme's own (Effection's parent priority), where D22's
-   microtask start already serves. The pins assert event order, never
-   microtask counts, so S2 stays open to a later change.
+7. *Resumption*: in the source's reaction (S1), a microtask per wait
+   (DESIGN.md §4.2). Rejected: resuming within the step when an op
+   completed during its start (S2), which would save that microtask of a
+   wait that costs about 200 ns in all (DESIGN.md §7.1); a scheduler of
+   ramme's own (Effection's parent priority), where D22's microtask start
+   already serves. The pins assert event order, never microtask counts, so
+   S2 stays open to a later change.
 8. *The halt at each wait*: D39's three shapes, with `return()` in place of
-   the rejection and decided by the same predicates: returned at once
-   (`sleep`, `never`, its own `interrupted()`, a join of a fiber not
-   subscribed below it, `wait(p, { abandon: true })`, a lifecycle wait that
-   includes the body or is not below it); returned once the awaited fiber
-   has completed (`call`, `attempt`, `unshield`, the groups, a join of a
-   fiber subscribed below it), a fiber the delivery missed delivered then;
-   let finish, and returned at the next `yield*` (release work, `wait(p)`,
-   `wait((signal) => p)`); and an op not yet started, yielded after the
-   delivery, not run. Rejected: returning at once from every wait, as
-   Effection halts, which runs a `finally` around `yield* call(t)` (an
-   unlock, a rollback) while the callee still writes, and loses an
-   acquisition in flight.
+   the rejection and decided by the same predicates, and an op not yet
+   started not run (DESIGN.md §4.2's table). Rejected: returning at once
+   from every wait, as Effection halts, which runs a `finally` around
+   `yield* call(t)` (an unlock, a rollback) while the callee still writes,
+   and loses an acquisition in flight.
 9. *A body born delivered*: stepped to its first `yield*` of an op not yet
-   started and halted there without running it, since `return()` on an
+   started and halted there (DESIGN.md §4.2), since `return()` on an
    unstarted generator runs no code at all. Rejected: settling it
    unstarted, which changes D12.
-10. *`wait(p)` at a halt* (decided): `p` finishes and the body ends at its
-    next `yield*`; `{ abandon: true }` stops waiting at once; `wait((signal)
-    => p)` hands the work the signal; the name `managed` goes. Rejected:
-    stopping at once by default, as Effection's `until` does, which never
-    owns a connection being acquired and abandons a transaction callback in
-    the middle of its rollback.
-11. *What a halted `finally` addresses*: U3, every synchronous verb the
-    unwound node and every op the driver runs there the unwind fiber, a
-    release fiber of the node that the tree never delivers (its own release
-    deadline does, which reaches only its `restore` work). Rejected: the
+10. *`wait(p)` at a halt* (decided): `p` finishes, `{ abandon: true }` stops
+    waiting, `wait((signal) => p)` hands the work the signal (DESIGN.md
+    §4.2); the name `managed` goes. Rejected: stopping at once by default,
+    as Effection's `until` does, which never owns a connection being
+    acquired and abandons a transaction callback in the middle of its
+    rollback.
+11. *What a halted `finally` addresses*: U3 (DESIGN.md §4.2). Rejected: the
     two-node frame (below); U1, the node current with its ops exempt, under
     which a `call` in the `finally` is born delivered and halted.
 12. *A finally-yield whose wait includes its own node*: returned there, with
-    a development-mode warning. Rejected: throwing a `TypeError` into the
-    `finally`, which may catch it.
+    a development-mode warning (DESIGN.md §4.2). Rejected: throwing a
+    `TypeError` into the `finally`, which may catch it.
 13. *`shield`, `unshield`* (decided): kept in tier 2, for a non-cancellable
-    region on the normal path; cleanup after a halt is the body's own
-    `finally`. Rejected: deleting them, which leaves `try {} finally { … }`
-    as the only spelling of a non-cancellable region.
+    region on the normal path (DESIGN.md §4.2). Rejected: deleting them,
+    which leaves `try {} finally { … }` as the only spelling of a
+    non-cancellable region.
 14. *The async-only lint rules* (decided): `no-swallowed-interruption`,
     `no-finally-in-async`, `no-using-in-async` and `no-promise-combinators`
     deleted, not moved; `no-async-body` and `no-unused-op` added, and
-    `no-unused-outcome` extended to `yield*` and `result` (D35). Rejected: a
-    `bridge` config holding the deleted rules.
+    `no-unused-outcome` extended (D35; DESIGN.md §9). Rejected: a `bridge`
+    config holding the deleted rules.
 15. *Expected failures* (decided): yielded, typed on the task (D42).
-16. *Async code under a node* (decided): there is none; an op that knows its
-    node is thenable. Rejected: the bridge (below).
+16. *Async code under a node* (decided): there is none (DESIGN.md §6); an op
+    that knows its node is thenable. Rejected: the bridge (below).
 17. *Where an op checks its guards* (decided): at construction, which reads
-    the slot, so a free-function op made outside any frame throws
-    `NoCurrentNodeError` and one made in a factory `CreationViolationError`.
-    Rejected: pure construction, which made a module-level op legal at the
-    cost of a factory's `void call(t)` silently doing nothing and a shared
-    op's run belonging to its first awaiter.
-18. *Async context* (decided): none, on any platform; `ramme/node`,
-    `ramme/async-context` and the storage registry go, and the floor is
-    ES2022 syntax plus four runtime APIs (`Promise.withResolvers`,
-    `AbortSignal.any`, `AbortSignal.timeout`, the disposal symbols, which
-    ramme defines where they are missing): Node 22+ or an evergreen browser.
+    the slot (DESIGN.md §4.2). Rejected: pure construction, which made a
+    module-level op legal at the cost of a factory's `void call(t)` silently
+    doing nothing and a shared op's run belonging to its first awaiter.
+18. *Async context* (decided): none, on any platform (DESIGN.md §6);
+    `ramme/node`, `ramme/async-context` and the storage registry go, and the
+    floor is ES2022 syntax plus four runtime APIs (DESIGN.md §10, A2).
     Rejected: optional storage, and an ES2018 floor with shims (below).
 19. *The platform layer's placement*: the subpath `ramme/platform`, with no
     dependencies and no `node:` import (D43).
@@ -1234,25 +1201,23 @@ draft, the rest were its recommendations, adopted.
     yield* each.next(); }` (D43).
 25. *Observers*: a generic `bind(fn)`; not in the layer.
 26. *The platform lints' scope*: ramme code only (D43).
-27. *Names*: `Operation<T, E>`, what a helper returns; `Op<T, E>`, what a
-    verb returns, thenable; and an exported `Instruction` over a private
-    brand, which a library's helper names in its emitted declaration.
-    Rejected: one name, `Operation<T> & PromiseLike<T>`, for long hovers.
+27. *Names*: `Operation<T, E>`, `Op<T, E>` and an exported `Instruction`
+    over a private brand (DESIGN.md §1.3, §4.2). Rejected: one name,
+    `Operation<T> & PromiseLike<T>`, for long hovers.
 28. *An op returned by a body, a release or a handler* (decided): driven in
-    the returning frame as its own `yield*`, so `task(() => call(leaf))` and
-    `own(x, () => sleep(5))` work and a handler's returned op reports its
-    `waitsFor`. Rejected: forbidding a returned op, which needs `Release<T>`
-    narrowed.
-29. *A finally-yield in a helper* (decided): not release work; only the
-    body's own generator keeps the halt across a yield, and development mode
-    reports a lost halt. Rejected: wrapping every helper call in an op that
-    tracks the return mode, a wrapper at every call.
+    the returning frame as its own `yield*` (DESIGN.md §4.5). Rejected:
+    forbidding a returned op, which needs `Release<T>` narrowed.
+29. *A finally-yield in a helper* (decided): not release work, and
+    development mode reports a lost halt (DESIGN.md §4.2). Rejected:
+    wrapping every helper call in an op that tracks the return mode, a
+    wrapper at every call.
 30. *A library's async callback* (decided): `promised(body)`, a core verb,
-    and `ctx.promised(body)` for a module-level entry point.
+    and `ctx.promised(body)` for a module-level entry point (DESIGN.md §4.5).
 31. *`[Symbol.asyncDispose]`* (decided): the contract for foreign resources
-    and roots; D3′ amended, not reversed.
-32. *What a node's `[Symbol.asyncDispose]()` does*: abort, then wait, so
-    `await using` ends a node by interruption and `close()` drains (D3′).
+    and roots (DESIGN.md §2.7); D3′ amended, not reversed.
+32. *What a node's `[Symbol.asyncDispose]()` does*: abort, then wait
+    (DESIGN.md §2.7), so `await using` ends a node by interruption and
+    `close()` drains (D3′).
 
 **Why.** Native `await` resumes a function in a job userland cannot wrap
 (D9′), so ramme learned of a body's waits only through the promises it
@@ -1318,12 +1283,10 @@ audience needs and puts platform shims in the core.
 and `await`, there are no arrow generators, and tutorials and assistants
 default to `async`; most mistakes are compile errors (an `await` in a body
 is TS1308, a `yield*` of a promise TS2488, `for await` TS1103), and the rest
-a lint's. *`this` in bodies*: only through a generator method or
-`.bind(this)`. *The two `wait` modes*: a choice at every foreign wait between
-`wait(p)`, which a halt lets finish (a promise that never settles holds the
-halted node, which `node:stalled` reports, and code between a halted
-`wait(p)` and the next `yield*` runs), and `{ abandon: true }`, which leaves
-`p` running; the default is the opposite of Effection's. *A helper's
+a lint's. *The two `wait` modes*: a choice at every foreign wait between
+`wait(p)`, which a halt lets finish, with its hazards (DESIGN.md §4.4), and
+`{ abandon: true }`, which leaves `p` running; the default is the opposite
+of Effection's. *A helper's
 `finally` may not wait*: a `yield*` there loses the halt, and in production
 the rest of the body runs as release work; the development-mode detector is
 the guard. *Async code must enter through a node*: sprinkling ramme into
@@ -1335,12 +1298,12 @@ reach ramme only that way, and `await helper()` on a generator helper
 resolves to the generator object, which `@typescript-eslint/await-thenable`
 catches. *Unbounded work in a halted `finally`* holds every owner up to the
 root, and only its deadline stops any of it: its `restore` work, and what
-was handed the signal. *A halt cuts a normal-path `finally`*
-suspended at the delivery, so cleanup the design relies on stays an entry
-(A6). *`await using` is gone from bodies* (TS2852). *A forgotten `yield*` is
-silent missing work*, where `UnawaitedCallError` was loud, and
-`no-unused-op` sees a statement, not an op kept in a variable. *Two rules for
-ops*: work ops lazy, lifecycle ops eager. And *D40's reasons, answered*:
+was handed the signal. *A halt cuts a normal-path `finally`* suspended at
+the delivery, so cleanup the design relies on stays an entry (A6). *`await
+using` is gone from bodies* (TS2852). *A forgotten `yield*` is silent
+missing work*, where `UnawaitedCallError` was loud, and `no-unused-op` sees
+a statement, not an op kept in a variable. *Two rules for ops*: work ops
+lazy, lifecycle ops eager. And *D40's reasons, answered*:
 plain async functions are conceded; stack traces are at parity (both keep
 the chain within a task and lose it across tasks); TypeScript's inference is
 kept (`yield*` infers each step's value, and the failure union, D42);
@@ -1349,62 +1312,41 @@ library interop is conceded, to one generic wrapper per wait and a node per
 
 **Settled while implementing it.**
 
-- *D39's criteria decide the halt.* Release work is release work only under
-  a precise criterion: `release(x)` and `releaseAll()` unless their wait
-  includes the waiting node, and `close()` and `[Symbol.asyncDispose]()` only
-  of a node strictly below it; of the node itself, an ancestor or an
-  unrelated node they wait for a completion that waits for the body, so the
-  body is returned at once instead of deadlocking. A call-shaped wait is
-  marked at the delivery, and the mark delivers a fiber the delivery missed
-  (a `ctx.call` child of a node outside the delivered subtree, one below an
-  `observe` node that has not exited, one born undelivered), without which a fiber on
-  the body's own stack would be delivered only at the body's exit, which
-  waits for the fiber. A `join` or `result` is call-shaped when its fiber is
-  subscribed below the body, work the delivery stops; any other fiber is not
-  the body's to stop, and an owned `own(fork(t))` hears its interruption only
-  at its turn (I4). A body's `child()` scopes are released at their turn,
-  after the body has unwound, since its halted `finally` and its shields may
-  still use what they own (a pooled connection the rollback runs on). The
-  owner holds every shield it started (`shieldHolds`), and a shield routes
-  its final failure as a `'join'` fiber's. And an applied waiter consumes
-  nothing (D13′): the resume step of release work that resumes a halted body
-  leaves the failure with its holder, read for the waiter being resumed when
-  it resumes, so an aborted fork waiting on its live parent's `release(x)`
-  leaves the failure to the parent, and a shield waiting on its interrupted
-  body's `release(x)` consumes what it catches.
+- *D39's criteria decide the halt* (DESIGN.md §4.2's table). A `close()` or
+  `[Symbol.asyncDispose]()` of the node itself, an ancestor or an unrelated
+  node waits for a completion that waits for the body, so the body is
+  returned at once instead of deadlocking. A fiber the delivery missed is
+  delivered at the call-shaped wait, without which a fiber on the body's own
+  stack would be delivered only at the body's exit, which waits for the
+  fiber. A `join` or `result` is call-shaped when its fiber is subscribed
+  below the body, work the delivery stops; any other fiber is not the body's
+  to stop, and an owned `own(fork(t))` hears its interruption only at its
+  turn (I4). A body's `child()` scopes are released at their turn, after the
+  body has unwound, since its halted `finally` and its shields may still use
+  what they own (a pooled connection the rollback runs on).
 - *`unshield` is the hole in a shield*: `shield` and `unshield` are
-  Effect's `uninterruptibleMask` and its `restore`. The owner is found by
-  walking up from the node the hole is made on to the nearest shield's
-  release fiber and taking its parent, which is right inside a call made in
-  the shield too, where `current().parent` is the shield's release fiber. The
-  hole is a child linked to the owner's signal, and attempt-shaped, since
-  the shield's body is release work that must go on and branches on the
-  outcome. An owner already interrupted skips the hole (a linked signal
-  already aborted settles the child unstarted, sparing its plain work), and a
-  shield inside a shield, or inside a call under one, is owned by that node,
-  so the task's interruption neither cuts nor skips its holes, as Effect's
-  `restore` restores its own mask's state. Outside any shield `unshield`
-  throws a `TypeError` when it is made. **Rejected:** a `restore` callback
-  parameter on `shield`, which code in a call below the shield would have to
-  be handed; reading the owner off `current().parent`; running a hole whose
-  owner was already interrupted up to its first wait.
-- *U3, not the two-node frame* (the proposal's open question 1): in a halted
-  `finally` every synchronous verb (`current()`, `signal()`, `lookup`,
-  `own`, `release`, `releaseAll`, `fork`) addresses the node, and only the
-  ops made there run on the unwind fiber. Re-run against U3, the review probes
-  that could have refuted it do not: a throw from the halted `finally` is
-  discarded (p6); `release(tx)` and `releaseAll()` there find the body's
-  entries (p7); a failure the `finally` catches from `release`, `call` or
-  `attempt` still folds in once (p8); a second `return()` while a helper's
-  `finally` is suspended skips the rest of that block, and the body's
-  `finally` still runs and waits (p9). U3's costs stand as stated: a `fork`
-  there is born delivered, and `signal()` there has fired, so cleanup that
-  needs a deadline writes `wait((signal) => p)`, which is handed the unwind
-  fiber's.
-- *A shield in a halted `finally` stays on the node*: a release fiber is
-  never born delivered nor cancelled whatever its parent, and on the node,
-  whose interruption has come, an `unshield` in it is skipped at once. On
-  the unwind fiber it would have run, bounded only by the deadline.
+  Effect's `uninterruptibleMask` and its `restore`. The owner is the nearest
+  shield's release fiber's parent (DESIGN.md §4.2), which is right inside a
+  call made in the shield too, where `current().parent` is the shield's
+  release fiber. The hole is attempt-shaped, since the shield's body is
+  release work that must go on and branches on the outcome. An owner already
+  interrupted skips the hole, sparing its plain work, and a shield inside a
+  shield, or inside a call under one, is owned by that node, as Effect's
+  `restore` restores its own mask's state. **Rejected:** a `restore`
+  callback parameter on `shield`, which code in a call below the shield
+  would have to be handed; reading the owner off `current().parent`;
+  running a hole whose owner was already interrupted up to its first wait.
+- *U3, not the two-node frame* (the proposal's open question 1; DESIGN.md
+  §4.2). Re-run against U3, the review probes that could have refuted it do
+  not: a throw from the halted `finally` is discarded (p6); `release(tx)`
+  and `releaseAll()` there find the body's entries (p7); a failure the
+  `finally` catches from `release`, `call` or `attempt` still folds in once
+  (p8); a second `return()` while a helper's `finally` is suspended skips
+  the rest of that block, and the body's `finally` still runs and waits
+  (p9). U3's costs stand as stated (DESIGN.md §4.2, §4.4).
+- *A shield in a halted `finally` stays on the node* (DESIGN.md §4.2): on
+  the unwind fiber an `unshield` in it would have run, bounded only by the
+  deadline.
 - *`Body` is one function type with a union return*:
   `Generator<Instruction | Fail<E>, T, unknown> | Op<T, E> | T`, its last
   member `never` for a thenable and for an async iterator, which is what
@@ -1414,126 +1356,80 @@ library interop is conceded, to one generic wrapper per wait and a node per
   `Operation<T>` member, makes every iterable value (a string, an array, a
   `Map`) infer as an operation, and refuses those plain bodies. A guard on
   the generator member against `return op` was tried and dropped: it refuses
-  every generic body. The cost: `Operation<T>` annotates only a helper that
-  is `yield*`ed; a helper a body returns (`task(() => helper(x))`), and a
-  body that needs an annotation, is typed `Generator<Instruction, T,
-  unknown>`.
-- *`wait(op)` is the op's own wait*, and returns the op itself: a ramme op
-  handed to `wait` keeps its shape, its `waitsFor` and its holder's report of
-  its failure, so `wait(db.close())` in a halted `finally` reports a failure
-  once and `wait(current().close())` is decision 12's return, as the op
-  yielded bare is. Only a user promise's own rejection is a foreign failure,
-  and only that is recorded on the unwind fiber.
-- *Decision 12 covers a join of what only the unwound node's release ends*:
-  a `join` or `result`, in the halted `finally`, of an owned fork of the
-  node or an ancestor whose body has not ended waits for a release that waits
-  for that `finally`, so the generator is returned there with the warning
-  instead of deadlocking.
-- *`promised` follows the body's consumption*: the callback's failure is
-  consumed by its promise unless the captured node is a halted body, so a
-  failed ROLLBACK in a halted callback surfaces from the node, as under
-  `yield* call(body)`. A call during a creation is refused (I16).
+  every generic body. The cost: `Operation<T>` annotates only a `yield*`ed
+  helper (DESIGN.md §1.3).
+- *`wait(op)` is the op's own wait*, and returns the op itself (DESIGN.md
+  §4.2): `wait(db.close())` in a halted `finally` reports a failure once.
+- *Decision 12 covers a join of what only the unwound node's release ends*
+  (DESIGN.md §4.2): such a `join` waits for a release that waits for that
+  `finally`, and would deadlock.
+- *`promised` follows the body's consumption* (DESIGN.md §4.5), so a failed
+  ROLLBACK in a halted callback surfaces from the node, as under
+  `yield* call(body)`.
 - *The lost-halt detector* (decision 29): a lost halt gives the body the
   halt's sentinel as the helper's `yield*` value, so dev mode's sentinel
   reports any use of it, besides a finish with another value; a body that
   only returns the sentinel unused goes unreported.
-- *The halt at a `yield*` of an op not yet started is a job.* A body that
-  finds its node applied at such a `yield*` (row 4, a body born delivered,
-  one resumed by release work) is returned in a microtask queued under no
-  frame, as the delivery's own halt is, never inside the step: a fork made
-  just before it starts first, so a born-delivered child runs its first
-  step (decision 9) before its parent's release would cancel it unstarted.
+- *The halt at a `yield*` of an op not yet started is a job* (DESIGN.md
+  §4.2), so a born-delivered child runs its first step (decision 9) before
+  its parent's release would cancel it unstarted.
 - *Lifecycle ops are `Op<void> & Promise<void>`* in the types: `.catch` on
   `close()` stays valid, and a work op is a plain `PromiseLike`. Each
   consumer of either, `yield*` or `then`, is resumed in the source's
   reaction, so `await op` resumes one job after the source settles, as a
   managed promise's did; the D16 watch is told after the consumer resumed.
-- *A failure handler still detaches*: its driver reports each op's
-  `waitsFor` to the run before running it, so a generator handler, or one
-  returning an op (decision 28), that waits for its parent's completion
-  holds nothing; a promise a handler returns is a bare wait, which cannot.
-- *The group bodies of `all`, `race` and `settle` are generators* waiting on
-  never-rejecting sources a halt returns at once. A member fork that throws
-  (an invalid option) now does so before any member started, so the group's
-  error comes alone where an async group body had let a synchronously
-  failing member run first.
-- *`run(fn)` returns an op as a value*: a work op runs nothing until it is
-  consumed, so it is not refused as a promise would be; a generator still is.
-- *Decision 12 covers an `observe` child forked in a halted `finally`*,
-  which (a `fork` there addresses the node, whose delivery has passed, and an
-  `observe` child is not born delivered) is
-  delivered only by the node's release, which waits for that `finally`, so a
-  `join` or `result` of it there waited forever: `node:stalled` reported the
-  node and its unwind fiber, never the child, and nothing bounded the wait
-  (`root.abort()` stops at the node, delivered already). The predicate now
-  holds for a fiber reached from the node along subscription edges through
-  no delivered node, whose body has not ended, so the generator is returned
-  with the warning and the release then delivers the child; as for an owned
-  fork, it does not ask whether the child would end by itself. Lazy ops did
-  not change it: `fork` is eager. A `call` of one there runs on the unwind
-  fiber and is release work, but one that waits for its own interruption
-  never ends: the tree never delivers the unwind fiber, its deadline does
-  not reach an `observe` child, and only aborting the child ends it
-  (DESIGN.md §4.4).
-- *A thenable reads the step that made its op.* A `then` cannot see its
-  consumer: the slot is synchronous, and `await` or `Promise.all` calls
-  `then` a job later, under no frame. So a work op and a lifecycle op record
-  the node of the step that made them (the unwind fiber in a halted
-  `finally`), and their `then` consumes the failure it delivers unless that
-  node is a halted body when the work settles, whose `wait(p)` discards the
-  rejection; the record then stays with its holder and surfaces at
-  completion, as `promised`'s does. Without it, `yield* wait(Promise.all
-  ([call(a), call(b)]))` in a body halted while it waited lost `a`'s failure,
-  which the eager ops' managed promise had kept. The receiver's state was the other
-  candidate and loses D39's two cases: an aborted fork whose `Promise.all`
-  waits for its live parent's `release(x)` (the receiver is live, so the
-  failure was consumed into the fork's discarded throw), and a shield that
-  catches its interrupted body's `release(x)` through `Promise.all` (the
-  receiver is halted, so a failure the shield handled surfaced again).
-- *U3 holds for `then` too*: an op made through the node in its halted
-  `finally` records the unwind fiber, and its `then` runs it there, as the
-  driver runs the `finally`'s ops, so `Promise.all([call(a), call(b)])` or an
-  async helper awaiting an op made there runs its cleanups as release work,
-  not born delivered and halted at their first `yield*` (with their
-  `FiberAbortedError` recorded as a release failure). An op made before the
-  halt and run through `then` after it runs on the node, as a `promised`
-  callback made before the halt does.
-- *A `then` during a creation is refused*, as a `promised` callback is: a
-  `then` that would run a work op inside a factory rejects with
-  `CreationViolationError` and runs nothing (I16), and the op stays unrun; a
-  `then` of one already running only subscribes.
-- *`wait(fn)` keeps the `waitsFor` of the op `fn` returns*: it is known only
-  once `fn` ran, so the driver tests it after running the op, before it
-  subscribes (decision 12's return, with the warning), and a failure
-  handler's driver reports it then (its detach).
-- *A stored `join` or `result` checks its receiver when it runs*, as a
-  stored `call` did through its attach: run after the receiver completed, it
-  throws `NodeCompletedError`, where it rethrew a failure the completion had
-  surfaced and emitted `join:enter` on a node after its `node:complete`.
-- *A source whose `then` throws* (a `Promise` subclass overriding it, which
-  `wait(p)` keeps as its source) fails the wait at the `yield*` (I10): the
-  driver answers it as the source's rejection, where it escaped the step as
-  an uncaught exception and left the node running.
+- *A failure handler still detaches* (DESIGN.md §4.7): its driver reports
+  each op's `waitsFor` to the run before running it.
+- *The group bodies of `all`, `race` and `settle` are generators* (DESIGN.md
+  §4.8): a member fork that throws now does so before any member started,
+  where an async group body had let a synchronously failing member run first.
+- *`run(fn)` returns an op as a value* (DESIGN.md §4.11); a generator is
+  still refused.
+- *Decision 12 covers an `observe` child forked in a halted `finally`*
+  (DESIGN.md §4.2): a `fork` there addresses the node, whose delivery has
+  passed, and an `observe` child is not born delivered, so only the node's
+  release, which waits for that `finally`, delivered it, and a `join` or
+  `result` of it there waited forever: `node:stalled` reported the node and
+  its unwind fiber, never the child, and nothing bounded the wait. Lazy ops
+  did not change it: `fork` is eager.
+- *A thenable reads the step that made its op* (DESIGN.md §4.2). A `then`
+  cannot see its consumer: the slot is synchronous, and `await` or
+  `Promise.all` calls `then` a job later, under no frame. Without it,
+  `yield* wait(Promise.all([call(a), call(b)]))` in a body halted while it
+  waited lost `a`'s failure, which the eager ops' managed promise had kept.
+  The receiver's state was the other candidate and loses D39's two cases:
+  an aborted fork whose `Promise.all` waits for its live parent's
+  `release(x)` (the receiver is live, so the failure was consumed into the
+  fork's discarded throw), and a shield that catches its interrupted body's
+  `release(x)` through `Promise.all` (the receiver is halted, so a failure
+  the shield handled surfaced again).
+- *U3 holds for `then` too* (DESIGN.md §4.2), so cleanups an op made there
+  runs through its `then` are release work, not born delivered and halted
+  at their first `yield*` (with their `FiberAbortedError` recorded as a
+  release failure).
+- *A `then` during a creation is refused*, as a `promised` callback is
+  (DESIGN.md §3.5, I16).
+- *`wait(fn)` keeps the `waitsFor` of the op `fn` returns* (DESIGN.md
+  §4.2): it is known only once `fn` ran, so the driver tests it then, before
+  it subscribes, and a failure handler's driver reports it then.
+- *A stored `join` or `result` checks its receiver when it runs* (DESIGN.md
+  §4.2), as a stored `call` did through its attach, where it rethrew a
+  failure the completion had surfaced and emitted `join:enter` on a node
+  after its `node:complete`.
+- *A source whose `then` throws* fails the wait at the `yield*` (DESIGN.md
+  §4.2, I10): the driver answers it as the source's rejection, where it
+  escaped the step as an uncaught exception and left the node running.
 
 ### D42. An expected failure is yielded: `fail`, `E` on tasks, a four-way `Outcome`
 
 An expected failure, one a caller is meant to branch on, is a fourth way for
 a body to end, beside `return v`, `throw e` and the halt: `yield* fail(e)`
-ends the body at once with the outcome `failure(e)`. The failure is yielded,
-as a `Fail<E>` under a brand disjoint from `Instruction`'s, so it enters the
-generator's yield union, and `task` reads `E` off that union: `Task<A, T,
-E>`, `Fiber<T, E>` and `Outcome<T, E>` carry it, inferred, never declared,
-`never` for a body with no `fail`. Propagation is `yield*`: `yield* call(t)`,
-a helper's `yield*`, `join`, `shield` and `wait(op)` re-yield a callee's
-expected failure into the caller's union; `all` and `race` fail on it as on
-a defect and re-yield the union of their members'; `attempt`, `result`,
-`unshield` and `settle` return `Outcome<T, E>`, four-way: `success(T) |
-failure(E) | defect(unknown) | aborted`. A thrown error is a `defect`. `gen`
-is retired, since a body is the scope; `$` stays in `ramme/result` as the
-bridge from a `Result` you hold (`yield* $(r)` is the value, or ends the
-body with `failure(r.error)`), `fromThrowing` as the fence, and the
-data-only `Result` as the interchange type, `Outcome` minus `defect` and
-`aborted`. This is D41's decision 15, option (b′).
+ends the body at once with the outcome `failure(e)`, its `E` inferred onto
+the task, and the outcome is four-way (DESIGN.md §4.12, §4.13). `gen` is
+retired, since a body is the scope; `$` stays in `ramme/result` as the
+bridge from a `Result` you hold, `fromThrowing` as the fence, and the
+data-only `Result` as the interchange type. This is D41's decision 15,
+option (b′).
 
 **Why.** Under D38 a failure a caller branches on was a returned `Result`,
 typed at its function and untyped at the task boundary, where `gen` and `$`
@@ -1549,21 +1445,13 @@ failure as data and a throw as a defect, becomes a status, so `attempt` on a
 body that failed as designed no longer reports what a crash reports.
 
 **An unjoined fork's expected failure is routed as a defect is** (D14,
-D23): held for a joiner, whose `join` re-yields it; handed to a handler,
-whose `error` parameter is `E | unknown`, which is `unknown`, and which reads
-what it got from `fiber.outcome.status`; to a pool's `onFailure` for a
-pooled fiber. With `'link'` it aborts the parent at once and surfaces from
-the parent's completion as the parent's **`defect`**, carrying `e`: a parent
-cannot be given a typed failure it did not declare. Its `E` is what its own
-body yields, and a linked child is never `yield*`ed, so a `failure(e)` on
-the parent would carry a type its signature does not have. The same holds
-for every failure that surfaces from a completion unconsumed (an unjoined
-`'join'` fork's, a `settle` member's that an interrupted caller never
-received): the holder reports it as its defect. A release failure likewise
-amends an outcome always to a `defect` (D24): `success`, bodiless or
-`aborted` plus release failures `R` → `defect(R)`; `failure(e)` or
-`defect(d)` plus release failures → `defect(SuppressedError(R, e or d))`,
-release-primary.
+D23; DESIGN.md §4.7), and with `'link'` it surfaces from the parent's
+completion as the parent's **`defect`**: a parent cannot be given a typed
+failure it did not declare. Its `E` is what its own body yields, and a
+linked child is never `yield*`ed, so a `failure(e)` on the parent would
+carry a type its signature does not have. The same holds for every failure
+that surfaces from a completion unconsumed, and a release failure likewise
+amends an outcome always to a `defect` (D24; DESIGN.md §4.12).
 
 **Rejected.** (a) `gen` as the explicit scope with the task boundary untyped
 (D38 as it stood): Effect's syntax without its main type benefit, and a
@@ -1595,29 +1483,15 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
 
 **Settled while implementing it.**
 
-- *The `finally` a fail runs is release work.* The driver returns the
-  generator as at a halt, with the halt's sentinel and an unwind fiber (U3):
-  its `finally` blocks may wait, a delivery does not halt them, and the
-  outcome is fixed at the fail, so a delivery while they run changes
-  nothing. What fails there (a failed wait, a second `fail`, a throw) is a
-  release failure, reported beside the fail: `defect(SuppressedError(release,
-  e))`. A halted `finally` discards a throw (D24) because an interruption may
-  have caused it; nothing interrupted a fail's, so its throw is reported, as
-  JavaScript reports a `finally`'s throw over the `return` it replaces. A
-  `fail` in a halted `finally` is a release failure, and the generator is
-  returned again there, which ends that `finally`. A delivered body not yet
-  halted (resumed by release work) is halted at its `fail`, the error
-  discarded as its throw would be. Dev mode's lost-halt report covers a lost
-  return after a fail, naming it.
+- *The `finally` a fail runs is release work* (DESIGN.md §4.13). A halted
+  `finally` discards a throw (D24) because an interruption may have caused
+  it; nothing interrupted a fail's, so its throw is reported, as JavaScript
+  reports a `finally`'s throw over the `return` it replaces.
 - *`all`, and `race` with no success, re-yield a lone expected failure, and
-  report two or more as a defect*, the proposal having read "fail fast … as on
-  a defect" as D28's behaviour, which waits for every member and reports
-  every failure. One `Fail` can be yielded, so it is re-yielded only when it
-  is the one failure; with two failures or more, or a defect among them, the
-  `AggregateError` of every real failure, expected ones included, in task
-  order, is thrown, as D28 throws it for defects. Re-yielding the first and
-  consuming the others would drop them, which D28's *Why* rejects; a body
-  that branches on each member's typed failure uses `settle`.
+  report two or more as a defect* (DESIGN.md §4.8), the proposal having
+  read "fail fast … as on a defect" as D28's behaviour, which waits for
+  every member and reports every failure. Re-yielding the first and
+  consuming the others would drop them, which D28's *Why* rejects.
 - *The run-time `Fail` is a record under a registered symbol*
   (`Symbol.for('ramme.fail')`), not an instance of a private class:
   `ramme/result` imports nothing at run time (DESIGN.md §7), so `$` makes the
@@ -1654,9 +1528,7 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
 - *A release takes any `E`*: `Release<T>` may return `Operation<void,
   unknown>`, since a release's expected failure, its own or a callee's
   re-yielded, is its owner's release failure, a defect there.
-- *`$` takes a `Result`, not a promise of one*: a generator helper over a
-  value; a promise is waited for first, `yield* $(yield* wait(p))`, and
-  anything that is no `Result` is a `TypeError` at the `yield*`.
+- *`$` takes a `Result`, not a promise of one* (DESIGN.md §4.13).
 - *A failure handler's generator that fails* (its own `fail`, or a callee's
   re-yielded) is returned, its `finally` blocks run as the rest of the
   handler, and the handler rejects with the error, a handler exception.
@@ -1664,38 +1536,29 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   included, which the handler's `yield*` has consumed) or a throw, is
   reported beside it, as a body's release work is: the handler rejects with
   `SuppressedError(later, e)`, so neither error is lost.
-- *`fail` reads no node*: it only makes the record, so it may be made
-  anywhere, a module-level `const notFound = fail(e)` included, and each
-  `yield*` yields afresh, as an op's description does (D41, decision 3).
-  What it returns is an instance of a private class, recognized as decision
-  28 recognizes an op, so a release, a failure handler or a body that
-  returns `fail(e)` rather than yielding it is driven as its `yield*`, and
-  fails as one that yields it: `own(v, () => fail(e))` is the owner's
-  release failure, never a dropped value.
+- *`fail` reads no node* (DESIGN.md §4.13): it only makes the record, so a
+  module-level `const notFound = fail(e)` is fine, and each `yield*` yields
+  afresh, as an op's description does (D41, decision 3). What it returns is
+  an instance of a private class, recognized as decision 28 recognizes an op
+  (DESIGN.md §4.5): `own(v, () => fail(e))` is the owner's release failure,
+  never a dropped value.
 
 ### D43. The platform layer: every wait and every callback has a ramme spelling
 
 Every platform primitive that waits or calls back has a ramme spelling, in
 the subpath `ramme/platform`: a **wait is an op**, a **callback re-enters its
 node**, an **async iteration is `each`**, and a **lint refuses the bare
-form**. Four primitives make the layer (D41, decisions 19 to 26):
-`yield* fetch(input, init)`, the global's `fetch` as a `wait` handed the
-body's signal, so a halt aborts the request; `listen(target, type, handler,
-opts?)`, which runs a synchronous handler inside the registering node, as
-`node.run` does, and removes it at the node's delivery through the native
-`{ signal }` and at any other end through an entry the node owns;
-`yield* nextFrame()`, `requestAnimationFrame` as a wait whose frame a halt
-cancels; and `for (const x of yield* each(source)) { …; yield* each.next();
-}`, whose source a halt or an early exit returns as release work. The layer
-is built on the public core alone and imports nothing from Node, so the
-browser is a target with no entry of its own (D41, decision 18). The lints,
-each message naming the replacement: `no-bare-listener` and `no-bare-fetch`
-(fixed by importing `ramme/platform`'s `fetch`) in ramme code only (decision
-26), a generator function or a class that uses ramme for the first, a
-generator function of a file that imports ramme for the second;
-`no-bare-async-iteration` in any file that imports ramme, its top level
-included, and inside any generator function; and `no-timers`, extended to
-`requestAnimationFrame`, in every file, as before. DESIGN.md §4.9, §9.
+form**. Four primitives make the layer (D41, decisions 19 to 26), `fetch`,
+`listen`, `nextFrame` and `each` (DESIGN.md §4.9). The layer is built on the
+public core alone and imports nothing from Node, so the browser is a target
+with no entry of its own (D41, decision 18). The lints, each message naming
+the replacement: `no-bare-listener` and `no-bare-fetch` (fixed by importing
+`ramme/platform`'s `fetch`) in ramme code only (decision 26), a generator
+function or a class that uses ramme for the first, a generator function of a
+file that imports ramme for the second; `no-bare-async-iteration` in any
+file that imports ramme, its top level included, and inside any generator
+function; and `no-timers`, extended to `requestAnimationFrame`, in every
+file, as before. DESIGN.md §4.9, §9.
 
 **Why.** Waiting is where interruption attaches: a halt stops only a wait the
 driver sees, so a bare `fetch` holds the halted body's node for the whole
@@ -1747,72 +1610,49 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   nothing else to do, since a synchronous `next()` cannot wait, and serving
   the item again would spin synchronously. The source is returned there.
   `each.next()` twice in a pass reads on, as Effection's does.
-- *`each` closes through an entry*: the loop is an entry the node owns, and
-  the loop's iterator's `return()` (a `break`, a `return`, a throw, a `fail`,
-  the halt) releases it early, an eager release that calls the source's
-  `return()` at once, as release work; nothing is waited for inside the
-  iterator's own `return()` (decision 29): the node waits for the release,
-  and completes after it. A read the halt interrupts is abandoned
-  (`wait(…, { abandon: true })`): the halt does not wait for the next item,
-  which an idle stream may never send, and the release returns the source.
-  A failed read ends the iteration and, as in `for await`, is never followed
-  by `return()`; neither is exhaustion.
+- *`each` closes through an entry* (DESIGN.md §4.9). A read the halt
+  interrupts is abandoned (`wait(…, { abandon: true })`): the halt does not
+  wait for the next item, which an idle stream may never send.
 - *A `listen` handler's throw aborts the node and is its listener entry's
-  release failure*, so the node ends `defect(e)`, as decision 21's `'link'`
-  route ends it, with the abort synchronous and the error kept even when the
-  node was delivered already; a `'link'` fork carrying the error would start
-  a microtask later and, born delivered, lose it. A handler that ends its own
-  registration before it throws (`close()`, `abort()`, `releaseAll()`, its
-  `opts.signal`) runs the entry's release while it is on the stack: that
-  release waits for the handler to return and fails with its throw, as the
-  core's `holdEntry` holds a failure handler's entry (I11). `listen` refuses
-  an `async` function as it refuses a generator function (the specification
+  release failure* (DESIGN.md §4.9), as decision 21's `'link'` route ends
+  it, with the abort synchronous and the error kept even when the node was
+  delivered already; a `'link'` fork carrying the error would start a
+  microtask later and, born delivered, lose it. A handler that ends its own
+  registration first fails that release with its throw, as the core's
+  `holdEntry` holds a failure handler's entry (I11). `listen` refuses an
+  `async` function as it refuses a generator function (the specification
   names the latter): neither is a synchronous handler.
 - *Only the handler's own throw is routed*: an event dispatched during a
   creation (a factory that emits on a shared bus, or aborts a signal someone
-  listens to) is refused by `node.run`'s guard before the handler runs (I16),
-  and that `CreationViolationError` is thrown to the dispatcher, as a bare
-  listener's `node.run` would throw it, so the creation fails, never the
-  registering node, which the dispatch has nothing to do with. Dropping the
-  event instead would hide the factory's impurity.
-- *No handler runs after the node's delivery*: the wrapper drops an event that
-  reaches it once the node's signal (or `opts.signal`) has fired, since the
+  listens to) fails the creation, never the registering node (DESIGN.md
+  §4.9), which the dispatch has nothing to do with. Dropping the event
+  instead would hide the factory's impurity.
+- *No handler runs after the node's delivery* (DESIGN.md §4.9), since the
   node's signal fires its own listeners before the dependent signal handed
   as `{ signal }`, and an emitter calls a listener removed during the same
-  `emit`; a target that ignores `signal` (ws's `WebSocket` reads `once` only)
-  is removed at that signal's `abort`, as an emitter is. Each `listen` is its
-  own registration, as an emitter's `on` is: the platform never sees the
-  handler, only its wrapper, so `addEventListener`'s deduplication of a
-  `(type, callback, capture)` does not apply, and a second registration of
-  the same handler on another node must not vanish with the first.
+  `emit`. Each `listen` is its own registration because the platform never
+  sees the handler, only its wrapper, and a second registration of the same
+  handler on another node must not vanish with the first.
 - *`listen` passes `AbortSignal.any([node.signal, opts.signal])` even with no
   `opts.signal`*: the platform keeps what `{ signal }` registers on that
   signal after the listener is removed (Node a listener, the DOM an abort
-  algorithm), so a dependent signal keeps the node's own clean. `opts.signal`
-  and `once` release the entry early; a node already delivered (a halted
-  `finally`, a fired `opts.signal`) registers nothing. `listen` returns
-  nothing: `opts.signal` is the early removal.
-- *`fetch`'s signal is the one `wait` hands it*: the body's `signal()`, and in
-  a halted `finally` the unwind fiber's release deadline, so cleanup can make
-  a request; the specification's literal `signal()` has fired there. It is
-  combined with the caller's own: `init.signal`, and a `Request` input's
-  signal, which the init's would otherwise replace (the Fetch standard's
-  `Request(input, init)`); for a `Request` input the init also carries its
-  `referrer` and `referrerPolicy`, which a non-empty init resets. So the lint's
-  fix keeps `fetch(new Request(u, { signal: AbortSignal.timeout(n) }))` a
-  request that times out. The guards of `fetch`, `nextFrame` and `listen` name
-  the primitive, not the core verb under it (`wait`, `current`).
+  algorithm), so a dependent signal keeps the node's own clean. `listen`
+  returns nothing: `opts.signal` is the early removal.
+- *`fetch`'s signal is the one `wait` hands it* (DESIGN.md §4.9), so cleanup
+  in a halted `finally` can make a request; the specification's literal
+  `signal()` has fired there. Combined with a `Request` input's own signal,
+  it keeps the lint's fix of `fetch(new Request(u, { signal:
+  AbortSignal.timeout(n) }))` a request that times out. The guards of
+  `fetch`, `nextFrame` and `listen` name the primitive, not the core verb
+  under it (`wait`, `current`).
 - *`nextFrame` in an `observe` body*: built on the public `wait`, the frame is
   cancelled when the body's signal fires, and a body no halt returns has the
   wait rejected with the reason, as a `fetch` is; the core's `sleep` instead
   runs its full duration (D34), which needs an internal canceller this layer
   does not import.
-- *The browser check is static and dependency-free*: no module the two
-  entries reach imports a Node module, and none reads a global beyond
-  ES2022's but `queueMicrotask`, `setTimeout`, `clearTimeout`,
-  `AbortController`, `AbortSignal`, `DOMException` and `console` (the last two
-  are the core's: an abort's default reason, development-mode reports), and,
-  in `ramme/platform`, `performance`. `check:surface` makes it on dist/, and
+- *The browser check is static and dependency-free* (DESIGN.md §7;
+  `DOMException` and `console` are the core's: an abort's default reason,
+  development-mode reports). `check:surface` makes it on dist/, and
   src/test/browser-smoke.test.ts on src/ compiled for the test run (vitest's
   global setup, src/test/build.ts), so `pnpm test` needs no build and never
   reads a stale one; the smoke test also runs a body of the core's verbs and

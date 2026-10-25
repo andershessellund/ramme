@@ -494,7 +494,7 @@ function isComplete(n: NodeImpl): boolean {
 
 function assertLive(hit: CacheEntry, key: InjectionKey<unknown>): void {
   if (hit.valueNode !== undefined && hit.valueNode.state === 'complete')
-    throw new NodeCompletedError(`${keyName(key)} has been released`); // I22: escape fails loudly (DESIGN.md §2.7)
+    throw new NodeCompletedError(`${keyName(key)} has been released`); // I22: escape fails loudly (DESIGN.md §2.5, §4.12)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,7 +591,7 @@ export function resolveFrom<T>(
         ((hit.pinned && R !== C) || (hit.deps !== undefined && hit.deps.size > 0 && shadowBetween(R, C, hit.deps)))
       )
         return createAutoHoisted(R, key, hit.direct, via); // the re-run must inject the same keys itself (D7)
-      assertLive(hit, key); // I22: R's own answer was released (DESIGN.md §2.7)
+      assertLive(hit, key); // I22: R's own answer was released (DESIGN.md §2.5, §4.12)
       markDecided(R, C, hit.deps === undefined ? [key] : [key, ...hit.deps]);
       return hitResult(hit, C);
     }
