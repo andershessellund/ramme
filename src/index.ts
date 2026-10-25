@@ -4,7 +4,7 @@
 // names every public type; the list is exactly context.ts's exports.
 //
 // The first import defines the disposal symbols where a runtime lacks them,
-// the floor's one guard (PROPOSAL.md §2.1); it exports nothing.
+// the floor's one guard (DESIGN.md §1.2; D41, decision 18); it exports nothing.
 import './disposal-symbols.js';
 export type {
   NodeState,

@@ -1,9 +1,9 @@
 // fiber.test.ts — tasks and fibers, plus the ports of the pre-redesign fiber
-// suite: tasks (DESIGN.md §4.5, I27), start semantics (DESIGN.md §4.6, I20),
+// suite: tasks (DESIGN.md §4.5, I26), start semantics (DESIGN.md §4.6, I20),
 // failure destinations (DESIGN.md §4.7, D14), join/result, the `then` trap
 // (DESIGN.md §4.5), all/race (DESIGN.md §4.8), interruption from a body
 // (DESIGN.md §4.1–§4.4), the top-level call (DESIGN.md §4.2) and the
-// op guarantees the free functions inherit (D13, D41).
+// op guarantees the free functions inherit (D13′, D41).
 //
 // Everything here uses the free functions of ambient.ts (law 2); the method
 // form appears only where a node that is not current is named on purpose
@@ -61,7 +61,7 @@ function sleep(ms: number, s?: AbortSignal): Promise<void> {
   });
 }
 
-describe('task() (DESIGN.md §4.5, I27)', () => {
+describe('task() (DESIGN.md §4.5, I26)', () => {
   it('a task is an object, not a function: calling it is a TypeError at compile time and at runtime', () => {
     const t = task(function* (n: number) { return n; });
     expect(typeof t).toBe('object');
@@ -932,7 +932,7 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
     await root.close();
   });
 
-  it('wait(p, { abandon: true }) passes a value or a rejection through, returns a delivered body at once, and plain code between a halted wait(p) and the next yield* still runs (DESIGN.md §4.14)', async () => {
+  it('wait(p, { abandon: true }) passes a value or a rejection through, returns a delivered body at once, and plain code between a halted wait(p) and the next yield* still runs (DESIGN.md §4.2)', async () => {
     const t = trace();
     const err = new Error('p failed');
     const root = createRootContext();
@@ -1052,7 +1052,7 @@ describe('interruption seen from a body (DESIGN.md §4.1–§4.4)', () => {
     expect(appRef?.outcome?.status).toBe('aborted');
   });
 
-  it("Promise.all([call(a), call(b)]) runs each op through its then, as a child of the body's node: concurrently, nothing lent; a's failure rejects the all, consumed by a's then, and is caught; never an unhandled rejection (D13, D41 §4.1)", async () => {
+  it("Promise.all([call(a), call(b)]) runs each op through its then, as a child of the body's node: concurrently, nothing lent; a's failure rejects the all, consumed by a's then, and is caught; never an unhandled rejection (D13′; D41, decision 4)", async () => {
     const aErr = new Error('a failed');
     const root = createRootContext();
     let caught: unknown;

@@ -60,6 +60,8 @@
     "check:package": "publint --strict && attw --pack . --profile esm-only && pnpm check:surface",
     "check:surface": "tsc -p scripts/tsconfig.surface.json && node scripts/check-surface.mjs",
     "check:plugin": "pnpm -C packages/eslint-plugin-ramme run check",
+    "check:docs": "pnpm build && node scripts/check-docs.mjs && node scripts/check-doc-blocks.mjs",
+    "bench": "pnpm build && node scripts/bench.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepack": "pnpm build"
   },

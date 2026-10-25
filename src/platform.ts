@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The `ramme/platform` subpath (DESIGN.md §4.15, D43; PROPOSAL.md §5): the
+// The `ramme/platform` subpath (DESIGN.md §4.9, D43; D41, decisions 19–26): the
 // platform's waits and callbacks, spelled in ramme.
 //
 // The rule DESIGN carries: **every platform primitive that waits or calls back
@@ -361,7 +361,8 @@ export function nextFrame(): Op<number> {
 /**
  * One `for (const x of yield* each(source))` loop: the source's iterator, its last read, whether the loop body has
  * been handed that item, and how the iteration ended. It is the entry `each` owns on the node (decision 29: the
- * source's `return()` is release work the driver's node waits for, never run by an iterator's own `return()`).
+ * loop iterator's own `return()` releases it, an eager release that calls the source's `return()` at once as release
+ * work; nothing waits inside that `return()`, and the driver's node waits for the release).
  */
 class EachLoop<T> {
   #last: IteratorResult<T> | undefined = undefined;

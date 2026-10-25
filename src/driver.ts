@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The driver (DESIGN.md §4.14, D41): steps a body's generator.
+// The driver (DESIGN.md §4.2, D41): steps a body's generator.
 //
 // A body that returns a generator object, or an op (decision 28), is driven:
 // each step is one `next(v)`, `throw(e)` or `return()` on its iterator, run
@@ -15,7 +15,7 @@
 // the op's resume step consumes it. The body's own interruption is never
 // thrown in: the driver **halts** the body, calling its generator's
 // `return(HALT)`, at the wait the delivery finds it on, as that wait's shape
-// says (PROPOSAL.md §2.3, decision 8):
+// says (DESIGN.md §4.2; D41, decision 8):
 //
 // 1. `abandon` (`sleep`, `never`, its own `interrupted()`, a join of a fiber
 //    not subscribed below it, `wait(p, { abandon: true })`, a lifecycle op
@@ -86,7 +86,7 @@ const HALT: unique symbol = Symbol('ramme.halt');
  * Dev mode's sentinel for one halt (decision 29). After a lost halt the helper's `yield*` gives the body the sentinel
  * as its value, so any use of it (reading a property, converting it, calling it, iterating it) calls `report`, which
  * reports the lost halt once. The driver tests it by identity only, so a kept halt never touches it. A function
- * target, so a call is a use too; `report` holds the body's description, never the node (A2).
+ * target, so a call is a use too; `report` holds the body's description, never the node (A1).
  */
 function lostHaltSentinel(report: () => void): object {
   return new Proxy(() => {}, {
@@ -175,7 +175,7 @@ function yieldFail(error: unknown): Resume {
 interface Waiting {
   readonly sub: Sub;
   readonly run: Run;
-  /** Call-shaped and delivered: returned when the source settles, unresumed (PROPOSAL.md §2.3, row 2). */
+  /** Call-shaped and delivered: returned when the source settles, unresumed (DESIGN.md §4.2, the halt table's row 2). */
   marked: boolean;
   hook: (() => void) | undefined;
 }
@@ -295,7 +295,7 @@ class BodyDriver {
     }
   }
 
-  /** The node's delivery (fire() pass 2b), or a wait made after it: the wait's shape decides (PROPOSAL.md §2.3). Runs no body code. */
+  /** The node's delivery (fire() pass 2b), or a wait made after it: the wait's shape decides (DESIGN.md §4.2). Runs no body code. */
   #onDelivery(w: Waiting): void {
     w.hook = undefined; // fire() cleared the set
     if (this.#waiting !== w) return;
@@ -318,7 +318,7 @@ class BodyDriver {
     }
     if (w.marked) {
       // Row 2: the awaited fiber has completed; the resume step does not run, so nothing is consumed and the fiber's
-      // failure surfaces from its holder (D13).
+      // failure surfaces from its holder (D13′).
       w.sub.finish();
       return this.#halt();
     }
@@ -410,7 +410,7 @@ class BodyDriver {
 
 /**
  * Dev mode's report of a lost halt (decision 29), or of a lost fail's return (D42), once per halt or fail; it holds the
- * body's description, never its node (A2).
+ * body's description, never its node (A1).
  */
 function lostHaltReport(body: string, cause: 'halt' | 'fail'): () => void {
   let reported = false;
@@ -434,7 +434,7 @@ export function driveBody(node: NodeImpl, it: Driven, frame: Frame): void {
 }
 
 /**
- * Drive a failure handler's generator in its frame (DESIGN.md §4.7, §4.14): nothing halts it, each op it yields runs
+ * Drive a failure handler's generator in its frame (DESIGN.md §4.7, §4.2): nothing halts it, each op it yields runs
  * for no awaiter (its failures consumed on resume, a sleep its full duration) after being reported to `run`, so a
  * wait for the parent's completion holds nothing. The first step runs now. The promise settles when the generator
  * ends, rejected with its throw; the parent holds it as a returned promise. A `Fail` (its own `yield* fail(e)`, or a

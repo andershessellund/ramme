@@ -470,7 +470,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
+describe('the halt (DESIGN.md §4.2, D39, D41)', () => {
   it('a body suspended on join(f) of a fiber not below it is halted at once: no catch runs, its finally does, and its node releases after the body has unwound', async () => {
     const t = trace();
     const app = createRootContext();
@@ -526,7 +526,7 @@ describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
     await app.close();
   });
 
-  it('a stored, unyielded join runs nothing while the body waits on wait(p); yielded after the delivery, it is not started, and the body is returned there (D13, D41)', async () => {
+  it('a stored, unyielded join runs nothing while the body waits on wait(p); yielded after the delivery, it is not started, and the body is returned there (D13′, D41)', async () => {
     const t = trace();
     const app = createRootContext();
     const f = spawn(app, function* () {
@@ -553,7 +553,7 @@ describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
     await app.close();
   });
 
-  describe('Promise combinators over ops, pinned with a real node (DESIGN.md §4.14)', () => {
+  describe('Promise combinators over ops, pinned with a real node (DESIGN.md §4.2)', () => {
     it("Promise.allSettled([join(f1), join(f2)]) runs both joins through their then, which nothing halts: f1 failed, the owner aborted while f2 runs, and both outcomes reach the body, f1's failure as its rejection and f2's abort as FiberAbortedError", async () => {
       const app = createRootContext();
       let B!: NodeImpl;
@@ -617,7 +617,7 @@ describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
       await app.close();
     });
 
-    it('yield* wait(Promise.all([call(a), a foreign promise rejected by the signal])): the call runs through its then as a child of the body; the rejection after the halt returns the body, no catch runs, and the node completes after its call child (DESIGN.md §4.14)', async () => {
+    it('yield* wait(Promise.all([call(a), a foreign promise rejected by the signal])): the call runs through its then as a child of the body; the rejection after the halt returns the body, no catch runs, and the node completes after its call child (DESIGN.md §4.2)', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const t = trace();
       const app = createRootContext();

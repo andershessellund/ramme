@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The one ambient mechanism (DESIGN.md §6, §4.14, law 3; D41 decision 18).
+// The one ambient mechanism (DESIGN.md §6, §4.2, law 3; D41 decision 18).
 //
 // The current node is a `Frame` in a synchronous module slot. `runInFrame`
 // sets it for the duration of a synchronous `fn` and restores the previous
@@ -20,14 +20,14 @@ export interface Frame {
   /** Body frame: the fiber, release node, or the node `run` entered. Creation frame: `undefined`. */
   readonly node: NodeImpl | undefined;
   /**
-   * Set only while a factory, constructor or default factory runs (A5: synchronous). Once `creation.ended` it
+   * Set only while a factory, constructor or default factory runs (A4: synchronous). Once `creation.ended` it
    * reads as no frame (DESIGN.md §3.5).
    */
   readonly creation: CreationState | undefined;
   /**
-   * @internal Set only on the frame a halted generator body's `finally` is stepped in (U3, DESIGN.md §4.14): the
+   * @internal Set only on the frame a halted generator body's `finally` is stepped in (U3, DESIGN.md §4.2): the
    * body's unwind fiber, with the body's node as `node`. Every synchronous verb still addresses `node`; the ops the
-   * body runs there run on the unwind fiber, which no delivery reaches.
+   * body runs there run on the unwind fiber, which the tree never delivers (only its release deadline does).
    */
   readonly unwind?: NodeImpl;
 }

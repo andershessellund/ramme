@@ -1,4 +1,4 @@
-// `for await` in ramme code (D43; PROPOSAL.md §5.2, decision 24). A body is a
+// `for await` in ramme code (D43; D41, decision 24). A body is a
 // generator function, where `for await` is a syntax error (TS1103); written in
 // an async callback or helper instead, the loop's waits are invisible to
 // ramme: a halt cannot stop it, the current node is gone after its first

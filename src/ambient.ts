@@ -22,7 +22,7 @@
 // Outside any node every one of them throws `NoCurrentNodeError`, whose
 // message names the cause (no async context) and the three entry points.
 //
-// Every waiting verb returns an `Op` (DESIGN.md §4.14): `yield*` it in a body.
+// Every waiting verb returns an `Op` (DESIGN.md §4.2): `yield*` it in a body.
 // A work op reads the slot when it is made (decision 17), so its receiver and
 // guards are fixed then, and runs only when it is consumed (decision 2). In a
 // halted generator body's `finally` the synchronous verbs still address the
@@ -57,7 +57,7 @@ import { CreationViolationError, NoCurrentNodeError } from './resource.js';
 /**
  * @internal The current node for a free function: a body frame's node, or the value node of a creation
  * frame, materialised on first use (DESIGN.md §3.3). Throws `NoCurrentNodeError` outside any node, naming the
- * cause and the three entry points of plain async code (DESIGN.md §6; D41 §4).
+ * cause and the three entry points of plain async code (DESIGN.md §6; D41, decision 16).
  */
 export function requireCurrent(op: string): NodeImpl {
   const f = currentFrame();
@@ -150,7 +150,7 @@ export function fork<T, A extends unknown[], Y extends Yields = never, E = never
  * Run `t` in a new child of the current node and wait for it: `yield* call(t, …)` is its value, or re-yields its
  * expected failure into this body, which ends with it (D42); its defect is thrown at the `yield*`. Lazy: the child is
  * made, and its body starts synchronously, when the op is yielded (D22); an op nobody yields runs nothing
- * (DESIGN.md §4.14).
+ * (DESIGN.md §4.2).
  */
 export function call<T, A extends unknown[], Y extends Yields = never, E = never>(
   t: Task<A, T, E> | BodyOf<T, A, Y>,
@@ -204,7 +204,7 @@ export function settle<const T extends readonly AnyTask[]>(tasks: T, opts?: Node
 }
 
 /**
- * A non-cancellable region (D39, D41 decision 13, DESIGN.md §4.14): run `t` in a release fiber of the current node
+ * A non-cancellable region (D39, D41 decision 13, DESIGN.md §4.2): run `t` in a release fiber of the current node
  * and wait for it. Its `signal()` is the release deadline (`releaseTimeoutMs`), `own` attaches to it and `lookup`
  * resolves through the current node, and a halt lets it finish (release work): the body is returned at its next
  * `yield*` after it (`yield* shield(function* () { yield* call(charge); yield* call(record); })`). Cleanup after a
@@ -249,18 +249,18 @@ export function child(opts?: NodeOptions): Context {
   return requireCurrent('child').child(opts);
 }
 
-// --- waiting; the yielding body's halt decides (DESIGN.md §4.14) -------------------------
+// --- waiting; the yielding body's halt decides (DESIGN.md §4.2) -------------------------
 
 /**
  * The fiber's value; its expected failure re-yielded into this body (D42), its defect thrown. A delivered `freeze` or
  * `restore` body waiting on it is halted once the fiber has completed when it is subscribed below the body, at once for
- * any other fiber, such as an owned one (DESIGN.md §4.14).
+ * any other fiber, such as an owned one (DESIGN.md §4.2).
  */
 export function join<T, E = never>(fiber: Fiber<T, E>): Op<T, E> {
   return requireBodyShaped('join').join(fiber);
 }
 
-/** The fiber's four-way outcome, never its failure propagated. A delivered body waiting on it is halted when `join` would be (DESIGN.md §4.14). */
+/** The fiber's four-way outcome, never its failure propagated. A delivered body waiting on it is halted when `join` would be (DESIGN.md §4.2). */
 export function result<T, E = never>(fiber: Fiber<T, E>): Op<Outcome<T, E>> {
   return requireBodyShaped('result').result(fiber);
 }
@@ -281,7 +281,7 @@ export function never(): Op<never> {
 /**
  * A wait of `ms` milliseconds, a number in [0, 2^31 − 1] (`RangeError` when made). The timer is armed when the op is
  * yielded; a delivered `freeze` or `restore` body waiting on it is halted and its timer cleared; an `observe` body, a
- * release and a failure handler wait the full `ms` (DESIGN.md §4.14, D34). Make it where it is yielded: at module
+ * release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34). Make it where it is yielded: at module
  * level there is no current node.
  */
 export function sleep(ms: number): Op<void> {
@@ -289,7 +289,7 @@ export function sleep(ms: number): Op<void> {
 }
 
 /**
- * Wait for a foreign promise in a body (DESIGN.md §4.14, D41 decision 10): `yield* wait(p)`. A halted body's `wait(p)`
+ * Wait for a foreign promise in a body (DESIGN.md §4.2, D41 decision 10): `yield* wait(p)`. A halted body's `wait(p)`
  * lets `p` finish: the body is resumed with its value and returned at its next `yield*`, so
  * `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of `p` then ends
  * the body there and is discarded, as a halted body's throw is (in its halted `finally` it is a release failure). With
@@ -307,7 +307,7 @@ export function wait<T>(promise: PromiseLike<T> | ((signal: AbortSignal) => Prom
 }
 
 /**
- * A library's async callback written as a body (DESIGN.md §4.14, D41 decision 30), one of the three entry points of
+ * A library's async callback written as a body (DESIGN.md §4.5, D41 decision 30), one of the three entry points of
  * plain async code: `db.transaction(promised(function* (tx) { … }))`. It captures the current node now; each call of
  * the returned function runs `t` as a call-shaped child of that node, started synchronously, and returns a real
  * promise: the value, the child's failure (consumed,

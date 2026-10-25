@@ -172,7 +172,7 @@ describe('the slot (DESIGN.md §6, D41 decision 18)', () => {
   });
 });
 
-describe('the floor’s one guard (PROPOSAL.md §2.1, D41 decision 18)', () => {
+describe('the floor’s one guard (DESIGN.md §1.2; D41, decision 18)', () => {
   it('defines Symbol.dispose and Symbol.asyncDispose as the registered symbols where a runtime lacks them, and leaves present ones alone', () => {
     const bare: { dispose?: symbol; asyncDispose?: symbol } = {};
     defineDisposalSymbols(bare);

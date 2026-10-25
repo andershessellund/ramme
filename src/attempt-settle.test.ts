@@ -1,6 +1,6 @@
 // attempt-settle.test.ts — outcomes as values (DESIGN.md §4.5, §4.8, §4.12, D31). `attempt` is `call`
 // with `result`'s resume step: lazy, its `yield*` starts the child synchronously (D22, D41), resumes with the
-// child's outcome and consumes its failure on resume (D13); an interrupted `freeze` or `restore` caller is
+// child's outcome and consumes its failure on resume (D13′); an interrupted `freeze` or `restore` caller is
 // halted on it once the child has completed (D39, D41), never resumed, so `aborted` describes the child,
 // except that a `restore` child also hears an `observe` caller's interruption, or an `observe` ancestor's that
 // a `freeze` caller below it does not, and hands it back as `aborted`. `settle` is `all` resolving with
@@ -235,7 +235,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it('an interrupted caller consumes nothing: an observe child that fails after the caller was delivered surfaces from the caller, which is halted, never handed it as a value (D13, D39)', async () => {
+  it('an interrupted caller consumes nothing: an observe child that fails after the caller was delivered surfaces from the caller, which is halted, never handed it as a value (D13′, D39)', async () => {
     const root = createRootContext();
     const err = new Error('late observe failure');
     let P!: NodeImpl;
@@ -552,7 +552,7 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it("an interrupted caller is halted on settle as on all, never resumed, and a member's failure, never delivered, surfaces from the caller (D13, D39)", async () => {
+  it("an interrupted caller is halted on settle as on all, never resumed, and a member's failure, never delivered, surfaces from the caller (D13′, D39)", async () => {
     const t = trace();
     const err = new Error('early member failure');
     const root = createRootContext();

@@ -1,5 +1,5 @@
 // invariants.test.ts — one named test per invariant of DESIGN.md §10
-// (I1–I27). Each test pins the invariant end to end in ramme's idiom (law 2);
+// (I1–I26; I10 has two). Each test pins the invariant end to end in ramme's idiom (law 2);
 // the edge cases live in the per-module suites the comments name. The
 // candidate scenarios for the probes the review left without a scenario (see
 // probes.test.ts) are here too:
@@ -66,7 +66,7 @@ async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
 
 /**
  * What `fn` throws, or 'ok'. An op it returns is dropped, not consumed: a work op runs nothing then, and a
- * lifecycle op's sources never reject (D13), so a dropped one is never an unhandled rejection (I10).
+ * lifecycle op's sources never reject (D13′), so a dropped one is never an unhandled rejection (I10).
  */
 function attempt(fn: () => unknown): unknown {
   try {
@@ -422,7 +422,7 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I9 marked before heard: the whole subscribed subtree is marked before any abort listener runs (G4)', async () => {
+  it('I9 marked before heard: every node a delivery reaches is marked before any abort listener runs (G4)', async () => {
     const root = createRootContext();
     const seen: boolean[] = [];
     let a: Context | undefined;
@@ -977,7 +977,7 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I26 (gone with lending, D41 decision 2): a work op made and not yet yielded runs nothing, so nothing is lent: while one is made, every body-shaped operation works on the node, and the op runs at its yield*', async () => {
+  it('I10, continued (D41 decision 2): a work op made and not yet yielded runs nothing: while one is made, every body-shaped operation works on the node, and the op runs at its yield*', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const seen: Record<string, unknown> = {};
@@ -1030,7 +1030,7 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I27 fibers are not awaitable and tasks are not callable', async () => {
+  it('I26 fibers are not awaitable and tasks are not callable', async () => {
     const root = createRootContext();
     const tk = task(function* (n: number) { return n * 2; });
     // @ts-expect-error a Task has no call signature

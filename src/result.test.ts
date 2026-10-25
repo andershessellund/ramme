@@ -434,7 +434,7 @@ describe('$: a Result unwrapped in a body (DESIGN.md §4.13, D42)', () => {
   });
 });
 
-describe('fromThrowing over ramme work (DESIGN.md §4.13, §4.14)', () => {
+describe('fromThrowing over ramme work (DESIGN.md §4.13, §4.2)', () => {
   it('over an op, an expected failure and a defect are alike a failure of the Result: the op’s then rejects with the error (D42)', async () => {
     const app = createRootContext();
     const expected = new UserNotFound('7');
@@ -452,7 +452,7 @@ describe('fromThrowing over ramme work (DESIGN.md §4.13, §4.14)', () => {
   });
 
   // fromThrowing's promise form is an async function whose `await` calls an op's `then` a job after fromThrowing is
-  // called, which runs the op (DESIGN.md §4.13, §4.14): stored, it has consumed the failure, where a stored op runs
+  // called, which runs the op (DESIGN.md §4.13, §4.2): stored, it has consumed the failure, where a stored op runs
   // nothing until it is consumed.
   it('(6) hazard (DESIGN.md §4.4): a stored fromThrowing(join(f)) consumes f’s failure at once, and an interruption elsewhere loses it; a stored join(f) keeps it', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

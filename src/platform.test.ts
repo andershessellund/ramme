@@ -1,4 +1,4 @@
-// platform.test.ts — `ramme/platform` (src/platform.ts; DESIGN.md §4.15, D43) beyond the stage-4 pins
+// platform.test.ts — `ramme/platform` (src/platform.ts; DESIGN.md §4.9, D43) beyond the stage-4 pins
 // (stage4-pin.test.ts): what each primitive does at the edges the pins leave open.
 //
 // - `fetch` in a halted `finally` is handed the unwind fiber's release deadline, so cleanup can still make a request;

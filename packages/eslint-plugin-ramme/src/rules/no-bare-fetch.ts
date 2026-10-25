@@ -1,4 +1,4 @@
-// The platform's `fetch` in a ramme body (D43; PROPOSAL.md §5.3, decisions 20
+// The platform's `fetch` in a ramme body (D43; D41, decisions 20
 // and 26). A bare `fetch(url)` is a promise the driver cannot see: waited for
 // with `yield* wait(fetch(url))`, a halt lets it finish, so the body's node is
 // held for the whole request, and nothing aborts it. `fetch` from

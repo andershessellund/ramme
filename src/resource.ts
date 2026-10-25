@@ -37,7 +37,7 @@ export class AlreadyOwnedError extends Error {
 }
 
 
-/** `await fiber`: fibers are not awaitable; use `join(f)` or `result(f)` (I27). */
+/** `await fiber`: fibers are not awaitable; use `join(f)` or `result(f)` (I26). */
 export class FiberNotAwaitableError extends Error {
   override name = 'FiberNotAwaitableError';
 }
@@ -111,7 +111,7 @@ function label(node: Context): string {
 }
 
 // ---------------------------------------------------------------------------
-// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (A3).
+// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (A2).
 // ---------------------------------------------------------------------------
 
 export type SuppressedErrorLike = Error & { error: unknown; suppressed: unknown };
@@ -145,7 +145,7 @@ export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, mess
  * - `target[Symbol.dispose]` is a function → `() => target[Symbol.dispose]()`
  * - `target` is a function → `target` (the defer overload)
  *
- * What the function returns is the release fiber's body result (DESIGN.md §2.4, §4.14): a generator object or an op
+ * What the function returns is the release fiber's body result (DESIGN.md §2.4, §4.5): a generator object or an op
  * is driven in the release fiber; a promise (a foreign `[Symbol.asyncDispose]()`, an `async` release) is waited for
  * as a bare wait, and the release fiber is current only until its first `await`; anything else is done.
  */

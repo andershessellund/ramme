@@ -12,7 +12,7 @@
 //   default, or — auto-hoisted — at the deepest dependency. An `aliasProvider`
 //   is a redirect: the walk resolves its target from the walk's base instead and
 //   caches nothing under the alias key (D36).
-// - Creation runs synchronously (A5) under a creation frame. The value's node
+// - Creation runs synchronously (A4) under a creation frame. The value's node
 //   is created on demand: pending until placement for an auto-hoisted value,
 //   live on the storage context's provided stack for a declared placement
 //   (DESIGN.md §3.3). A failed creation releases what the node owns, with the
@@ -320,7 +320,7 @@ function runCreation<R>(cs: CreationState, produce: () => R): R {
   try {
     let value: R;
     try {
-      // Factories are synchronous (A5): the frame is gone when produce returns, and a continuation the
+      // Factories are synchronous (A4): the frame is gone when produce returns, and a continuation the
       // factory scheduled that runs later sees no frame (DESIGN.md §3.5).
       value = runInFrame({ node: undefined, creation: cs }, produce);
     } finally {

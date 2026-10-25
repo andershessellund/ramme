@@ -11,7 +11,7 @@
 // - construction and delivery (DESIGN.md §4.1): two-pass delivery marks the
 //   whole subscribed subtree before any listener runs (I9), then fires signals
 //   and tells each suspended body's driver, which halts it as its wait's shape
-//   says (DESIGN.md §4.14);
+//   says (DESIGN.md §4.2);
 // - body start, body exit and the release loop (DESIGN.md §2.4): the outcome
 //   is fixed at settling (DESIGN.md §4.12), subscribers are interrupted, the
 //   shields the body started are waited for, then the explicit stack and the
@@ -23,16 +23,16 @@
 // - completion (DESIGN.md §4.12): release and unconsumed errors amend the
 //   outcome once, to a `defect`; the final failure (an expected `failure` or a
 //   `defect`, D42) is routed to its destination (DESIGN.md §4.7);
-// - waiting (DESIGN.md §4.5, §2.7, §4.14): every waiting verb returns an op,
+// - waiting (DESIGN.md §4.5, §2.7, §4.2): every waiting verb returns an op,
 //   whose run is a source, a resume step that is the only place a failure is
-//   consumed (D13), and its shape at a halt; the work verbs' ops are lazy, the
+//   consumed (D13′), and its shape at a halt; the work verbs' ops are lazy, the
 //   lifecycle verbs' eager;
 // - tasks, attempt, all/race/settle (DESIGN.md §4.5, §4.8), creation hooks
 //   (DESIGN.md §4.6, §3.3, §3.4), pools' node side (DESIGN.md §4.10),
 //   get/own/run/runSync (DESIGN.md §4.11, §2.6), events (DESIGN.md §5).
 // ---------------------------------------------------------------------------
 
-import './disposal-symbols.js'; // before the class below takes Symbol.asyncDispose as a method key (PROPOSAL.md §2.1)
+import './disposal-symbols.js'; // before the class below takes Symbol.asyncDispose as a method key (the floor, D41 decision 18)
 import { getKeyDescription } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type {
@@ -123,7 +123,7 @@ const GENERATOR_PROTOTYPE: object = Object.getPrototypeOf((function* () {}).prot
 const ASYNC_GENERATOR_PROTOTYPE: object = Object.getPrototypeOf((async function* () {}).prototype as object) as object;
 
 /**
- * What a body returned that the driver steps (DESIGN.md §4.14, D41): a generator object, or a ramme op or a `fail(e)`,
+ * What a body returned that the driver steps (DESIGN.md §4.5, D41): a generator object, or a ramme op or a `fail(e)`,
  * driven as the body's own `yield*` of it (decision 28, D42), so a release or a handler that returns `fail(e)` fails as
  * one that yields it does. The op and the fail are recognized by what they are, never by `Symbol.iterator`, since a
  * body may return an array or a string. Never call it on a node: a fiber's `then` getter throws.
@@ -153,7 +153,7 @@ function dev(): boolean {
 const outsideFrames = runDetached;
 
 /**
- * Mark a promise ramme received but hands to nobody as handled (I10), outside every frame (A2): `onRejected`
+ * Mark a promise ramme received but hands to nobody as handled (I10), outside every frame (A1): `onRejected`
  * is all that ever sees its rejection. A native promise is handled through `Promise.prototype.then`, never a
  * subclass's override. An op is skipped: its `then` would run it (decision 28), and an op nobody consumes runs
  * nothing, so it can never be an unhandled rejection. Never throws.
@@ -285,8 +285,8 @@ function failed(o: Outcome<unknown>): o is { readonly status: 'failure' | 'defec
 }
 
 /**
- * `join` semantics; runs as a `deliver` step (D13): only for a consumer that is actually resumed. `consume` false: a
- * halted body resumed by release work (D39, A.3), or any wait of an unwind fiber (U3, DESIGN.md §4.14), which throws
+ * `join` semantics; runs as a `deliver` step (D13′): only for a consumer that is actually resumed. `consume` false: a
+ * halted body resumed by release work (D39, A.3), or any wait of an unwind fiber (U3, DESIGN.md §4.2), which throws
  * the failure and leaves it to the holder's completion. An expected failure is thrown as `Expected`, which the waiting
  * body re-yields as its own `Fail` and a `then` rejects with (D42); `propagate` false throws its error itself, for a
  * wait whose type carries no `E` (a fiber's `[Symbol.asyncDispose]()`). A defect is thrown as it is.
@@ -301,9 +301,9 @@ function take<T>(f: NodeImpl, consume = true, propagate = true): T {
 }
 
 /**
- * The resume step of `result(f)` and `attempt` (D13): `join:leave` on the awaiter, then `f`'s outcome as a value;
+ * The resume step of `result(f)` and `attempt` (D13′): `join:leave` on the awaiter, then `f`'s outcome as a value;
  * a failure it delivers is consumed. A halted awaiter never runs it, so it consumes nothing (D39), nor does an
- * awaiter that consumes nothing (an unwind fiber, DESIGN.md §4.14): the outcome is a value and the record stays.
+ * awaiter that consumes nothing (an unwind fiber, DESIGN.md §4.2): the outcome is a value and the record stays.
  */
 function outcomeStep<T, E>(f: NodeImpl, awaiter: NodeImpl): Deliver<void, Outcome<T, E>> {
   return (_, applied) => {
@@ -325,7 +325,7 @@ function asJoinMember(t: unknown): TaskLike {
 }
 
 /**
- * A group body's wait (DESIGN.md §4.8, PROPOSAL.md §2.5): over a source that never rejects, returned at once by a
+ * A group body's wait (DESIGN.md §4.8): over a source that never rejects, returned at once by a
  * halt, so an interrupted group consumes nothing and its members' failures stay with their holder.
  */
 function settledOp<S>(source: Promise<S>): Op<S> {
@@ -362,7 +362,7 @@ function groupFailure(fibers: readonly NodeImpl[], message: (failures: number) =
 /**
  * The members a `settle` group has forked so far, in task order: none when the group was aborted before its body ran
  * (DESIGN.md §4.6), and fewer than its tasks when a member's fork threw (an invalid option on its task). One list per
- * group node, so each run of the op has its own (decision 3); it goes with the node (A2).
+ * group node, so each run of the op has its own (decision 3); it goes with the node (A1).
  */
 const settleMembers = new WeakMap<NodeImpl, NodeImpl[]>();
 
@@ -407,7 +407,7 @@ function completionOf(n: NodeImpl): WaitsFor {
 }
 
 /**
- * D41 decision 12 (DESIGN.md §4.14): from `p`, a halted body's unwind fiber, a wait for fiber `f` never ends when `f`'s
+ * D41 decision 12 (DESIGN.md §4.2): from `p`, a halted body's unwind fiber, a wait for fiber `f` never ends when `f`'s
  * body has not ended (once it has, `f` completes on its own), no delivery reaches it, and only a release that waits for
  * this unwind ends it. Walking up from
  * `f`: reaching the body's node along subscription edges, its halt delivered `f`, which ends on its own, or, when no
@@ -448,7 +448,7 @@ function strictlyBelow(n: NodeImpl): (awaiter: NodeImpl) => boolean {
   return (awaiter) => n !== awaiter && isAncestorOrSelf(awaiter, n);
 }
 
-/** The shape of a lifecycle op's wait (PROPOSAL.md §2.3): release work when `isReleaseWork(awaiter)`, else returned at once. */
+/** The shape of a lifecycle op's wait (DESIGN.md §4.2): release work when `isReleaseWork(awaiter)`, else returned at once. */
 function releaseShape(isReleaseWork: (awaiter: NodeImpl) => boolean): (awaiter: NodeImpl) => HaltShape {
   return (awaiter) => (isReleaseWork(awaiter) ? 'release' : 'abandon');
 }
@@ -591,7 +591,7 @@ function deliveredOnSubscriptionPath(parent: NodeImpl): NodeImpl | undefined {
  * Pass 2 of a delivery, in collection order (top-down): every signal fires
  * before any body's driver hears it or any node settles (I9), then each
  * suspended body's driver is told (its halt queued as a job, or, call-shaped,
- * marked to return the body when the awaited fiber completes; DESIGN.md §4.14)
+ * marked to return the body when the awaited fiber completes; DESIGN.md §4.2)
  * and bodiless nodes exit, except one held by a body that unwinds from this
  * delivery, which its parent's release loop releases (`heldByUnwindingBody`).
  * A started body is never settled here: it unwinds, and its node completes
@@ -643,7 +643,10 @@ export class NodeImpl implements Context {
   // --- identity ---
   readonly id: number;
   readonly kind: NodeKind;
-  /** opts.name; fibers default to the task name; release nodes `release:<entryName>`. */
+  /**
+   * opts.name; fibers default to the task name; release nodes `release:<entryName>`, a shield `shield:<taskName>`, an
+   * unwind fiber `unwind:<nodeName>`.
+   */
   readonly name: string | undefined;
 
   // --- tree ---
@@ -660,7 +663,7 @@ export class NodeImpl implements Context {
 
   // --- the three bits (DESIGN.md §2.2) and options ---
   readonly hasBody: boolean;
-  /** Nulled at completion, so nothing of the body is retained (A2). */
+  /** Nulled at completion, so nothing of the body is retained (A1). */
   body: BodyInfo | undefined;
   /** Flipped to false by owner.own(node). */
   subscribed: boolean;
@@ -696,7 +699,7 @@ export class NodeImpl implements Context {
   abortReason: unknown = undefined;
   /** For interrupted(); created lazily; resolved when the delivery fires. */
   deliveredResolvers: PromiseWithResolvers<unknown> | undefined = undefined;
-  /** The halt hook of the driver of this node's body while it waits (DESIGN.md §4.14); run and cleared by fire(). */
+  /** The halt hook of the driver of this node's body while it waits (DESIGN.md §4.2); run and cleared by fire(). */
   readonly onApplied = new Set<() => void>();
   stallTimer: ReturnType<typeof setTimeout> | undefined = undefined;
   timeoutTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -732,7 +735,7 @@ export class NodeImpl implements Context {
    */
   isShield = false;
   /**
-   * An unwind fiber (U3, DESIGN.md §4.14): the release fiber a halted generator body's `finally` runs its ops on. Its
+   * An unwind fiber (U3, DESIGN.md §4.2): the release fiber a halted generator body's `finally` runs its ops on. Its
    * waits consume nothing (managed.ts `consumesNothing`), and the failures it carries are its owner's release failures.
    */
   unwinding = false;
@@ -754,7 +757,7 @@ export class NodeImpl implements Context {
   /**
    * A `settle` group only (DESIGN.md §4.8, D31): the node that holds its member fibers' failures instead of the
    * group, its parent. They wait there for the caller's resume step, which consumes them as values; an interrupted
-   * caller is rejected and consumes nothing, and they surface from that node's completion (D13, I11). The group's
+   * caller is rejected and consumes nothing, and they surface from that node's completion (D13′, I11). The group's
    * outcome stays its own.
    */
   memberFailuresTo: NodeImpl | undefined = undefined;
@@ -963,7 +966,7 @@ export class NodeImpl implements Context {
 
   /**
    * Fibers and release nodes: run the body under this node's frame; settles synchronously for a synchronous body. What
-   * the body returned decides how it goes on (DESIGN.md §4.14): an op, a `fail(e)` (D42) or a generator object is driven, stepped in this
+   * the body returned decides how it goes on (DESIGN.md §4.5): an op, a `fail(e)` (D42) or a generator object is driven, stepped in this
    * node's frame up to its first `yield*` now; a thenable is refused with a `TypeError` naming `function*` (D41,
    * decision 5), except as an entry's release or an unwind fiber's body, where it is waited for as a bare wait (a
    * foreign `[Symbol.asyncDispose]()`, an `async` release); anything else is the value.
@@ -1041,7 +1044,7 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * A driven body ended (DESIGN.md §4.14): its generator returned or threw, after its halt's unwind if it was halted.
+   * A driven body ended (DESIGN.md §4.2): its generator returned or threw, after its halt's unwind if it was halted.
    * A returned fiber is refused as a synchronous body's is (DESIGN.md §4.5), so its `then` trap is never reached.
    */
   exitDrivenBody(r: DriverExit): void {
@@ -1054,9 +1057,10 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * U3 (DESIGN.md §4.14, D41 decision 11): the unwind fiber of this halted generator body. A release fiber of this node
-   * (kind `release`, `observe`, on no stack, its signal the release deadline), as a shield's is, of its own variant: no
-   * delivery reaches it, so the ops a halted `finally` runs on it are never born delivered nor cancelled; its awaits
+   * U3 (DESIGN.md §4.2, D41 decision 11): the unwind fiber of this halted generator body. A release fiber of this node
+   * (kind `release`, `observe`, on no stack, its signal the release deadline), as a shield's is, of its own variant: the
+   * tree never delivers it, so the ops a halted `finally` runs on it are never born delivered nor cancelled by the
+   * node's interruption (only the deadline delivers it, which, `observe`, halts only its `restore` children); its awaits
    * consume nothing; and its body is a promise that `done()` resolves when the generator has ended, so its completion
    * carries only the failures of its children and of the waits it recorded, which `finishCompletion` hands to this node
    * as release failures. This node holds it beside its shields, so its release (DESIGN.md §2.4 step 2) and its
@@ -1247,7 +1251,7 @@ export class NodeImpl implements Context {
     e.early = early;
     e.done = promise; // exists BEFORE any dispose code runs (D16)
     const n = e.node;
-    const action: () => unknown = n !== undefined ? () => this.releaseNodeEntry(n) : e.dispose; // a generator or an op is driven (DESIGN.md §4.14)
+    const action: () => unknown = n !== undefined ? () => this.releaseNodeEntry(n) : e.dispose; // a generator or an op is driven (DESIGN.md §4.5)
     const rf = new NodeImpl({
       kind: 'release',
       parent: this,
@@ -1377,7 +1381,7 @@ export class NodeImpl implements Context {
         rec.consumed = true;
       }
     this.unconsumed.clear();
-    // U3 (DESIGN.md §4.14): an unwind fiber's failures are its node's release failures, each reported once by that
+    // U3 (DESIGN.md §4.2): an unwind fiber's failures are its node's release failures, each reported once by that
     // node's completion, which waits for this one. The fiber's own outcome still records them.
     if (this.unwindOf !== undefined && extra.length > 0) this.unwindOf.extraErrors.push(...extra);
     if (extra.length > 0) {
@@ -1434,7 +1438,7 @@ export class NodeImpl implements Context {
           // A returned fiber is a value, never probed: its `then` getter throws (DESIGN.md §4.5). Inside the try:
           // a hostile `then` getter is a handler exception. A generator handler, and a returned op (decision 28) or `fail(e)` (D42), is
           // driven in the handler's frame, its first step now, reporting each wait to the run, and the parent holds
-          // it until it ends (DESIGN.md §4.14); a returned promise is a bare wait. An async generator, which nothing
+          // it until it ends (DESIGN.md §4.5); a returned promise is a bare wait. An async generator, which nothing
           // steps and which is no thenable, would drop the failure silently: it is a handler exception, as an async
           // generator body is refused.
           if (!isNodeImpl(r)) {
@@ -1460,7 +1464,7 @@ export class NodeImpl implements Context {
       own.state = 'released'; // completed on its own (C5 "removed")
       own.stack.unlink(own);
     }
-    this.body = undefined; // nothing of a completed node's body is retained (A2)
+    this.body = undefined; // nothing of a completed node's body is retained (A1)
     this.emit({ type: 'node:complete', outcome: o.status });
     this.completionResolvers.resolve(); // never rejects (I10)
     if (escalate !== undefined) p!.abortIfOpen(escalate.error); // idempotent with the settle-time abort (DESIGN.md §4.7, §2.6; I11)
@@ -1475,7 +1479,7 @@ export class NodeImpl implements Context {
    * `r` is what a child's failure handler returned, or its driven generator's promise. This node stays open until
    * it settles (its release loop waits on `handlerHolds`), so the handler's code after a wait still runs on an open
    * parent (DESIGN.md §4.7), and a rejection is a handler exception (DESIGN.md §4.12), like a synchronous
-   * throw. It is subscribed to outside every frame (A2). A run that waits for this node's completion or an
+   * throw. It is subscribed to outside every frame (A1). A run that waits for this node's completion or an
    * ancestor's holds nothing: its rejection lands here while this node is open, else on the
    * console. Never throws.
    */
@@ -1530,15 +1534,15 @@ export class NodeImpl implements Context {
   }
 
   // =========================================================================
-  // Waiting: join, result, interrupted, never, sleep, wait, promised, close, dispose (DESIGN.md §4.5, §4.14, §2.7)
+  // Waiting: join, result, interrupted, never, sleep, wait, promised, close, dispose (DESIGN.md §4.5, §4.2, §2.7)
   // =========================================================================
 
   /**
-   * U3 (DESIGN.md §4.14, D41 decision 11): the node a work op made through this node runs on, for `awaiter`, the
+   * U3 (DESIGN.md §4.2, D41 decision 11): the node a work op made through this node runs on, for `awaiter`, the
    * consumer that runs it. In a halted generator body's `finally` the driver runs ops for the body's unwind fiber, and
-   * an op made through the body's own node (the free functions, `current().call(…)`) runs on that fiber, which no
-   * delivery reaches, so a `call`, an `attempt`, a group or a `wait`'s function made there is release work, never
-   * born delivered; a `then` of an op made there passes the same fiber (`WorkOp`), so `Promise.all([call(a), call(b)])`
+   * an op made through the body's own node (the free functions, `current().call(…)`) runs on that fiber, which the
+   * tree never delivers (only its release deadline does), so a `call`, an `attempt`, a group or a `wait`'s function
+   * made there is release work, not born delivered by the node's interruption; a `then` of an op made there passes the same fiber (`WorkOp`), so `Promise.all([call(a), call(b)])`
    * in that `finally` runs both on it too; otherwise this node. A shield needs no host: it is a release fiber of this
    * node anyway.
    */
@@ -1548,11 +1552,12 @@ export class NodeImpl implements Context {
 
   /**
    * `join:enter` now and `join:leave` on resume (DESIGN.md §5): on `events`, the waiting body's node, else on this node
-   * (a `then` from top level, a failure handler); the resume step `take`s or reports the outcome (D13).
+   * (a `then` from top level, a failure handler); the resume step `take`s or reports the outcome (D13′).
    */
   private joinRun<R>(f: NodeImpl, events: NodeImpl | undefined, step: (applied: boolean) => R, op: string): Run<void, R> {
     // A receiver completed since the op was made (a stored join run later): its completion surfaced `f`'s failure
-    // already, and nothing may emit on it after node:complete (DESIGN.md §4.14, §5).
+    // already, and no wait may begin on it after node:complete; the `join:leave` of one begun before may still follow
+    // it (DESIGN.md §4.2, §5).
     this.assertOpen(op);
     const ev = events ?? this;
     ev.emit({ type: 'join:enter', joinedId: f.id });
@@ -1598,7 +1603,7 @@ export class NodeImpl implements Context {
 
   /**
    * Resolves with the reason when this node is delivered: what an `observe` body waits on (DESIGN.md §4.3). A
-   * `freeze` or `restore` body waiting on its own node's is halted by that delivery instead, at once (PROPOSAL.md §2.3).
+   * `freeze` or `restore` body waiting on its own node's is halted by that delivery instead, at once (DESIGN.md §4.2).
    */
   interrupted(): Op<unknown> {
     this.assertBodyGuards('interrupted');
@@ -1614,7 +1619,7 @@ export class NodeImpl implements Context {
     return new WorkOp<never>(() => abandoning(neverPromise()));
   }
 
-  /** A wait over a timer (DESIGN.md §4.14, D34): guarded as `never` is, then `ms` checked; the timer is armed when it runs. */
+  /** A wait over a timer (DESIGN.md §4.2, D34): guarded as `never` is, then `ms` checked; the timer is armed when it runs. */
   sleep(ms: number): Op<void> {
     this.assertBodyGuards('sleep');
     checkSleepMs(ms);
@@ -1622,11 +1627,11 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * DESIGN.md §4.14 (D41, decision 10): a wait for a foreign promise. `wait(p)` is release-shaped: a halt lets `p`
+   * DESIGN.md §4.2 (D41, decision 10): a wait for a foreign promise. `wait(p)` is release-shaped: a halt lets `p`
    * finish, and a halted body is resumed with its value and returned at its next `yield*` (a failure returns it there,
    * discarded as the halted body's throw is, or, in its halted `finally`, recorded as a release failure).
    * `{ abandon: true }` stops waiting at the halt. `p` exists when the op is made, so a halted body that yields it
-   * still subscribes (PROPOSAL.md §2.3, the fifth row). The function form is called when the op runs, with the signal
+   * still subscribes (DESIGN.md §4.2, the halt table's last row). The function form is called when the op runs, with the signal
    * of the node the op runs on: this node's, or in a halted `finally` of this node's body its unwind fiber's deadline
    * (U3); a halted body never calls it. A ramme op as `p`, or as what the function returns, is that op's own wait,
    * typed by its `E` (D42). A promise only ramme holds (the function form's, or the `Promise.resolve` of a thenable) is
@@ -1657,7 +1662,7 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * DESIGN.md §4.14 (D41, decision 30): a library's async callback, as a body of this node. Each call of the returned
+   * DESIGN.md §4.5 (D41, decision 30): a library's async callback, as a body of this node. Each call of the returned
    * function runs `t` as a call-shaped child of this node: a subscribed `'join'` fiber on its explicit stack, so this
    * node's delivery reaches it and it is halted as a callee is, started synchronously (D22). It returns a real
    * promise: the child's value; its failure, consumed (the promise is its one consumer) unless this node is a halted
@@ -1685,8 +1690,8 @@ export class NodeImpl implements Context {
       return new Promise<T>((resolve, reject) => {
         const settle = (): void => {
           try {
-            // The promise is the failure's one consumer (D13), unless the host is a halted body (D39, A.3). An expected
-            // failure rejects it with its error (D42).
+            // The promise is the failure's one consumer (D13′), unless the host is a halted body (D41; DESIGN.md
+            // §4.5). An expected failure rejects it with its error (D42).
             resolve(take<T>(child, !(host.hasBody && host.applied)));
           } catch (e) {
             reject(unwrapExpected(e));
@@ -1729,7 +1734,7 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * close()'s deliver step: rejects with the unconsumed failures; consumes a non-fiber's failure (D13, D16), unless
+   * close()'s deliver step: rejects with the unconsumed failures; consumes a non-fiber's failure (D13′, D16), unless
    * its consumer consumes nothing (D39, A.3).
    */
   deliverClose(applied = false): void {
@@ -1873,7 +1878,7 @@ export class NodeImpl implements Context {
 
   /**
    * `call`, `attempt` and `unshield`, and the group fiber of `all`, `race` and `settle`: a lazy op (D41, decision 2)
-   * whose run makes the child on the host (`hostFor`), makes the resume step (D13), and starts the child's body
+   * whose run makes the child on the host (`hostFor`), makes the resume step (D13′), and starts the child's body
    * synchronously, with the child current, before the yielding step returns (D22). Call-shaped (D39, A.2): a halted
    * caller is returned once the child has completed, and a child the caller's delivery did not reach (a child of
    * another node, one born undelivered) is delivered by the shape.
@@ -1907,7 +1912,7 @@ export class NodeImpl implements Context {
   ): Op<T, FailedWith<Y> | E> {
     this.assertBodyShaped('shield');
     const task = toTask(t as unknown as TaskLike);
-    // A shield stays on this node in a halted generator body's `finally` too (DESIGN.md §4.14): a release fiber is never
+    // A shield stays on this node in a halted generator body's `finally` too (DESIGN.md §4.2): a release fiber is never
     // born delivered nor cancelled whatever its parent, and this node, its owner, has been interrupted, so a hole made
     // in it is skipped at once. Its wait is the unwind fiber's there, which consumes nothing.
     return new WorkOp<T>(() => {
@@ -1940,7 +1945,7 @@ export class NodeImpl implements Context {
       body: function* () {
         const g = currentFrame()!.node!; // the group fiber
         const fibers = members.map((m) => g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
-        // One wait over never-rejecting sources (DESIGN.md §4.8, D13), returned at once by a halt, so no member's
+        // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt, so no member's
         // failure is consumed before every member has completed, nor by an interrupted group.
         yield* settledOp(Promise.all(fibers.map((f) => f.completion)));
         const fail = groupFailure(fibers, (n) => `${n} of ${fibers.length} tasks failed`);
@@ -2008,12 +2013,12 @@ export class NodeImpl implements Context {
         body: function* () {
           const g = currentFrame()!.node!; // the group fiber
           // Before any member exists: their failures wait on the group's parent for the caller's resume step,
-          // not on the group, so the group neither folds them into its own outcome nor consumes them (D13, D31).
+          // not on the group, so the group neither folds them into its own outcome nor consumes them (D13′, D31).
           g.memberFailuresTo = g.up;
           // One at a time: a fork that throws leaves the members already running in `fibers`, so the resume step
           // consumes their failures instead of leaving them on the receiver (I11, D31).
           for (const m of members) settleFibers(g).push(g.fork(m as unknown as Task<[], unknown>) as unknown as NodeImpl);
-          // One wait over never-rejecting sources (DESIGN.md §4.8, D13), returned at once by a halt. No member is
+          // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt. No member is
           // aborted on a sibling's account: the group waits for every one.
           yield* settledOp(Promise.all(settleFibers(g).map((f) => f.completion)));
         },
@@ -2021,9 +2026,9 @@ export class NodeImpl implements Context {
       [],
       (g) => (_, applied) => {
         const fibers = settleFibers(g);
-        // The resume step (D13): every forked member has completed, since the group waited for its stack. The
+        // The resume step (D13′): every forked member has completed, since the group waited for its stack. The
         // caller is resumed, so every member failure is consumed here, whatever the group's outcome; a consumer that
-        // consumes nothing (an unwind fiber, DESIGN.md §4.14) leaves them on the group's parent, which folds them in.
+        // consumes nothing (an unwind fiber, DESIGN.md §4.2) leaves them on the group's parent, which folds them in.
         if (!applied) for (const f of fibers) f.consumeFailure();
         const go = g.outcome!;
         if (failed(go)) {
@@ -2222,7 +2227,7 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * Make this node current for a synchronous `fn` (DESIGN.md §4.11, §4.14): the third entry point for plain code, a
+   * Make this node current for a synchronous `fn` (DESIGN.md §4.11, §6): the third entry point for plain code, a
    * synchronous callback's re-entry. An op `fn` returns is a value: it runs nothing until it is consumed.
    */
   run<R>(fn: () => R): R {
@@ -2240,7 +2245,7 @@ export class NodeImpl implements Context {
     if (dev() && isGenerator(r))
       throw new AsyncRunError(
         'run(fn) returned a generator, which nothing steps: run is synchronous; use call(fn) to run a generator body',
-      ); // its twin for a generator function (DESIGN.md §4.14), development mode only
+      ); // its twin for a generator function (DESIGN.md §4.11), development mode only
     return r;
   }
 

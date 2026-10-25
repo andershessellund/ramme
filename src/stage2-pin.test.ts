@@ -1,4 +1,5 @@
-// stage2-pin.test.ts — the pinning tests of D41's stage 2, the removal stage (PROPOSAL.md §8 "PR 2"), written first.
+// stage2-pin.test.ts — the pinning tests of D41's stage 2, the removal stage (PR 2 of the generator runtime's
+// proposal, which is read at commit 5da90d8: DECISIONS.md's history note), written first.
 //
 // Each test asserts a fact of the generator runtime once async bodies, the async context, the bridge machinery and
 // lending are gone, which stage 1 (generator bodies beside async ones, every op an eager promise) does not have yet:
@@ -675,7 +676,7 @@ describe('stage 2: what goes (decisions 10, 16, 2, 18)', () => {
   });
 });
 
-describe('stage 2: the halt with lazy ops (decisions 8, 9; PROPOSAL.md §2.3)', () => {
+describe('stage 2: the halt with lazy ops (decisions 8, 9; DESIGN.md §4.2)', () => {
   it('row 1: a sleep arms its timer at its yield*, not when made, and the halt returns the body at once and clears it; wait(fn, { abandon: true }) calls fn at its yield*', async () => {
     const sleeperLog = trace();
     const abandonsLog = trace();

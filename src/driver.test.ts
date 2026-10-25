@@ -1,7 +1,7 @@
-// driver.test.ts — the op protocol and the driver's subscription (DESIGN.md §4.14, D41), what managed.test.ts pinned
+// driver.test.ts — the op protocol and the driver's subscription (DESIGN.md §4.2, D41), what managed.test.ts pinned
 // for managed promises restated for ops: a work op's `then` (run once per object, each consumer resumed in the
 // source's reaction with promise-handler semantics), a lifecycle op's promise (`.catch` and `.finally` through `then`,
-// derived promises plain, the resume step once per consumer), I10 for ops nobody consumes, A2 for a halted body's
+// derived promises plain, the resume step once per consumer), I10 for ops nobody consumes, A1 for a halted body's
 // dropped subscription, and decision 7's resumption in the source's reaction. The halt rows themselves are pinned in
 // generator-pin.test.ts and stage2-pin.test.ts.
 import { describe, expect, it } from 'vitest';
@@ -22,7 +22,7 @@ function guard(): UnhandledRejectionGuard {
   return g;
 }
 
-describe('a work op’s then (DESIGN.md §4.14, decisions 3, 4)', () => {
+describe('a work op’s then (DESIGN.md §4.2, decisions 3, 4)', () => {
   it('runs the op once, on the first then, and resumes every consumer in the source’s reaction: a non-callable handler passes the outcome through (a failure as a rejection), a throwing one rejects its derived promise, and a then after it settled is never synchronous', async () => {
     const root = createRootContext();
     let runs = 0;
@@ -47,7 +47,7 @@ describe('a work op’s then (DESIGN.md §4.14, decisions 3, 4)', () => {
     const failing = root.call(function* () {
       throw new Error('boom');
     });
-    // No onRejected: the failure passes through as a rejection of the derived promise, consumed by the one run (D13).
+    // No onRejected: the failure passes through as a rejection of the derived promise, consumed by the one run (D13′).
     const failedThrough = await failing.then(() => 'fulfilled').then(undefined, (e: Error) => `rejected: ${e.message}`);
     expect({ runs, settledValues, atCall, syncLate, failedThrough }).toEqual({
       runs: 1,
@@ -106,7 +106,7 @@ describe('a work op’s then (DESIGN.md §4.14, decisions 3, 4)', () => {
   });
 });
 
-describe('a lifecycle op is a promise (DESIGN.md §4.14, decision 2)', () => {
+describe('a lifecycle op is a promise (DESIGN.md §4.2, decision 2)', () => {
   it('close() starts now and is a Promise subclass: .catch and .finally go through its then, derived promises are plain Promises, and each then is its own consumer, through the resume step once', async () => {
     const root = createRootContext();
     const n = root.child({ name: 'n' });
@@ -145,7 +145,7 @@ describe('a lifecycle op is a promise (DESIGN.md §4.14, decision 2)', () => {
   });
 });
 
-describe('I10 and A2 for ops (DESIGN.md §10)', () => {
+describe('I10 and A1 for ops (DESIGN.md §10)', () => {
   it('ops nobody consumes are never an unhandled rejection: a work op runs nothing, and a lifecycle op whose release fails surfaces from its owner instead', async () => {
     const before = guard().seen.length;
     const root = createRootContext();
@@ -169,7 +169,7 @@ describe('I10 and A2 for ops (DESIGN.md §10)', () => {
     expect(guard().seen.length).toBe(before);
   });
 
-  it.skipIf(!hasGc)('a body halted on a join of a fiber in another tree is not retained by that fiber: its subscription is dropped and emptied, so the generator and what it held are collectable while the fiber runs on (A2)', async () => {
+  it.skipIf(!hasGc)('a body halted on a join of a fiber in another tree is not retained by that fiber: its subscription is dropped and emptied, so the generator and what it held are collectable while the fiber runs on (A1)', async () => {
     const other = createRootContext({ name: 'other' });
     const long = other.fork(
       task(
@@ -203,7 +203,7 @@ describe('I10 and A2 for ops (DESIGN.md §10)', () => {
   });
 });
 
-describe('decision 7: a body resumes in its source’s reaction (DESIGN.md §4.14)', () => {
+describe('decision 7: a body resumes in its source’s reaction (DESIGN.md §4.2)', () => {
   it('a wait(p) resumes the body in p’s reaction, before a microtask queued after p settled, and never inside the step that made the op', async () => {
     const t = trace();
     const root = createRootContext();

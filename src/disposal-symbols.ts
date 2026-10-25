@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The floor's one guard (PROPOSAL.md §2.1, D41 decision 18): ramme keys every
+// The floor's one guard (DESIGN.md §1.2; D41, decision 18): ramme keys every
 // release off `Symbol.dispose` and `Symbol.asyncDispose` (`own(x)`, a node's
 // own `[Symbol.asyncDispose]()`), and TypeScript's downlevelled `using` throws
 // rather than falls back where they are missing, so they are defined at import

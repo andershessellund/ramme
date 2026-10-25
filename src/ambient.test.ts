@@ -638,7 +638,7 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
       readonly child: Context;
       constructor() {
         own(t.at('early'));
-        void releaseAll(); // its first (here: only) release runs before it returns; the promise is safe to drop (D13)
+        void releaseAll(); // its first (here: only) release runs before it returns; the promise is safe to drop (D13′)
         const x = own(t.at('x'));
         void release(x); // runs now
         own({ [Symbol.dispose]: t.at('kept') });

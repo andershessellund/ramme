@@ -69,7 +69,7 @@ describe('probes', () => {
       }
       expect(me.explicit.size).toBe(0); // completed fibers are unlinked
       expect(me.subscribers.size).toBe(0);
-      expect(impl(lastFiber!).body).toBeUndefined(); // a completed fiber retains no closure (A2)
+      expect(impl(lastFiber!).body).toBeUndefined(); // a completed fiber retains no closure (A1)
 
       const boom = new Error('boom');
       for (let i = 0; i < 10_000; i++) {

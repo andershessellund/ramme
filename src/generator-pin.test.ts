@@ -1,8 +1,8 @@
 // generator-pin.test.ts — the pinning tests of generator bodies (D41, PR 1: `Op`, the driver, `wait`, `promised`).
 //
 // Every scenario of rejection-pin.test.ts (sticky rejection, D39) and of unshield.test.ts (the shield cases),
-// re-expressed for generator bodies with the generator model's expectations (PROPOSAL.md §1, §2, as the author's
-// decisions amend it). A delivery halts a `freeze` or `restore` generator body: the driver calls its generator's
+// re-expressed for generator bodies with the generator model's expectations (D41, as the author's decisions settle
+// it). A delivery halts a `freeze` or `restore` generator body: the driver calls its generator's
 // `return()` at a `yield*`, so its `catch` never sees the interruption and its `finally` runs. The halt comes where
 // PR #4 rejected an async body (decision 8): at once for `sleep`, `never`, `interrupted`, a join of a fiber not
 // subscribed below, `wait(p, { abandon: true })` and a wait for the node's own completion; once the awaited fiber has

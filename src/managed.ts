@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Ops (DESIGN.md §4.14, D41): what every waiting verb returns.
+// Ops (DESIGN.md §4.2, D41): what every waiting verb returns.
 //
 // An op is iterable: `yield* op` in a body yields a private `InstructionImpl`
 // once to the driver (driver.ts), which runs the op for the yielding body and
@@ -19,8 +19,8 @@
 //
 // Running an op makes a `Run`: a source that never rejects (I10) unless it is
 // a user promise (`wait(p)`), the resume step that runs only when a consumer
-// is resumed and is where a failure is consumed (D13), and the run's shape at
-// a halt (PROPOSAL.md §2.3): `abandon` (returned at once: `sleep`, `never`, an
+// is resumed and is where a failure is consumed (D13′), and the run's shape at
+// a halt (DESIGN.md §4.2): `abandon` (returned at once: `sleep`, `never`, an
 // unrelated wait), `call` (returned once the awaited fiber has completed; the
 // shape delivers a fiber the delivery missed) or `release` (release work and
 // `wait(p)`, which the halt lets finish). The driver reads the shape; this
@@ -28,7 +28,7 @@
 //
 // The reactions ramme registers on a source hold only a `Sub`, which a
 // settlement or a drop empties, so a halted body's generator and node are not
-// retained by a source that stays pending (A2).
+// retained by a source that stays pending (A1).
 //
 // An expected failure (D42) is the other thing a body yields: `yield* fail(e)`
 // yields a `Fail` record, which the driver tells apart from an instruction and
@@ -47,14 +47,14 @@ import { CreationViolationError } from './resource.js';
 /** Whether a wait waits for node `n`'s completion (DESIGN.md §4.7; D41 decision 12). Never throws. */
 export type WaitsFor = (n: NodeImpl) => boolean;
 
-/** How the halt of the waiting body meets a wait (PROPOSAL.md §2.3, decision 8; DESIGN.md §4.14). */
+/** How the halt of the waiting body meets a wait (DESIGN.md §4.2; D41, decision 8). */
 export type HaltShape = 'abandon' | 'call' | 'release';
 
 /**
  * Runs only when a consumer is resumed: turns the source's value into the op's value, may throw, and is where a
- * failure is consumed (D13). `applied` is true for a consumer that consumes nothing: an unwind fiber (U3), or a halted
+ * failure is consumed (D13′). `applied` is true for a consumer that consumes nothing: an unwind fiber (U3), or a halted
  * body resumed by release work: the step throws the failure it would deliver and leaves it to its holder's
- * completion (D39, A.3; DESIGN.md §4.14).
+ * completion (D39, A.3; DESIGN.md §4.2).
  */
 export type Deliver<S, T> = (value: S, applied: boolean) => T;
 
@@ -83,7 +83,7 @@ export interface Run<S = unknown, T = unknown> {
   /** The node completions the wait waits for: a failure handler's hold (DESIGN.md §4.7), a halted finally (decision 12). */
   readonly waitsFor?: WaitsFor;
   readonly watch?: AwaitWatch;
-  /** The source is a user promise: its rejection is its own failure, which a halted finally records (DESIGN.md §4.14). */
+  /** The source is a user promise: its rejection is its own failure, which a halted finally records (DESIGN.md §4.2). */
   readonly user?: boolean;
   /** Dropped before it settled (a halt that does not wait): a sleep clears its timer (D34). */
   readonly cancel?: () => void;
@@ -109,7 +109,7 @@ export interface FailYield {
   readonly [FAIL]: unknown;
 }
 
-/** A re-yielded `Fail` (D42): the callee's failure record still holds the error (D13), so a halted `finally` records nothing. */
+/** A re-yielded `Fail` (D42): the callee's failure record still holds the error (D13′), so a halted `finally` records nothing. */
 const HELD: unique symbol = Symbol('ramme.held');
 
 /**
@@ -221,7 +221,7 @@ export function consumesNothing(awaiter: NodeImpl | undefined): boolean {
 /**
  * A halted body: a delivered `freeze` or `restore` node with a body, whose own throw, and so a rejection its `wait(p)`
  * is handed, is discarded (D24). A `then` whose op was made in one of its steps leaves the failure it delivers with
- * its holder, as `promised` does for a halted host (D39, A.3; DESIGN.md §4.14).
+ * its holder, as `promised` does for a halted host (D39, A.3; DESIGN.md §4.2).
  */
 export function haltedBody(n: NodeImpl | undefined): boolean {
   return n !== undefined && n.hasBody && n.applied;
@@ -230,7 +230,7 @@ export function haltedBody(n: NodeImpl | undefined): boolean {
 /**
  * The node of the step an op is made in, read when it is made: the unwind fiber in a halted `finally` (U3), else the
  * frame's node; none at top level. A `then` cannot see who awaits it (the slot is synchronous and a combinator calls
- * `then` in a later job), so this node stands for its consumer (DESIGN.md §4.14 "The thenable").
+ * `then` in a later job), so this node stands for its consumer (DESIGN.md §4.2 "The thenable").
  */
 function makerNode(f: Frame | undefined = currentFrame()): NodeImpl | undefined {
   return f?.unwind ?? f?.node;
@@ -240,7 +240,7 @@ function noop(): void {}
 
 /**
  * One consumer's subscription to a run. The source's reaction holds this object only; `resume` and `drop` empty it,
- * so nothing of the consumer is retained after it (A2). `onSettled` runs in the source's reaction, never inside the
+ * so nothing of the consumer is retained after it (A1). `onSettled` runs in the source's reaction, never inside the
  * subscription, and never after a `drop`.
  */
 export class Sub<S = unknown, T = unknown> {
@@ -278,7 +278,7 @@ export class Sub<S = unknown, T = unknown> {
   }
 
   /**
-   * The source settled and the consumer is resumed: the resume step runs (D13), `use` gets what it gave, and only
+   * The source settled and the consumer is resumed: the resume step runs (D13′), `use` gets what it gave, and only
    * then is the watch told (D16), so a failure the step consumes is consumed, and the consumer resumed, before the
    * owner's release loop re-reads. A rejection of a user promise is handed on as it is, and marked as the user
    * promise's own failure. `use` must not throw.
@@ -290,7 +290,7 @@ export class Sub<S = unknown, T = unknown> {
     if (!ok) r = { ok: false, error: x, user: run.user === true };
     else
       try {
-        r = { ok: true, value: run.deliver !== undefined ? run.deliver(x as S, applied) : (x as T) }; // DELIVERY: the only place a failure is consumed (D13)
+        r = { ok: true, value: run.deliver !== undefined ? run.deliver(x as S, applied) : (x as T) }; // DELIVERY: the only place a failure is consumed (D13′)
       } catch (e) {
         // A child's expected failure is re-yielded by a body, and rejects a `then` with its error (D42).
         r = e instanceof Expected ? { ok: false, error: e.error, user: false, failed: true } : { ok: false, error: e, user: false };
@@ -337,7 +337,7 @@ export function isInstruction(x: unknown): x is InstructionImpl {
 }
 
 /**
- * An op's iterator (DESIGN.md §4.14): `next()` yields the op's instruction once, then returns what the driver resumed
+ * An op's iterator (DESIGN.md §4.2): `next()` yields the op's instruction once, then returns what the driver resumed
  * it with; `throw(e)` rethrows `e`, so `yield*` hands the awaited work's failure to the body at the `yield*`;
  * `return(v)`, which `yield*` forwards on a halt, drops the driver's subscription and returns `v`. One iterator per
  * `yield*`, and one run per iterator.
@@ -397,7 +397,7 @@ export type Start<T> = (awaiter: NodeImpl | undefined, events: NodeImpl | undefi
  * A lazy op (decision 2): the verb ran its guards when it was made (decision 17), and its work runs at each `yield*`
  * and at most once through `then`. A plain thenable (decision 4): `then` only, no `catch` or `finally`, and not a
  * `Promise`. `started` marks a wait whose work began before the op was made (`wait(p)` over a promise): a halted body
- * that yields it still subscribes, as PROPOSAL.md §2.3's fifth row says. `receiver` is the node the verb was called
+ * that yields it still subscribes, as DESIGN.md §4.2's last halt row says. `receiver` is the node the verb was called
  * on, for U3's host when the op is made in a halted `finally` (`then` only; the driver passes its own awaiter).
  */
 export class WorkOp<T> implements Op<T> {
@@ -427,14 +427,15 @@ export class WorkOp<T> implements Op<T> {
     return this.#start(awaiter, events);
   }
 
-  /** `yield* op`: one run per `yield*`, for the yielding body (DESIGN.md §4.14). */
+  /** `yield* op`: one run per `yield*`, for the yielding body (DESIGN.md §4.2). */
   [Symbol.iterator](): Iterator<Instruction, T, unknown> {
     return new OpIterator<T>(this);
   }
 
   /**
-   * `await op` from plain async code (D41 §4.1): the op runs once, on the first `then`, as a child of the node it was
-   * made through (of its unwind fiber when made in that node's halted `finally`, U3), under no frame: a promise awaiter
+   * `await op` from plain async code (DESIGN.md §4.2; D41, decision 4): the op runs once, on the first `then`, as a
+   * child of the node it was made through (of its unwind fiber when made in that node's halted `finally`, U3), under
+   * no frame: a promise awaiter
    * is a foreign frame, which nothing halts. It settles with the value, or the failure, or `FiberAbortedError` when the
    * child ended `aborted`. The failure is consumed unless the step that made the op is a halted body's when the work
    * settles: that body's wait discards the rejection, so the record stays with its holder and surfaces from its
@@ -481,7 +482,7 @@ export class WorkOp<T> implements Op<T> {
  * An eager op (decision 2): `release`, `releaseAll`, `close` and `[Symbol.asyncDispose]` started their work when
  * called, and this only waits for it. A `Promise` subclass, so `.catch` and `.finally` work and a platform callback's
  * `void app.close()` runs the close; the instance itself never settles: `then` subscribes to the run, each consumer
- * resumed through the resume step (D13), and `yield*` subscribes to the same run.
+ * resumed through the resume step (D13′), and `yield*` subscribes to the same run.
  */
 export class LifecycleOp<S, T = void> extends Promise<T> implements Op<T> {
   /** Promises derived by the inherited `catch`/`finally` machinery are plain. */
@@ -499,7 +500,7 @@ export class LifecycleOp<S, T = void> extends Promise<T> implements Op<T> {
     this.#maker = makerNode();
   }
 
-  /** @internal Started when made: a halted body that yields it still subscribes, and its shape decides (PROPOSAL.md §2.3). */
+  /** @internal Started when made: a halted body that yields it still subscribes, and its shape decides (DESIGN.md §4.2). */
   get started(): boolean {
     return true;
   }
@@ -519,7 +520,7 @@ export class LifecycleOp<S, T = void> extends Promise<T> implements Op<T> {
   }
 
   /**
-   * A promise consumer: a foreign frame, which nothing halts; resumed with the value, or the failure, consumed (D13)
+   * A promise consumer: a foreign frame, which nothing halts; resumed with the value, or the failure, consumed (D13′)
    * unless the step that made the op is a halted body's when the work settles (as a work op's `then`), each consumer
    * through the resume step once, in the source's reaction.
    */
@@ -544,13 +545,13 @@ export function isOp(x: unknown): x is AnyOp {
   return x instanceof WorkOp || x instanceof LifecycleOp;
 }
 
-/** A fresh promise that never settles; no shared constant is ever `.then`ed, so nothing is retained (A2). */
+/** A fresh promise that never settles; no shared constant is ever `.then`ed, so nothing is retained (A1). */
 export function neverPromise(): Promise<never> {
   return new Promise<never>(noop);
 }
 
 /**
- * The sources of `sleep`, `never`, `interrupted` and the groups' internal waits (DESIGN.md §4.14): sources that never
+ * The sources of `sleep`, `never`, `interrupted` and the groups' internal waits (DESIGN.md §4.2): sources that never
  * reject (I10), each a wait the halt returns at once.
  */
 export function abandoning<S>(source: PromiseLike<S>, cancel?: () => void): Run<S, S> {

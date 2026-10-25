@@ -1,7 +1,7 @@
 // The platform's timers. A timer is a foreign wait: a body waiting on one
 // through `wait(p)` is let finish by a halt, so its node is held for the rest
 // of the timer, and nothing clears a timer when its node ends (DESIGN.md
-// §4.14, §4.4). ramme's `sleep` is a wait the halt cuts: the body is returned
+// §4.2, §4.4). ramme's `sleep` is a wait the halt cuts: the body is returned
 // at once and its timer cleared (D34). `requestAnimationFrame` is the
 // browser's frame timer, a callback too: `nextFrame` from `ramme/platform` is
 // its wait, whose frame a halt cancels (D43).
@@ -37,13 +37,13 @@ export const noTimers: Rule.RuleModule = {
     messages: {
       call:
         '`{{name}}` is a platform timer, which no halt clears: an interrupted body waiting on it keeps its node alive until ' +
-        'it fires, and nothing clears it when its node ends (ramme DESIGN.md §4.14, §4.4). ' +
+        'it fires, and nothing clears it when its node ends (ramme DESIGN.md §4.2, §4.4). ' +
         FIX,
       frame:
         '`requestAnimationFrame` is the platform’s frame timer: its callback runs outside every node, and no halt ' +
         'cancels it. Use `yield* nextFrame()` from `ramme/platform`, the frame’s timestamp as a wait whose frame a halt ' +
         'cancels (ramme DECISIONS.md D43).',
-      import: '`{{name}}` from `{{module}}` is a platform timer, which no halt clears (ramme DESIGN.md §4.14, §4.4). ' + FIX,
+      import: '`{{name}}` from `{{module}}` is a platform timer, which no halt clears (ramme DESIGN.md §4.2, §4.4). ' + FIX,
     },
     schema: [],
   },

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The public surface, checked by the compiler (DESIGN.md §7, I27); the name
+// The public surface, checked by the compiler (DESIGN.md §7, I26); the name
 // list is the surface check's list (scripts/check-surface.mjs). Never run: it is
 // not a test file, and every check is a type.
 //
@@ -115,11 +115,11 @@ export function settleTypes(ctx: Context, a: Task<[number], number>, b: Task<[st
   type _Named = Expect<Equal<SettleResult<[Task<[], number>]>, [Outcome<number, never>]>>;
 }
 
-/** I27: a task is an object, never a callable bare promise. */
+/** I26: a task is an object, never a callable bare promise. */
 export function i27(t: Task<[number], number>): void {
-  // @ts-expect-error -- I27: a Task has no call signature
+  // @ts-expect-error -- I26: a Task has no call signature
   t(1);
-  // @ts-expect-error -- I27: nor has one made by bind()
+  // @ts-expect-error -- I26: nor has one made by bind()
   t.bind(1)();
 }
 
@@ -130,7 +130,7 @@ export const fiberNamespace = ramme.Fiber;
 /** `runSync` is the ambient function of DESIGN.md §4.11, `current().runSync(fn, ...args)`. */
 type _RunSync = Expect<Equal<typeof ramme.runSync, <R, A extends unknown[]>(fn: (...args: A) => R, ...args: A) => R>>;
 
-/** `sleep` is a free function and a method, both an op over a timer (DESIGN.md §4.14, D34). */
+/** `sleep` is a free function and a method, both an op over a timer (DESIGN.md §4.2, D34). */
 type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Op<void>>>;
 type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Op<void>>>;
 
@@ -163,7 +163,7 @@ export function unshields(ctx: Context, t: Task<[number], string>): void {
   void ramme.unshield(t, 'one');
 }
 
-// --- Generator bodies (DESIGN.md §4.14, D41) ----------------------------------
+// --- Generator bodies (DESIGN.md §4.2, D41) ----------------------------------
 
 /**
  * An op is an `Operation` and a plain thenable, no `Promise` (D41, decision 4); the lifecycle verbs return one that is a
@@ -276,7 +276,7 @@ export function asyncBodiesRefused(ctx: Context): void {
   void promised(async (n: number) => n);
   // @ts-expect-error -- a synchronous body returning a promise is no body either
   void ramme.shield(() => Promise.resolve(1));
-  // @ts-expect-error -- an async generator task body (PROPOSAL.md §6: the guard refuses an async iterator too)
+  // @ts-expect-error -- an async generator task body (D41's settled note on `Body`: the guard refuses an async iterator too)
   void ramme.task(async function* () {
     yield 1;
   });
@@ -625,7 +625,7 @@ export function attemptResult(t: Task<[string], Result<User, UserNotFound>>): vo
   type _O = Expect<Equal<typeof _o, Op<Outcome<Result<User, UserNotFound>, never>>>>;
 }
 
-// --- ramme/platform (DESIGN.md §4.15, D43) ---------------------------------------
+// --- ramme/platform (DESIGN.md §4.9, D43) ---------------------------------------
 
 /** `fetch` takes the global's own parameters and is an `Op<Response>`; `nextFrame` an `Op<number>`. */
 type _FetchParameters = Expect<Equal<Parameters<typeof platform.fetch>, Parameters<typeof globalThis.fetch>>>;

@@ -1,4 +1,4 @@
-// sleep.test.ts — `sleep(ms)` and `ctx.sleep(ms)`, ramme's timer (D34 as D41 amends it, DESIGN.md §4.14).
+// sleep.test.ts — `sleep(ms)` and `ctx.sleep(ms)`, ramme's timer (D34 as D41 amends it, DESIGN.md §4.2).
 //
 // A lazy work op over a timer: making it arms nothing; the timer is armed when the op runs, at its `yield*` (or its
 // `then`). A delivered `freeze` or `restore` body waiting on it is halted at once, and the halt clears the timer: no
@@ -86,7 +86,7 @@ describe('sleep resolves after ms (DESIGN.md §4.2)', () => {
   });
 });
 
-describe('the halt clears the timer (DESIGN.md §4.14, D34)', () => {
+describe('the halt clears the timer (DESIGN.md §4.2, D34)', () => {
   it('a freeze fiber waiting on sleep is halted at delivery, its timer cleared at once, no catch run, and its node releases after the body unwinds, not after 10 s', async () => {
     fakeTimers();
     const app = createRootContext();
@@ -109,7 +109,7 @@ describe('the halt clears the timer (DESIGN.md §4.14, D34)', () => {
     expect(vi.getTimerCount()).toBe(1);
     f.abort();
     expect(vi.getTimerCount()).toBe(0); // cleared inside abort(), with the delivery (D34)
-    expect(f.state).toBe('running'); // the return is a queued job (DESIGN.md §4.14)
+    expect(f.state).toBe('running'); // the return is a queued job (DESIGN.md §4.2)
     await tick();
     expect(f.state).toBe('complete');
     expect(f.outcome?.status).toBe('aborted');
@@ -193,7 +193,7 @@ describe('the halt clears the timer (DESIGN.md §4.14, D34)', () => {
   });
 });
 
-describe('nothing halts the waiter: the full duration (DESIGN.md §4.14, §4.7)', () => {
+describe('nothing halts the waiter: the full duration (DESIGN.md §4.2, §4.7)', () => {
   it('an observe body delivered mid-sleep resumes after the full ms', async () => {
     fakeTimers();
     const app = createRootContext();

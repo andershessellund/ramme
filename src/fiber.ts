@@ -2,7 +2,7 @@
 // Tasks (DESIGN.md §4.5).
 //
 // A task is a body plus options. It is an object, not a function, so it can
-// never be invoked as a bare promise (I27): each `fork`/`call` runs the body
+// never be invoked as a bare promise (I26): each `fork`/`call` runs the body
 // in a new fiber, a child of the current node. `t.fork(...args)` is
 // `fork(t, ...args)`, `t.call(...args)` is `call(t, ...args)` and
 // `t.attempt(...args)` is `attempt(t, ...args)`: the same free functions of
@@ -60,7 +60,7 @@ class TaskImpl<A extends unknown[], T, E> implements Task<A, T, E>, TaskLike<A, 
  * Define a task: a body that can only be `fork`ed or `call`ed, never invoked
  * as a plain function. Options live at the definition and are overridden per
  * use with `with`. The body is a generator function, stepped by the driver
- * (DESIGN.md §4.14), or a synchronous function; an `async` function is no body
+ * (DESIGN.md §4.5), or a synchronous function; an `async` function is no body
  * (D41, decision 5). `yield* fail(e)` in the body ends it with the expected
  * failure `e`, and the task's `E` is the union of what it yields, a callee's
  * re-yielded failures included (D42).

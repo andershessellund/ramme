@@ -20,7 +20,7 @@ export interface Entry {
   readonly name: string;
   /** Set for node entries. */
   readonly node: NodeImpl | undefined;
-  /** Passive entries; node entries use the release loop's node path. Its result is the release fiber's body result (DESIGN.md §4.14). */
+  /** Passive entries; node entries use the release loop's node path. Its result is the release fiber's body result (DESIGN.md §4.5). */
   readonly dispose: () => unknown;
   state: EntryState;
   /**

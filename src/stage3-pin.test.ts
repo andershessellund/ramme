@@ -1,5 +1,5 @@
-// stage3-pin.test.ts — the pinning tests of D41's stage 3, expected failures as a typed channel (PROPOSAL.md §3.6,
-// decision 15 (b′), decided; §8 "PR 3"), written first.
+// stage3-pin.test.ts — the pinning tests of D41's stage 3, expected failures as a typed channel (D41, decision 15,
+// option (b′); D42; PR 3 of the generator runtime's proposal, read at commit 5da90d8), written first.
 //
 // Each test asserts a fact of the runtime once an expected failure is a fourth way for a body to end, which stage 2
 // does not have yet: `yield* fail(e)` ends the body with `failure(e)` and runs its `finally` as on a halt; a `fail` in a

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The codemod of D41 (PROPOSAL.md §7.4): async bodies to generator bodies.
+// The codemod of D41 (decision 5): async bodies to generator bodies.
 // Dev-only; it uses the `typescript` package already installed, and nothing
 // it does is part of the published package.
 //

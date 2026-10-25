@@ -1,6 +1,6 @@
 // outcome.test.ts — outcome classification, release and body errors
 // (DESIGN.md §4.12), destinations (DESIGN.md §4.7, §4.12), the
-// interrupted-awaiter group (D13, D16, D39) and the I13 converse.
+// interrupted-awaiter group (D13′, D16, D39) and the I13 converse.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { wait } from './ambient.js';
 import type { Body, Context, Fiber, Instruction, Operation, Pool } from './context.js';
@@ -481,7 +481,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('halted waiters consume nothing (D13, D16, D39)', () => {
+describe('halted waiters consume nothing (D13′, D16, D39)', () => {
   it("an owner interrupted on join(f) by its owned f's failure is halted at once (an owned fiber's join is not call-shaped): no catch runs, its finally does, the owner's outcome is failure, it surfaces exactly once, and f's record is consumed", async () => {
     const app = createRootContext();
     const err = new Error('owned f failed');
@@ -909,7 +909,7 @@ describe('I13 converse: the error is never inspected', () => {
 
 // ---------------------------------------------------------------------------
 // fiber.test.ts covers all/race's full surface.
-describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
+describe('all and race outcomes (DESIGN.md §4.8, D13′)', () => {
   it('all: the tuple in order; every real failure in one AggregateError; FiberAbortedError for an aborted member and no failure', async () => {
     const app = createRootContext();
     const e1 = new Error('one');
@@ -994,7 +994,7 @@ describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
     await app.close();
   });
 
-  it("an interrupted all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (DESIGN.md §4.8, D13)", async () => {
+  it("an interrupted all() group consumes nothing: a member's early failure surfaces from the group's completion and its caller (DESIGN.md §4.8, D13′)", async () => {
     const app = createRootContext();
     const err = new Error('early member failure');
     let P!: NodeImpl;

@@ -13,13 +13,13 @@
 // subpath, to export exactly the `resultExpected` functions and nothing else
 // (`gen` retired, D42), and dist/result.js to import nothing: the subpath is a
 // leaf that imports only types (DESIGN.md §7). Then requires dist/platform.d.ts,
-// the `ramme/platform` subpath (DESIGN.md §4.15, D43), to export exactly the
+// the `ramme/platform` subpath (DESIGN.md §4.9, D43), to export exactly the
 // `platformExpected` names, and dist/platform.js to import nothing but the
 // public core, `./index.js`. Also requires that stripInternal left no `@internal`
 // declaration in any dist/*.d.ts, and that the adapters of the async-context
 // era (dist/node.js, dist/async-context.js) are not built: package.json exports
-// `.`, `./platform` and `./result` only (D41, decision 18). The browser is a target (PROPOSAL.md
-// §5.3, decision 19): dist/index.js and dist/platform.js, and every module they
+// `.`, `./platform` and `./result` only (D41, decision 18). The browser is a target (D41,
+// decision 19): dist/index.js and dist/platform.js, and every module they
 // import at run time, import nothing from `node:` or a Node builtin such as
 // `async_hooks` (src/stage4-pin.test.ts makes the same check), and touch no
 // global beyond ES2022's but the host APIs of `browserGlobals`
@@ -139,7 +139,7 @@ const coreNames = [
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
-  // generator bodies (DESIGN.md §4.14, D41): the ops, what they yield, and the two verbs for foreign async code
+  // generator bodies (DESIGN.md §4.2, D41): the ops, what they yield, and the two verbs for foreign async code
   'Op', 'Operation', 'Instruction', 'wait', 'promised',
   // expected failures (D42): the fourth exit, and the type a helper that fails is named by
   'fail', 'Fail',
@@ -162,7 +162,7 @@ const resultExpected = [
 ];
 
 /**
- * The exact export list of dist/platform.d.ts, the `ramme/platform` subpath (DESIGN.md §4.15, D43): name → its
+ * The exact export list of dist/platform.d.ts, the `ramme/platform` subpath (DESIGN.md §4.9, D43): name → its
  * declaration form. The four primitives, and the emitter shape `listen`'s second overload names.
  */
 const platformExpected = new Map([
@@ -174,7 +174,7 @@ const platformExpected = new Map([
 ]);
 
 /**
- * The host APIs the browser entries may touch, beyond the ECMAScript 2022 globals (PROPOSAL.md §2.1's floor): the
+ * The host APIs the browser entries may touch, beyond the ECMAScript 2022 globals (the floor, DESIGN.md §1.2): the
  * timers and microtasks the core schedules with, the abort machinery, `DOMException` (an abort's default reason) and
  * `console` (development-mode reports), all present in every evergreen browser and in Node 22; ramme/platform adds
  * `performance` (its frame fallback). `process` is never named: development mode reads `globalThis.process?.env`.
@@ -227,7 +227,7 @@ for (const [, typeOnly, list, from] of text.matchAll(clause)) {
 }
 const rest = text
   .replace(clause, '')
-  .replace(/^import '\.\/disposal-symbols\.js';$/m, '') // the floor's guard, a side-effect import (PROPOSAL.md §2.1)
+  .replace(/^import '\.\/disposal-symbols\.js';$/m, '') // the floor's guard, a side-effect import (DESIGN.md §1.2)
   .replace(/\/\/.*$/gm, '')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .trim();
@@ -276,7 +276,7 @@ if (/^\s*import\b|\bfrom\s*['"]|\bimport\s*\(/m.test(resultJs.replace(/\/\*[\s\S
 
 // dist/platform.d.ts: `export declare function` (one per overload), `export declare const`, `export interface`, type-only
 // imports from the public core, and TypeScript's `export {};`; any other export form is refused. dist/platform.js imports
-// the public core only: the layer can do nothing a user could not (DESIGN.md §4.15).
+// the public core only: the layer can do nothing a user could not (DESIGN.md §4.9).
 let platformTypes;
 let platformJs;
 try {
@@ -375,7 +375,7 @@ if (JSON.stringify(subpaths) !== JSON.stringify(['.', './platform', './result'])
 }
 
 /**
- * A library over ramme, compiled with `declaration` (PROPOSAL.md §6: annotations are optional). `orFail` and `retry`
+ * A library over ramme, compiled with `declaration` (D41, decision 27: annotations are optional). `orFail` and `retry`
  * are generic over `E`, so their emitted types keep `Operation`'s distribution of `E` over `Fail`, which must be
  * written out inline: a name from a module the package's "exports" do not expose fails the emit (TS2883). `charge`
  * both calls a failing task and fails itself; its `E` must emit as the plain union, never wrapped (`NoInfer<…>`).

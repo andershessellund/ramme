@@ -1,7 +1,9 @@
-// generator.test.ts — generator bodies beyond the pinning suite (D41, PRs 1 and 2; DESIGN.md §4.14).
+// generator.test.ts — generator bodies beyond the pinning suite (D41, PRs 1 and 2 of the generator runtime's
+// proposal, read at commit 5da90d8; DESIGN.md §4.2).
 //
 // generator-pin.test.ts re-expresses PR #4's pins; this file pins the rest of what PR 1 decides: U3's answers to
-// the review probes p1, p2 and p6–p9, the halted finally's ROLLBACK and deadline, groups and attempt there, the
+// that proposal's review probes p1, p2 and p6–p9 (scratch probes it names; D41's settled note on U3), the halted
+// finally's ROLLBACK and deadline, groups and attempt there, the
 // driver's refusals, `promised` after its node completed and inside a halted finally, the fixes of the PR 1 review
 // (`wait(op)`, ramme's failures never recorded as release failures, `promised` under a halted node and during a
 // creation), and that a halted body's frame is not retained. Each test compares one observation object first.
@@ -1342,7 +1344,7 @@ describe('the fixes of the stage 2 review', () => {
   });
 });
 
-describe('A2: a halted body retains nothing', () => {
+describe('A1: a halted body retains nothing', () => {
   it.skipIf(!hasGc)('a generator halted on wait(p, { abandon: true }) is not retained by p: with p still pending, the generator and what its finally held are collectible once the node completed', async () => {
     const root = app();
     const pending = deferred<void>(); // never settles while the test looks

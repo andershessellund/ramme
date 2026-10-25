@@ -1,10 +1,10 @@
-// browser-smoke.test.ts — the browser is a target (D41 decision 18; PROPOSAL.md §5.3, decision 19; D43), shown
+// browser-smoke.test.ts — the browser is a target (D41, decisions 18 and 19; D43), shown
 // without a browser and without a dependency: the core and `ramme/platform` are run through their public entries on
 // what a browser has, and the build output is checked to need nothing else.
 //
 // - A body runs the core's verbs together (`task`, `call`, `fork`, `join`, `sleep`, `wait`, `own`, DI with a declared
 //   scope, a halt whose `finally` waits): nothing of it needs an adapter, a registration or a Node API.
-// - PROPOSAL.md §5.4's search box (README.md, "The platform"), trimmed to a 20 ms debounce, runs on an `EventTarget`
+// - README's search box ("The platform"), trimmed to a 20 ms debounce, runs on an `EventTarget`
 //   and a stubbed `fetch`: `listen` re-enters the bodiless box, a keystroke halts the previous search at its `sleep`
 //   or aborts its `fetch`.
 // - Statically, on src/ as compiled for the run (src/test/build.ts, vitest's global setup, laid out as `pnpm build`'s
@@ -101,7 +101,7 @@ describe('the browser is a target: the core and ramme/platform through their pub
     });
   });
 
-  it("PROPOSAL.md §5.4's search box: listen re-enters the bodiless box, a keystroke halts the previous search at its debounce or aborts its fetch", async () => {
+  it("README's search box: listen re-enters the bodiless box, a keystroke halts the previous search at its debounce or aborts its fetch", async () => {
     const requests: { url: string; signal: AbortSignal; respond: (body: unknown) => void }[] = [];
     vi.stubGlobal('fetch', (url: string, init?: RequestInit): Promise<Response> => {
       const { promise, resolve, reject } = Promise.withResolvers<Response>();

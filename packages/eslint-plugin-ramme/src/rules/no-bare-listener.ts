@@ -1,4 +1,4 @@
-// A bare platform listener in ramme code (D43; PROPOSAL.md §5.3, decisions 21,
+// A bare platform listener in ramme code (D43; D41, decisions 21,
 // 22 and 26). A callback the platform makes runs outside every node: there is
 // no current node in it (`current()`, `lookup`, `own` and `fork` throw
 // `NoCurrentNodeError`), and nothing removes the listener when the node that

@@ -67,8 +67,8 @@ What the example shows:
   or `Disposable`) to the current node, which releases it. In a constructor
   that node is the service's own, so the pool lives exactly as long as `Api`.
 - **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
-  the *current node*, which ramme sets while a body runs, on every platform:
-  no setup, no async context.
+  the *current node*, which ramme sets while a body runs, on every platform,
+  with no setup: ramme has no async context.
 - **Shutdown lives on the root.** `await using app` releases the whole tree:
   running work first, then the services it used. `app.abort()` interrupts
   the tree without waiting, and `await app.close()` lets running work
@@ -140,7 +140,7 @@ per-request service whose release reads the request's outcome through
 `parent`, the node that stores it:
 
 ```ts
-import { RequestScope, current, inject, lookup, own, signal, task, wait } from 'ramme';
+import { RequestScope, current, inject, lookup, own, task, wait } from 'ramme';
 
 class UnitOfWork {
   static readonly scope = RequestScope;
@@ -154,15 +154,18 @@ class UnitOfWork {
     });
   }
   done() { return this.#node.release(this); }     // commit now, while the request runs: yield* uow.done()
-  query(sql: string) { return this.#lease.conn.query(sql, signal()); }
-  async commit(): Promise<void> { … }
-  async rollback(): Promise<void> { … }
+  *query(sql: string) { return yield* wait((signal) => this.#lease.conn.query(sql, signal)); }
+  *commit() { yield* wait(this.#lease.conn.query('COMMIT')); }
+  *rollback() { yield* wait(this.#lease.conn.query('ROLLBACK')); }
 }
 
 const handle = task(function* (req: Request) {
-  yield* wait(lookup(UnitOfWork).query('…'));     // every lookup in this request shares one
+  yield* lookup(UnitOfWork).query('…');           // every lookup in this request shares one
 }, { scopes: [RequestScope] });                   // the request's own fiber carries the scope
 ```
+
+Its release returns the generator of `commit` or `rollback`, which ramme
+runs to its end as the release, as it runs a body.
 
 The request's fiber must carry `RequestScope`, as `handle` does, so that
 its outcome is how the request ended. A bodiless
@@ -205,7 +208,7 @@ the same name whose default is the implementation. Call sites read
 environment provides its own:
 
 ```ts
-import { createInjectionKey, inject, valueProvider } from 'ramme';
+import { createInjectionKey, createRootContext, inject, valueProvider } from 'ramme';
 
 export interface Mailer {
   send(to: string, body: string): Promise<void>;
@@ -268,14 +271,14 @@ When the body is returned depends on what it waits on: at once for a
 `sleep`, a `never()`, an owned fork's `join`; once the awaited work has
 stopped for a `call`, an `all`, a `join` of a fork it made; and after it
 finishes for a release or a foreign promise. A `finally` in the body itself
-may wait, and what it waits on runs to its end, so cleanup can wait for a
-rollback:
+may wait, and the interruption does not cut what it waits on, so cleanup
+can wait for a rollback:
 
 ```ts
 import { call, own, task, wait } from 'ramme';
 
 const transfer = task(function* (from: Id, to: Id, amount: number) {
-  const conn = own(yield* wait(pool.connect()), (c) => c.release()); // halted while connecting: still owned
+  const conn = own(yield* wait(db.connect()), (c) => c.release());   // halted while connecting: still owned
   yield* wait(conn.query('BEGIN'));
   let done = false;
   try {
@@ -328,7 +331,7 @@ swallow the interruption, so nothing can let the database driver commit.
   interruption lets finish, or `wait(p, { abandon: true })`, which it stops
   waiting for. Run concurrent work with `all([...])`.
 - **A `finally` in the body may wait; a helper's may not.** What the body's
-  own `finally` yields after an interruption runs to its end. A `yield*` in
+  own `finally` yields after an interruption is not cut by it. A `yield*` in
   the `finally` of a generator helper the body called loses the
   interruption, and the body runs on (development mode reports it): put
   waiting cleanup in `own(value, function* (v) { … })`, or run the helper as
@@ -415,6 +418,31 @@ box.run(() =>
 );
 ```
 
+A driver gets the same treatment in a few lines of your own: every wait an
+op, every async callback it takes a `promised` body. node-postgres
+(`import pg from 'pg'`), say, behind a service:
+
+```ts
+import { inject, lookup, own, promised, task, wait, type Instruction } from 'ramme';
+
+class Db {
+  readonly #pool = own(new pg.Pool(inject(DbConfig)), (p) => p.end());   // closed with the service, after its users
+  *query(sql: string, params: unknown[] = []) {                          // yield* db.query(…) in any body
+    return (yield* wait(this.#pool.query(sql, params))).rows;
+  }
+  *transaction<T>(body: (tx: pg.PoolClient) => Generator<Instruction, T, unknown>) {
+    const client = own(yield* wait(this.#pool.connect()), (c) => c.release());   // back to the pool when the caller ends
+    return yield* wait(withTx(client, promised(body)));   // your async withTx(client, fn): BEGIN, fn, then COMMIT or ROLLBACK
+  }
+}
+
+const save = task(function* (order: Order) {
+  yield* lookup(Db).transaction(function* (tx) {          // interrupted, it is halted and withTx rolls back
+    yield* wait(tx.query('INSERT INTO orders (id) VALUES ($1)', [order.id]));
+  });
+});
+```
+
 `await using` ends a node the way an exception would, by interruption; to
 drain, call `close()`. That holds for the root at the top level and for any
 node a test scopes with it.
@@ -494,8 +522,8 @@ const getOrder = task(function* (id: string) {
   return order;
 });                                               // Task<[id: string], Order, UserNotFound | OrderNotFound>
 
-const handle = task(function* (req: Request) {
-  const r = yield* attempt(getOrder, req.params.id);
+const handle = task(function* (id: string) {
+  const r = yield* attempt(getOrder, id);
   if (r.status === 'success') return json(r.value);
   if (r.status === 'failure') return notFound(r.error);   // r.error: UserNotFound | OrderNotFound
   if (r.status === 'defect') throw r.error;               // a bug stays a bug
@@ -522,6 +550,7 @@ value }` or `{ status: 'failure', error }`, in the words an outcome uses.
 `$` turns a `Result` you hold back into the task's failure:
 
 ```ts
+import { task, wait } from 'ramme';
 import { $ } from 'ramme/result';
 
 const charge = task(function* (card: Card, amount: number) {

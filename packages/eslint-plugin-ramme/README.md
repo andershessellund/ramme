@@ -52,7 +52,7 @@ export default [{ plugins: { ramme }, rules: { 'ramme/no-unused-op': 'error', 'r
 Recommended alongside, both type-aware: `@typescript-eslint/no-floating-promises`,
 for a forgotten `await` on a plain promise in top-level and test code, and
 `@typescript-eslint/await-thenable`, for `await helper()` on a generator helper
-there, which resolves to the generator object (ramme's DESIGN.md §4.14).
+there, which resolves to the generator object (ramme's DESIGN.md §9).
 
 ## Rules
 
@@ -67,12 +67,6 @@ there, which resolves to the generator object (ramme's DESIGN.md §4.14).
 | [`no-bare-listener`](#no-bare-listener) | error | `addEventListener`, an emitter's `.on(…)`/`.once(…)`, `el.onclick = …` in ramme code |
 | [`no-bare-fetch`](#no-bare-fetch) | error | the global `fetch` in a body of a file that uses ramme |
 | [`no-bare-async-iteration`](#no-bare-async-iteration) | error | `for await` in a file that uses ramme, or inside a body |
-
-The four rules of the async era (`no-swallowed-interruption`,
-`no-finally-in-async`, `no-using-in-async`, `no-promise-combinators`) are
-gone with async bodies: a halt never reaches a `catch`, a body's own `finally`
-may wait, and there is no async code under a node (ramme's DECISIONS.md D41,
-decision 14).
 
 The severity is the one `configs.recommended` sets. Section numbers below are
 those of ramme's
@@ -92,7 +86,7 @@ initializer is one).
 `yield*` where it waits; it cannot see an `await` (D41). An async function is
 therefore no body: `Body`'s type refuses it, and the runtime fails the node
 with a `TypeError` naming `function*`. Write it as a generator, run every op
-with `yield*`, and wait for a foreign promise with `yield* wait(p)` (§4.14):
+with `yield*`, and wait for a foreign promise with `yield* wait(p)` (§4.2, §4.5):
 
 ```ts
 const handle = task(function* (req: Request) {   // instead of task(async (req) => …)
@@ -131,7 +125,7 @@ argument is no task or body (`handler.call(self, e)`).
 **Why.** A work op is lazy: making one runs nothing, and its consumer runs it,
 the driver at `yield*` or `then` at `await` (D41, decision 2). `call(sendEmail,
 user);` sends nothing. A forgotten `yield*` is missing work, silent at run
-time; this rule is its report (§4.14).
+time; this rule is its report (§4.2, §4.4).
 
 ```ts
 const signup = task(function* (user: User) {
@@ -167,7 +161,7 @@ three from `timers`, `node:timers`, `timers/promises` and
 `requestAnimationFrame`'s message names its replacement, `yield* nextFrame()`
 from `ramme/platform`, a wait whose frame a halt cancels (D43).
 
-**Why.** A timer is a foreign wait (§4.14): a body waiting on one through
+**Why.** A timer is a foreign wait (§4.2): a body waiting on one through
 `yield* wait(p)` is let finish by a halt, so its node, and everything the
 node holds (a connection lease, say), stays alive for the rest of the timer;
 and nothing clears a timer when the node that set it ends (§4.4). ramme's
@@ -406,11 +400,11 @@ plain async code's included (a script that reads lines before it calls
   package yet. ramme's development mode reports a lost halt.
 - An async function that uses ramme after its first `await` (an `async`
   release, a library callback) throws `NoCurrentNodeError` there; write it as
-  a generator release or a `promised(function* …)` callback (§4.14).
+  a generator release or a `promised(function* …)` callback (§4.5, §6).
 - The hazards that depend on what happens at run time (a lost halt, a late
   read that creates a value, a stalled halted `finally`) are ramme's
   development-mode diagnostics and `node:stalled` (§4.4).
-- The rest of the platform's catalogue (PROPOSAL.md §5.2): observers
+- The rest of the platform's catalogue (§9): observers
   (`new ResizeObserver(cb)` outside `own`), `requestIdleCallback` and
   `scheduler.postTask` are not flagged; their ramme spellings (`bind`,
   `idle`) are not in `ramme/platform` yet.

@@ -24,9 +24,9 @@ export async function tick(n = 1): Promise<void> {
 }
 
 /**
- * Run an op through its `then` now, as plain async code does when it awaits it (D41 §4.1). A work op is lazy, so
- * `const p = app.call(t)` alone runs nothing until `p` is awaited; `start(app.call(t))` starts it at once (its child
- * made and its body's first step run, D22) and returns a real promise of its result.
+ * Run an op through its `then` now, as plain async code does when it awaits it (DESIGN.md §4.2; D41, decision 4). A
+ * work op is lazy, so `const p = app.call(t)` alone runs nothing until `p` is awaited; `start(app.call(t))` starts it
+ * at once (its child made and its body's first step run, D22) and returns a real promise of its result.
  */
 export function start<T>(op: PromiseLike<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => void op.then(resolve, reject));

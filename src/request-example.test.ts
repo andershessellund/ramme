@@ -373,7 +373,7 @@ describe('a request, end to end', () => {
     expect(releasing.map((e) => e.stack)).toEqual(['explicit', 'provided']);
   });
 
-  it('(6) app.abort() from a platform callback with a handler still running rejects the top-level call with FiberAbortedError; the await using block completes and the lease was released (DESIGN.md §4.14)', async () => {
+  it('(6) app.abort() from a platform callback with a handler still running rejects the top-level call with FiberAbortedError; the await using block completes and the lease was released (DESIGN.md §4.2)', async () => {
     const w = world();
     const { ev, server } = w.app();
     let caught: unknown;
@@ -399,7 +399,7 @@ describe('a request, end to end', () => {
     };
     await within(run());
     w.t.push('after using');
-    expect(resumed).toBe(false); // main was halted at its yield* (DESIGN.md §4.14, I6)
+    expect(resumed).toBe(false); // main was halted at its yield* (DESIGN.md §4.2, I6)
     expect(ev.of('node:settled').filter((e) => e.id === mainId).map((e) => e.outcome)).toEqual(['aborted']);
     expect(caught).toBeInstanceOf(FiberAbortedError);
     expect((caught as FiberAbortedError).reason).toBe('SIGTERM');

@@ -147,7 +147,7 @@ export function unwrapOr<R extends Result<unknown, unknown>, U>(r: R, fallback: 
  * not be a promise gives either, as its value turns out (`Fenced`). A returned fiber is a value: its `then` getter
  * throws (DESIGN.md §4.5), so it is not chained, and `fromThrowing(() => pool.fork(job))` is the fiber, or the
  * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps the four statuses: over
- * an op this runs it through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts, and reports its
+ * an op this runs it through its `then` (DESIGN.md §4.2), a promise awaiter that nothing halts, and reports its
  * child's expected failure, its defect and its abort alike, as `failure(error)` (`FiberAbortedError` for the abort;
  * DESIGN.md §4.13). The promise forms await at once, when `fromThrowing` is called.
  */
@@ -167,7 +167,7 @@ export function fromThrowing(x: unknown): Result<unknown, unknown> | Promise<Res
 
 /**
  * The promise form of `fromThrowing`: a direct `await` in an async function, never `p.then(success, failure)`.
- * The `await` calls `then` on `p` a job after `fromThrowing` is called; over an op that runs it (DESIGN.md §4.14).
+ * The `await` calls `then` on `p` a job after `fromThrowing` is called; over an op that runs it (DESIGN.md §4.2).
  * The `catch` takes every error, so this promise never rejects.
  */
 async function settled<T>(p: PromiseLike<T>): Promise<Result<Awaited<T>, unknown>> {

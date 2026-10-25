@@ -1,5 +1,6 @@
 // stage4-pin.test.ts — the pinning tests of D41's stage 4, the platform layer `ramme/platform` and the browser as a
-// target (PROPOSAL.md §5, decisions 19–26; §8 "PR 4"), written first.
+// target (D41, decisions 19–26; D43; PR 4 of the generator runtime's proposal, read at commit 5da90d8), written
+// first.
 //
 // Each test asserts a fact of `ramme/platform` (src/platform.ts), which the stage-3 tree does not have:
 //
@@ -20,8 +21,8 @@
 //   (D34); where `requestAnimationFrame` is absent (Node) it falls back to a 16 ms timer.
 // - `each(source)` has decision 24's shape, the one this file decides: `for (const x of yield* each(source)) { …;
 //   yield* each.next(); }`. `yield* each(source)` waits for the first item and is a synchronous iterable over the
-//   current one; `yield* each.next()` waits for the next. It is chosen from PROPOSAL.md §5.2–§5.3 (decision 24, and
-//   §7.4's codemod row for `for await`) over explicit stepping (`const it = each(source); while (true) { const r =
+//   current one; `yield* each.next()` waits for the next. It is chosen from that proposal's catalogue (decision 24, and
+//   the codemod's row for `for await`) over explicit stepping (`const it = each(source); while (true) { const r =
 //   yield* it.next(); if (r.done) break; … }`), decision 24's rejected alternative: a `for…of` calls its iterator's
 //   `return()` on `break`, `return`, a throw and the halt's `return()`, so `each` sees the body leave the loop, where a
 //   `while` loop's `break` tells `it` nothing and the source could be closed only at the node's end. A bare
