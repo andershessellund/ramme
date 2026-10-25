@@ -11,13 +11,14 @@
 //   has no mapping, so 'ramme' resolves through package.json "exports" to
 //   dist/index.d.ts, what a consumer compiles against.
 //
-// 'ramme/result' has no mapping in either: it resolves through the package's
-// self-reference, to src/result.ts under `pnpm typecheck` (the output path
-// maps back to its source) and to dist/result.d.ts under `pnpm check:surface`.
+// 'ramme/result' and 'ramme/platform' have no mapping in either: each resolves
+// through the package's self-reference, to its source under `pnpm typecheck`
+// (the output path maps back to it) and to its dist/*.d.ts under
+// `pnpm check:surface`.
 //
 // scripts/check-surface.mjs then compares the export clauses of
-// dist/index.d.ts, and the declarations of dist/result.d.ts, with its expected
-// lists name by name.
+// dist/index.d.ts, and the declarations of dist/result.d.ts and
+// dist/platform.d.ts, with its expected lists name by name.
 // ---------------------------------------------------------------------------
 
 import {
@@ -71,6 +72,7 @@ import {
   unwrapOr,
 } from 'ramme/result';
 import * as rammeResult from 'ramme/result';
+import * as platform from 'ramme/platform';
 
 type Equal<X, Y> = (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
@@ -622,6 +624,32 @@ export function attemptResult(t: Task<[string], Result<User, UserNotFound>>): vo
   const _o = attempt(t, 'id');
   type _O = Expect<Equal<typeof _o, Op<Outcome<Result<User, UserNotFound>, never>>>>;
 }
+
+// --- ramme/platform (DESIGN.md §4.15, D43) ---------------------------------------
+
+/** `fetch` takes the global's own parameters and is an `Op<Response>`; `nextFrame` an `Op<number>`. */
+type _FetchParameters = Expect<Equal<Parameters<typeof platform.fetch>, Parameters<typeof globalThis.fetch>>>;
+type _FetchOp = Expect<Equal<ReturnType<typeof platform.fetch>, Op<Response>>>;
+type _NextFrameOp = Expect<Equal<ReturnType<typeof platform.nextFrame>, Op<number>>>;
+
+/** `each`: `yield* each(source)` is an iterable of the source's items, and `yield* each.next()` is `void`; the values, exactly. */
+export function platformTypes(source: AsyncIterable<number>, emitter: platform.EventEmitterLike): void {
+  void ramme.task(function* () {
+    for (const _x of yield* platform.each(source)) {
+      type _Item = Expect<Equal<typeof _x, number>>;
+      const _next = yield* platform.each.next();
+      type _Next = Expect<Equal<typeof _next, void>>;
+    }
+  });
+  // An EventTarget handler takes an event of the type it names; an emitter's takes the emitted arguments.
+  platform.listen(new EventTarget(), 'input', (e: InputEvent) => void e.data, { passive: true });
+  platform.listen(emitter, 'data', (chunk: string, n: number) => void [chunk, n], { signal: AbortSignal.timeout(1) });
+  // @ts-expect-error -- each takes an async iterable, not an array
+  void platform.each([1, 2]);
+  // @ts-expect-error -- an EventTarget's type is a string
+  platform.listen(new EventTarget(), Symbol('x'), () => {});
+}
+type _PlatformValues = Expect<Equal<keyof typeof platform, 'fetch' | 'listen' | 'nextFrame' | 'each'>>;
 
 // ---------------------------------------------------------------------------
 // Providers are checked against the public surface (D37), and take no options (D36)

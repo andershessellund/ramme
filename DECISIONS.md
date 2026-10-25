@@ -1396,10 +1396,11 @@ library call an adapter and every `await` a `yield*`.
 
 *Provisional: this entry records a decision that lands in stages, and is
 completed when the last stage lands, when D40 becomes its rejected
-alternative and D9′, D13 and D39 are superseded. Stages 1 to 3 have landed:
+alternative and D9′, D13 and D39 are superseded. Stages 1 to 4 have landed:
 the driver and ops, then the removal of async bodies, the async context, the
 bridge machinery and lending, then expected failures as a yielded, typed
-channel (D42). The full record (the alternatives, the costs,
+channel (D42), then the platform layer, `ramme/platform`, with the browser as
+a target (D43). The full record (the alternatives, the costs,
 the probes and the review) is PROPOSAL.md at the repository root while the
 stages land; the last stage deletes it and completes this entry.*
 
@@ -1445,8 +1446,12 @@ after `t` has stopped) and D40's interop through one generic wrapper,
 3. *Expected failures* (landed, D42): `yield* fail(e)`, `E` inferred on
    tasks, a four-way `Outcome`; `gen` retired, `$` a generator helper over a
    held `Result`.
-4. *`ramme/platform`*: `fetch`, `listen`, `nextFrame`, `each`; a browser
-   smoke test.
+4. *`ramme/platform`* (landed, D43): `fetch`, `listen`, `nextFrame`, `each`;
+   the lints `no-bare-listener`, `no-bare-fetch` and
+   `no-bare-async-iteration`, and `no-timers` for `requestAnimationFrame`; a
+   browser smoke test, and a static check of the build output (no Node module,
+   no global beyond ES2022's but a browser's host APIs); decision 32 settled
+   as recommended: `[Symbol.asyncDispose]()` stays abort, then wait.
 5. *Documents and benchmark*: DESIGN.md and DECISIONS.md rewritten around
    this entry, which is then completed.
 
@@ -1757,6 +1762,158 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   returns `fail(e)` rather than yielding it is driven as its `yield*`, and
   fails as one that yields it: `own(v, () => fail(e))` is the owner's
   release failure, never a dropped value.
+
+### D43. The platform layer: every wait and every callback has a ramme spelling
+
+Every platform primitive that waits or calls back has a ramme spelling, in
+the subpath `ramme/platform`: a **wait is an op**, a **callback re-enters its
+node**, an **async iteration is `each`**, and a **lint refuses the bare
+form**. Four primitives make the layer (PROPOSAL.md §5, decisions 19 to 26):
+`yield* fetch(input, init)`, the global's `fetch` as a `wait` handed the
+body's signal, so a halt aborts the request; `listen(target, type, handler,
+opts?)`, which runs a synchronous handler inside the registering node, as
+`node.run` does, and removes it at the node's delivery through the native
+`{ signal }` and at any other end through an entry the node owns;
+`yield* nextFrame()`, `requestAnimationFrame` as a wait whose frame a halt
+cancels; and `for (const x of yield* each(source)) { …; yield* each.next();
+}`, whose source a halt or an early exit returns as release work. The layer
+is built on the public core alone and imports nothing from Node, so the
+browser is a target with no entry of its own (D41, decision 18). The lints,
+each message naming the replacement: `no-bare-listener` and `no-bare-fetch`
+(fixed by importing `ramme/platform`'s `fetch`) in ramme code only (decision
+26), a generator function or a class that uses ramme for the first, a
+generator function of a file that imports ramme for the second;
+`no-bare-async-iteration` in any file that imports ramme, its top level
+included, and inside any generator function; and `no-timers`, extended to
+`requestAnimationFrame`, in every file, as before. DESIGN.md §4.15, §9.
+
+**Why.** Waiting is where interruption attaches: a halt stops only a wait the
+driver sees, so a bare `fetch` holds the halted body's node for the whole
+request, and a bare frame fires into a body that has ended. Calling back is
+where context is lost: the platform calls a listener outside every frame,
+where `current()`, `lookup`, `own` and `fork` have no node, and nothing
+removes the listener when the node that registered it ends. Generator bodies
+make the spellings necessary rather than merely better: `yield*` of a bare
+promise is TS2488 and `for await` in a generator TS1103, so a body that waits
+on the platform must have something to `yield*`. A subpath keeps the core's
+surface as it is (87 names) and every import of `ramme` free of DOM and
+`fetch` types; building it on the public API alone shows that API suffices,
+and keeps the layer from bypassing the core's guards.
+
+**Rejected.** *`fetch` and `listen` in the core*: surface and platform types
+in every import, a server's entry reading globals it never uses, and no line
+between what the runtime needs and what a platform offers. *A Zone-style
+patch* of `globalThis.fetch`, `EventTarget.prototype.addEventListener` and the
+promise jobs to carry the node: not zero-dependency, not ramme's to patch, a
+cost to every program that loads ramme, blind to what it does not patch, and
+the async context decision 18 refused, by another name. *`wait((signal) =>
+fetch(u, { signal }))` as the idiom* (decision 20's alternative): noise at
+every call, and a lint would have to check the signal. *Explicit stepping for
+`each`* (`const it = each(s); while (true) { const r = yield* it.next(); … }`,
+decision 24's alternative): verbose, and a `while`'s `break` tells the
+iteration nothing, so the source could be closed only at the node's end,
+where a `for…of` calls its iterator's `return()` on `break`, `return`, a
+throw and the halt's `return()`. *A generator handler forked per event*
+(decision 21's form): refused instead with a `TypeError`, since a handler
+that forks says where the fork's failure goes, by the node's destination
+rules (a bodiless node's needs `onFailure`, D14).
+
+**Cost.** `fetch` shadows a global: importing it changes what `fetch` means
+in the whole file, which the lint's fix checks before it offers itself. Every
+pass of an `each` loop ends with `yield* each.next()`, a `continue` included.
+The platform's ops are free-function ops, so they need a current node: top-level
+code keeps the global `fetch`, or names a node through `wait`. A source stuck
+in a read holds a halted node until the read settles when the source queues
+its `return()` behind the read (an async generator does; `node:stalled`
+reports it). The rest of PROPOSAL.md §5.2's catalogue (`once`, `on`, `idle`,
+`bind` for observers) is not in this layer yet.
+
+**Settled while implementing it.**
+
+- *`each` has decision 24's shape*, as above, chosen over the explicit
+  stepping the specification suggested, since only a `for…of` tells `each`
+  that the body left the loop. Skipping `each.next()` throws a `TypeError` at
+  the loop's head in every mode, not in development mode only: there is
+  nothing else to do, since a synchronous `next()` cannot wait, and serving
+  the item again would spin synchronously. The source is returned there.
+  `each.next()` twice in a pass reads on, as Effection's does.
+- *`each` closes through an entry*: the loop is an entry the node owns, and
+  the loop's iterator's `return()` (a `break`, a `return`, a throw, a `fail`,
+  the halt) releases it early, so the source's `return()` is called at once
+  as release work, never inside the iterator's own `return()` (decision 29),
+  and the node completes after it. A read the halt interrupts is abandoned
+  (`wait(…, { abandon: true })`): the halt does not wait for the next item,
+  which an idle stream may never send, and the release returns the source.
+  A failed read ends the iteration and, as in `for await`, is never followed
+  by `return()`; neither is exhaustion.
+- *A `listen` handler's throw aborts the node and is its listener entry's
+  release failure*, so the node ends `defect(e)`, as decision 21's `'link'`
+  route ends it, with the abort synchronous and the error kept even when the
+  node was delivered already; a `'link'` fork carrying the error would start
+  a microtask later and, born delivered, lose it. A handler that ends its own
+  registration before it throws (`close()`, `abort()`, `releaseAll()`, its
+  `opts.signal`) runs the entry's release while it is on the stack: that
+  release waits for the handler to return and fails with its throw, as the
+  core's `holdEntry` holds a failure handler's entry (I11). `listen` refuses
+  an `async` function as it refuses a generator function (the specification
+  names the latter): neither is a synchronous handler.
+- *Only the handler's own throw is routed*: an event dispatched during a
+  creation (a factory that emits on a shared bus, or aborts a signal someone
+  listens to) is refused by `node.run`'s guard before the handler runs (I16),
+  and that `CreationViolationError` is thrown to the dispatcher, as a bare
+  listener's `node.run` would throw it, so the creation fails, never the
+  registering node, which the dispatch has nothing to do with. Dropping the
+  event instead would hide the factory's impurity.
+- *No handler runs after the node's delivery*: the wrapper drops an event that
+  reaches it once the node's signal (or `opts.signal`) has fired, since the
+  node's signal fires its own listeners before the dependent signal handed
+  as `{ signal }`, and an emitter calls a listener removed during the same
+  `emit`; a target that ignores `signal` (ws's `WebSocket` reads `once` only)
+  is removed at that signal's `abort`, as an emitter is. Each `listen` is its
+  own registration, as an emitter's `on` is: the platform never sees the
+  handler, only its wrapper, so `addEventListener`'s deduplication of a
+  `(type, callback, capture)` does not apply, and a second registration of
+  the same handler on another node must not vanish with the first.
+- *`listen` passes `AbortSignal.any([node.signal, opts.signal])` even with no
+  `opts.signal`*: the platform keeps what `{ signal }` registers on that
+  signal after the listener is removed (Node a listener, the DOM an abort
+  algorithm), so a dependent signal keeps the node's own clean. `opts.signal`
+  and `once` release the entry early; a node already delivered (a halted
+  `finally`, a fired `opts.signal`) registers nothing. `listen` returns
+  nothing: `opts.signal` is the early removal.
+- *`fetch`'s signal is the one `wait` hands it*: the body's `signal()`, and in
+  a halted `finally` the unwind fiber's release deadline, so cleanup can make
+  a request; the specification's literal `signal()` has fired there. It is
+  combined with the caller's own: `init.signal`, and a `Request` input's
+  signal, which the init's would otherwise replace (the Fetch standard's
+  `Request(input, init)`); for a `Request` input the init also carries its
+  `referrer` and `referrerPolicy`, which a non-empty init resets. So the lint's
+  fix keeps `fetch(new Request(u, { signal: AbortSignal.timeout(n) }))` a
+  request that times out. The guards of `fetch`, `nextFrame` and `listen` name
+  the primitive, not the core verb under it (`wait`, `current`).
+- *`nextFrame` in an `observe` body*: built on the public `wait`, the frame is
+  cancelled when the body's signal fires, and a body no halt returns has the
+  wait rejected with the reason, as a `fetch` is; the core's `sleep` instead
+  runs its full duration (D34), which needs the internal canceller PROPOSAL.md
+  §5.1 describes and this layer does not import.
+- *The browser check is static and dependency-free*: no module the two
+  entries reach imports a Node module, and none reads a global beyond
+  ES2022's but `queueMicrotask`, `setTimeout`, `clearTimeout`,
+  `AbortController`, `AbortSignal`, `DOMException` and `console` (the last two
+  are the core's: an abort's default reason, development-mode reports), and,
+  in `ramme/platform`, `performance`. `check:surface` makes it on dist/, and
+  src/test/browser-smoke.test.ts on src/ compiled for the test run (vitest's
+  global setup, src/test/build.ts), so `pnpm test` needs no build and never
+  reads a stale one; the smoke test also runs a body of the core's verbs and
+  PROPOSAL.md §5.4's search box through the public entries. `check:surface`
+  also type-checks a Node consumer with no DOM library against every
+  declaration file, so `ramme/platform`'s signatures name only what
+  @types/node has as a global (`listen`'s options are its own interface, not
+  the DOM's `AddEventListenerOptions`). Vitest's browser mode (PROPOSAL.md §8)
+  was not added: it needs Playwright.
+- *Decision 32 is settled as recommended*: a node's `[Symbol.asyncDispose]()`
+  stays abort, then wait. `await using` ends a node the way an exception
+  would, by interruption; to drain, call `close()`.
 
 ### D34. `sleep(ms)`: ramme's timer is a managed await
 

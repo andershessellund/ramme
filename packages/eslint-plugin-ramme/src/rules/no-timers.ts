@@ -2,13 +2,21 @@
 // through `wait(p)` is let finish by a halt, so its node is held for the rest
 // of the timer, and nothing clears a timer when its node ends (DESIGN.md
 // §4.14, §4.4). ramme's `sleep` is a wait the halt cuts: the body is returned
-// at once and its timer cleared (D34).
+// at once and its timer cleared (D34). `requestAnimationFrame` is the
+// browser's frame timer, a callback too: `nextFrame` from `ramme/platform` is
+// its wait, whose frame a halt cancels (D43).
 
 import type { Rule } from 'eslint';
 import { type EsNode, isGlobalName, propertyName, unwrap } from '../ast.js';
 import { docsUrl } from '../docs.js';
 
-const TIMERS = new Set(['setTimeout', 'setInterval', 'setImmediate']);
+/** The timer names, by the message that names their replacement. */
+const TIMERS = new Map([
+  ['setTimeout', 'call'],
+  ['setInterval', 'call'],
+  ['setImmediate', 'call'],
+  ['requestAnimationFrame', 'frame'],
+]);
 const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'global']);
 const TIMER_MODULES = new Set(['timers', 'node:timers', 'timers/promises', 'node:timers/promises']);
 
@@ -20,7 +28,9 @@ export const noTimers: Rule.RuleModule = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Disallow `setTimeout`, `setInterval` and `setImmediate`, which no halt clears; use ramme’s `sleep`',
+      description:
+        'Disallow `setTimeout`, `setInterval`, `setImmediate` and `requestAnimationFrame`, which no halt clears; use ' +
+        'ramme’s `sleep`, and `nextFrame` from `ramme/platform`',
       recommended: true,
       url: docsUrl('no-timers'),
     },
@@ -29,6 +39,10 @@ export const noTimers: Rule.RuleModule = {
         '`{{name}}` is a platform timer, which no halt clears: an interrupted body waiting on it keeps its node alive until ' +
         'it fires, and nothing clears it when its node ends (ramme DESIGN.md §4.14, §4.4). ' +
         FIX,
+      frame:
+        '`requestAnimationFrame` is the platform’s frame timer: its callback runs outside every node, and no halt ' +
+        'cancels it. Use `yield* nextFrame()` from `ramme/platform`, the frame’s timestamp as a wait whose frame a halt ' +
+        'cancels (ramme DECISIONS.md D43).',
       import: '`{{name}}` from `{{module}}` is a platform timer, which no halt clears (ramme DESIGN.md §4.14, §4.4). ' + FIX,
     },
     schema: [],
@@ -53,7 +67,7 @@ export const noTimers: Rule.RuleModule = {
           )
             name = property;
         }
-        if (name !== undefined) context.report({ node: callee, messageId: 'call', data: { name } });
+        if (name !== undefined) context.report({ node: callee, messageId: TIMERS.get(name)!, data: { name } });
       },
       ImportDeclaration(node) {
         const module = node.source.value;

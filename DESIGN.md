@@ -14,11 +14,12 @@ rewrote. The guarantees G1–G4 are defined in §2.5, the contracts C1–C8 in
 User documentation is the README, which covers application code: the first
 API tier (§1.3) and a few tier-2 names in passing.
 
-*D41 lands in stages (PROPOSAL.md §8); stages 1 to 3 have landed: a body is
+*D41 lands in stages (PROPOSAL.md §8); stages 1 to 4 have landed: a body is
 a generator function the runtime steps, every wait is a `yield*` of an op,
-an interruption **halts** the body (§4.14), there is no async context, and
-an expected failure is yielded, `yield* fail(e)`, typed `E` on the task, with
-a four-way outcome (§4.12, §4.13, D42). §4.14 and §4.2 describe that runtime;
+an interruption **halts** the body (§4.14), there is no async context, an
+expected failure is yielded, `yield* fail(e)`, typed `E` on the task, with
+a four-way outcome (§4.12, §4.13, D42), and the platform's waits and
+callbacks have ramme spellings in `ramme/platform` (§4.15, D43). §4.14 and §4.2 describe that runtime;
 stage 5 folds §4.14 into §4 and rewrites the rest to match. Lending (the former §4.9), `managed`,
 `InterruptedError`, `UnawaitedCallError` and the async-context adapters are
 gone; where a passage still says "await" of ramme work in a body, read
@@ -40,7 +41,7 @@ class Api {
   readonly #base = inject(Config).apiUrl;            // a dependency: places the value (§3.3)
   readonly #pool = own(openPool(this.#base));        // an entry on the value's own node (§2.6)
   *get(path: string) {                               // an operation helper: yield* api.get(…)
-    const res = yield* wait((signal) => fetch(this.#base + path, { signal }));   // the caller's signal (§4.14)
+    const res = yield* fetch(this.#base + path);     // ramme/platform's: a halt aborts the request (§4.15)
     return yield* wait(res.json());
   }
 }
@@ -74,6 +75,7 @@ rules (§9) are a separate package.
 | --- | --- |
 | `ramme` | nodes, tasks, the ambient free functions, ops, DI, topics, errors |
 | `ramme/result` | the `Result` helpers (`success` … `collect`, and `$`, which unwraps one in a body; §4.13) |
+| `ramme/platform` | the platform's waits and callbacks as ramme spells them: `fetch`, `listen`, `nextFrame`, `each` (§4.15, D43) |
 
 There is no adapter to import: the current node is a synchronous slot the
 runtime sets around every step of a body (§6, D41 decision 18), on every
@@ -94,7 +96,7 @@ callback. It has no current node after its first `await`.
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
 | `task`, `fork`, `call`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its helpers and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
-| generator bodies (§4.14): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback | `Operation`, to type a helper that is only `yield*`ed (`Operation<T, E>`), and `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of a helper a body returns and of an annotated body |
+| generator bodies (§4.14): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback; `ramme/platform`'s `fetch`, `listen`, `nextFrame` and `each` (§4.15) | `Operation`, to type a helper that is only `yield*`ed (`Operation<T, E>`), and `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of a helper a body returns and of an annotated body |
 | `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.bind`, `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`, `valueProvider`; `aliasProvider`, the seam (an interface key or a test fake bound to an implementation that keeps its own scope); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`; keys with default factories (§8) |
 
@@ -447,6 +449,10 @@ These four are idempotent on a complete node. `close()` on a fiber waits for
 its body and then releases without a signal; an `abort()` arriving first
 wins. `close()` on a bodiless node closes its subscribed children
 recursively and aborts its unsubscribed ones at their turn.
+`await using` ends a node the way an exception would, by interruption; to
+drain, call `close()` (D41, decision 32: `[Symbol.asyncDispose]()` stays
+abort, then wait, so a test or a `main` that leaves work running ends rather
+than hangs).
 
 | Operation | Before delivery | Delivered, not complete | Complete |
 | --- | --- | --- | --- |
@@ -1479,10 +1485,10 @@ in neverthrow in one line.
 
 ### 4.14 Generator bodies (D41, landing in stages)
 
-*Stages 1 to 3 of D41, which is provisional: bodies are generators, there is
+*Stages 1 to 4 of D41, which is provisional: bodies are generators, there is
 no async context, work ops are lazy, and an expected failure is a fourth
-exit, `yield* fail(e)` (D42). Stage 4 adds `ramme/platform`; stage 5 folds
-this section into §4 and rewrites §4.2.*
+exit, `yield* fail(e)` (D42). Stage 4 added `ramme/platform` (§4.15, D43);
+stage 5 folds this section into §4 and rewrites §4.2.*
 
 A body is a **generator function**, which the runtime steps, or a
 synchronous function; every wait is a `yield*` of an **op**. It ends in one
@@ -1733,6 +1739,30 @@ none after it: `current()`, `lookup` and every free function throw
 took before the first `await` still works through its methods
 (`const node = current(); await x; node.fork(t)`).
 
+### 4.15 The platform layer (`ramme/platform`, D43)
+
+**Every platform primitive that waits or calls back has a ramme spelling,**
+because waiting is where interruption attaches and calling back is where
+context is lost. A wait is an op, which a halt can stop (`yield*` of a bare
+promise is TS2488); a callback re-enters its node synchronously, and an entry
+the node owns removes the registration; an async iteration is `each` (`for
+await` is TS1103 in a generator); and a lint refuses the bare form (§9). The
+layer is the subpath `ramme/platform`, built on the public core alone (it
+imports `ramme`'s entry and types, and nothing from Node: the browser is a
+target, D41 decision 18), and it reads the platform's globals when its ops
+run. Timers are the core's `sleep`, and a callback that expects a promise is
+the core's `promised` (§4.14).
+
+| Platform | ramme |
+| --- | --- |
+| `fetch` | `yield* fetch(input, init)`, the global's parameters: a `wait` whose function calls `globalThis.fetch` with `init` and a signal combining the caller's own (a `Request` input's signal, `init.signal`) with the one the wait hands it, the body's `signal()` (in a halted `finally` the unwind fiber's deadline, so cleanup can still fetch). A `Request` input keeps its signal, `referrer` and `referrerPolicy`, which a non-empty `init` would replace or reset (the Fetch standard's `Request(input, init)`). A halt aborts the request; the wait finishes, by its rejection, and the body is returned (§4.2's third row), the `AbortError` discarded |
+| `addEventListener`, an emitter's `on`/`off`, `on*` properties | `listen(target, type, handler, opts?)`: the handler runs synchronously inside the node current at registration, as `node.run` does (`current()`, `lookup`, `own`, `fork`, `child`, `signal()`, `preventDefault()`; nothing waits: it forks a task, which reports by the node's destination rules, so a bodiless node's fork names `onFailure`, D14). A generator or `async` handler is a `TypeError`. Every call is its own registration, as an emitter's `on` is: the same handler listened twice runs twice per event, where `addEventListener` registers one `(type, callback, capture)` once. Removed at the node's delivery through the native `{ signal }` (an `AbortSignal.any` of the node's signal and `opts.signal`; on an emitter, or a target that ignores `signal` such as ws's `WebSocket`, by removal at the signal's `abort`), and at an end without one (`close()`, a natural exit) by its entry; `opts.signal` and `once` remove it early with its entry; an event that reaches it after the delivery (an emitter's call of a listener removed during the same `emit`, an earlier listener of the node's signal dispatching) is dropped; a node already delivered registers nothing. A throw from the handler never reaches the target: it aborts the node, the error as the reason, and is the entry's release failure, so the node ends `defect(e)`, as a `'link'` child's failure ends it; when the handler ended its own registration first (`close()`, `abort()`, `releaseAll()`, its `opts.signal`), that release waits for the handler to return and fails with its throw. An event dispatched during a creation runs no handler: `node.run` refuses the frame (I16), and its `CreationViolationError` goes to the dispatcher, as a bare listener's `node.run` would throw it, so the creation fails, never the registering node |
+| `requestAnimationFrame` | `yield* nextFrame()`, the frame's timestamp (a 16 ms timer where frames are absent): a halt returns the body at once and cancels the frame; an `observe` body, which no halt returns, has the wait rejected with the reason at its delivery (where `sleep` runs its full duration, D34) |
+| `for await` | `for (const x of yield* each(source)) { …; yield* each.next(); }`: `yield* each(source)` waits for the first item and is a synchronous iterable over the current one, and `yield* each.next()` waits for the next item of the innermost loop. When the body leaves the loop early (`break`, `return`, a throw, a `fail`) or is halted in it, the source's `return()` is called once, as release work: the loop is an entry the node owns, released when the loop's iterator is returned (never inside that `return()`, decision 29), and the node completes after it; a `return()` that fails is the node's release failure. An exhausted source, or one whose read failed, is never returned. A halt stops waiting for a read at once, and the release then returns the source; an async generator queues that `return()` behind a read in flight, so a read not handed `signal()` holds the node until it settles (`node:stalled`). A pass that skips `each.next()` throws a `TypeError` at the loop's head, and the source is returned |
+
+The rest of PROPOSAL.md §5.2's catalogue (`once`, `on`, `idle`, `bind` for
+observers) is not in this stage.
+
 ---
 
 ## 5. Observability (D29)
@@ -1807,8 +1837,8 @@ the slot is restored, so none inherits a body's frame or a finished creation.
 The repository is a pnpm workspace. Its root is the `ramme` package, whose
 modules, in `src/`, are these; `packages/eslint-plugin-ramme` is the lint
 plugin (§9), a separate package that ramme does not depend on and that does
-not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`)
-and `result.ts` (`ramme/result`).
+not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
+`result.ts` (`ramme/result`) and `platform.ts` (`ramme/platform`).
 
 | Module | Responsibility |
 | --- | --- |
@@ -1833,6 +1863,7 @@ and `result.ts` (`ramme/result`).
 | `lifecycle-events.ts` | `NodeEvent`, `NodeTopic` |
 | `create-context.ts` | `createRootContext` |
 | `index.ts` | the public surface |
+| `platform.ts` | the `ramme/platform` subpath (§4.15): `fetch`, `listen`, `nextFrame`, `each`, over the public surface |
 
 Runtime import graph (type-only imports not shown; no evaluation-order
 cycles): `scope`, `resource`, `internal-context` and `context` are leaves;
@@ -1854,7 +1885,12 @@ methods); `node-impl` sits over `context-key`, `context-storage`,
 `resource` and `stack`;
 `ambient` over `context-storage`, `managed` and `resource`; `fiber` over `ambient` and
 `internal-context`; `create-context` over `node-impl` and `scope`; `index`
-re-exports.
+re-exports; `platform` sits over `index` alone, the public surface, so the
+layer can do nothing a user could not. No module either entry reaches imports
+a Node module, or reads a global beyond ES2022's but `queueMicrotask`,
+`setTimeout`, `clearTimeout`, `AbortController`, `AbortSignal`,
+`DOMException`, `console` and, in `platform`, `performance` (the browser is a
+target: `check:surface` and src/test/browser-smoke.test.ts check the build).
 
 ---
 
@@ -1884,15 +1920,25 @@ nothing process-global.
 
 - **The lint rules** ship in this repository as a separate package,
   `eslint-plugin-ramme` (`packages/eslint-plugin-ramme`, §7; D35), whose
-  `configs.recommended` turns all six on, as errors (D41, decision 14):
+  `configs.recommended` turns all nine on, as errors (D41, decision 14; D43):
   `ramme/no-async-body` (an `async` function where a body is expected,
   §4.14), `ramme/no-unused-op` (a work op as an expression statement or
-  under `void`, which runs nothing, §4.14), `ramme/no-unused-outcome` (a
+  under `void`, which runs nothing, `ramme/platform`'s imported ops included,
+  §4.14), `ramme/no-unused-outcome` (a
   `yield*` or `await` of `attempt`, `settle` or `result` whose outcome is
   discarded, §4.5, D31), `ramme/no-timers` (`setTimeout`, `setInterval`,
-  `setImmediate`: timers no halt clears, §4.2, §4.4), `ramme/no-stored-borrow`
+  `setImmediate`: timers no halt clears, §4.2, §4.4; `requestAnimationFrame`,
+  whose replacement is `nextFrame`, §4.15), `ramme/no-stored-borrow`
   (a `lookup(…)` result in a class field, on `this` or in a module variable,
-  §3.2) and `ramme/no-owned-provider` (the wiring error of §2.5). The four
+  §3.2), `ramme/no-owned-provider` (the wiring error of §2.5), and the
+  platform rules of §4.15 (decision 26): `ramme/no-bare-listener`
+  (`addEventListener`, an emitter's `.on(…)`/`.once(…)` and an `on<event> =`
+  assignment of what can be a function in a generator function or a class
+  that uses ramme; the message names `listen`), `ramme/no-bare-fetch` (the global `fetch` in a generator
+  function of a file that imports ramme, fixed by importing `ramme/platform`'s
+  where that keeps every use working) and `ramme/no-bare-async-iteration`
+  (`for await` in a file that imports ramme or inside a generator function;
+  the message names `each`). The four
   async-only rules (`no-swallowed-interruption`, `no-finally-in-async`,
   `no-using-in-async`, `no-promise-combinators`) went with async bodies.
   They are syntactic, and the package's README names each rule's
@@ -1945,7 +1991,7 @@ nothing process-global.
    references that escaped their scope except that use fails loudly.
 6. **No bare callbacks, no bare promises for work.** Every asynchronous hook
    is a fiber, or a synchronous re-entry of its node through a ramme wrapper
-   (`node.run(fn)`); anything that should be a node is a task, which can only
+   (`node.run(fn)`, `listen`, §4.15); anything that should be a node is a task, which can only
    be forked or called. `Symbol.asyncDispose` is the interop contract, and
    the core runs it as a fiber.
 

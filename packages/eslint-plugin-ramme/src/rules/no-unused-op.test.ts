@@ -22,6 +22,18 @@ ruleTester.run('no-unused-op', noUnusedOp, {
       code: 'export function wire(nodes, handler, self, e) {\n  Array.prototype.forEach.call(nodes, (n) => n.remove());\n  handler.call(self, e);\n}',
     },
     {
+      name: 'the global fetch, lodash’s each and a nextFrame of its own: only ramme/platform’s are ops',
+      code: "import { each } from 'lodash';\nfunction f(xs) { fetch('/beacon'); each(xs, log); const nextFrame = () => 0; nextFrame(); }",
+    },
+    {
+      name: 'a platform op at module level: no node is current there, so it throws when made',
+      code: "import { fetch } from 'ramme/platform';\nfetch('/x');",
+    },
+    {
+      name: 'ramme/platform’s ops yielded',
+      code: "import { each, fetch, nextFrame } from 'ramme/platform';\nfunction* b(s) { yield* fetch('/a'); yield* nextFrame(); for (const x of yield* each(s)) { use(x); yield* each.next(); } }",
+    },
+    {
       name: 'a this-argument of this, null, undefined or void, even on an import',
       code: "import { handler } from './handlers';\nfunction f(e) { this.handler.call(this, e); handler.call(this, e); handler.call(null, e); handler.call(undefined); handler.call(void 0, e); }",
     },
@@ -81,6 +93,11 @@ ruleTester.run('no-unused-op', noUnusedOp, {
         messageId: 'unused',
         data: { name },
       })),
+    },
+    {
+      name: 'ramme/platform’s ops dropped, aliased too: a dropped fetch(…) sends nothing',
+      code: "import { each, fetch as get, nextFrame } from 'ramme/platform';\nfunction* b(s) { get('/beacon', { method: 'POST' }); void nextFrame(); each(s); each.next(); }",
+      errors: ['fetch', 'nextFrame', 'each', 'each.next'].map((name) => ({ messageId: 'unused', data: { name } })),
     },
   ],
 });

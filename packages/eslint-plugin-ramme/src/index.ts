@@ -1,12 +1,16 @@
 // eslint-plugin-ramme: what syntax can see of ramme's rules for generator
 // bodies (D41): an `async` function where a body is expected, a work op made
-// and never consumed, an outcome discarded, a bare timer, and the wiring
-// errors of DI. What each rule flags, why, and its known approximations are in
-// this package's README; the design is ramme's DESIGN.md §9 and DECISIONS.md
-// D35, D41.
+// and never consumed, an outcome discarded, a bare timer, the wiring errors of
+// DI, and the platform's bare waits and callbacks, which `ramme/platform`
+// spells (D43): a listener, `fetch`, `for await`. What each rule flags, why,
+// and its known approximations are in this package's README; the design is
+// ramme's DESIGN.md §9 and DECISIONS.md D35, D41, D43.
 
 import type { ESLint, Linter, Rule } from 'eslint';
 import { noAsyncBody } from './rules/no-async-body.js';
+import { noBareAsyncIteration } from './rules/no-bare-async-iteration.js';
+import { noBareFetch } from './rules/no-bare-fetch.js';
+import { noBareListener } from './rules/no-bare-listener.js';
 import { noOwnedProvider } from './rules/no-owned-provider.js';
 import { noStoredBorrow } from './rules/no-stored-borrow.js';
 import { noTimers } from './rules/no-timers.js';
@@ -21,11 +25,14 @@ const rules = {
   'no-timers': noTimers,
   'no-stored-borrow': noStoredBorrow,
   'no-owned-provider': noOwnedProvider,
+  'no-bare-listener': noBareListener,
+  'no-bare-fetch': noBareFetch,
+  'no-bare-async-iteration': noBareAsyncIteration,
 } satisfies Record<string, Rule.RuleModule>;
 
 /**
- * Each rule's severity in `recommended` (D35, D41): every rule is an error. The rules that warned (`finally`, `using`
- * and `Promise` combinators in async bodies) went with async bodies (D41, decision 14).
+ * Each rule's severity in `recommended` (D35, D41, D43): every rule is an error. The rules that warned (`finally`,
+ * `using` and `Promise` combinators in async bodies) went with async bodies (D41, decision 14).
  */
 const severities: Record<keyof typeof rules, Linter.RuleSeverity> = {
   'no-async-body': 'error',
@@ -34,6 +41,9 @@ const severities: Record<keyof typeof rules, Linter.RuleSeverity> = {
   'no-timers': 'error',
   'no-stored-borrow': 'error',
   'no-owned-provider': 'error',
+  'no-bare-listener': 'error',
+  'no-bare-fetch': 'error',
+  'no-bare-async-iteration': 'error',
 };
 
 /** The default export's type. */

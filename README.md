@@ -15,6 +15,7 @@ Zero dependencies. Node 22+ or an evergreen browser ([below](#the-platform)).
 
 ```ts
 import { createRootContext, task, all, lookup, own, inject, wait } from 'ramme';
+import { fetch } from 'ramme/platform';
 
 class Config {
   readonly apiUrl = 'https://api.example.com';
@@ -25,7 +26,7 @@ class Api {
   readonly #pool = own(openPool(this.#base));      // released with the service, never before its users
 
   *get(path: string) {                              // an operation: yield* api.get(…)
-    const res = yield* wait((signal) => fetch(this.#base + path, { signal }));   // the running task's signal
+    const res = yield* fetch(this.#base + path);    // an op: interrupting the task aborts the request
     return yield* wait(res.json());
   }
 }
@@ -292,10 +293,11 @@ const transfer = task(function* (from: Id, to: Id, amount: number) {
 
 A foreign promise is `yield* wait(p)`: the halt lets `p` finish, so what it
 produced can still be owned, and `wait(p, { abandon: true })` stops waiting
-at once instead. `wait((signal) => fetch(url, { signal }))` hands the work
-the task's signal. A library that calls you back with an async function gets
-`promised(function* …)`, which runs your generator as a child of the current
-task and hands the library a real promise:
+at once instead. `wait((signal) => driver.query(sql, { signal }))` hands the
+work the task's signal (for `fetch`, `yield* fetch(url)` from
+`ramme/platform` does it for you). A library that calls you back with an
+async function gets `promised(function* …)`, which runs your generator as a
+child of the current task and hands the library a real promise:
 
 ```ts
 import { call, promised, task, wait } from 'ramme';
@@ -336,8 +338,11 @@ swallow the interruption, so nothing can let the database driver commit.
   other free functions throw there. Reach ramme from plain async code
   through a node you name (`await app.call(main)`), `promised`, or
   `node.run(fn)` for a synchronous callback.
-- **Pass `signal()` on to `fetch` and drivers; use `sleep` for timers**, so
-  work stops promptly when interrupted: `wait((signal) => fetch(url, { signal }))`.
+- **Use `ramme/platform` for the platform; pass `signal()` on to drivers; use
+  `sleep` for timers**, so work stops promptly when interrupted:
+  `yield* fetch(url)`, `listen(target, type, handler)`, `yield* nextFrame()`
+  and `each(source)` ([below](#the-platform)), and
+  `wait((signal) => driver.query(sql, { signal }))`.
 - **Release early whenever you like.** `yield* release(x)` runs `x`'s release
   now, exactly once.
 - **`inject` in constructors, `lookup` in bodies.** `lookup` throws during
@@ -367,6 +372,52 @@ ramme needs ES2022 syntax and four runtime APIs, `Promise.withResolvers`,
 (`Symbol.dispose`, `Symbol.asyncDispose`); it defines the two symbols itself
 where they are missing and polyfills nothing else, so on an older runtime
 polyfill the other three.
+
+Every platform primitive that waits or calls back has a ramme spelling,
+because waiting is where an interruption stops a task and calling back is
+where the current node is lost. `ramme/platform` has four, and imports nothing
+from Node:
+
+- `yield* fetch(input, init)`: the global's `fetch` as an op, handed the
+  task's signal, so interrupting the task aborts the request.
+- `listen(target, type, handler)`: an `EventTarget` or an emitter (`on`/`off`);
+  the handler runs inside the node that registered it (`lookup`, `own` and
+  `fork` work there; nothing waits, so fork a task for work that does), and is
+  removed when that node ends. A throw from it ends the node, never the
+  emitter. Each call is its own registration, as an emitter's `on` is: unlike
+  `addEventListener`, listening twice with the same handler runs it twice.
+- `yield* nextFrame()`: the next animation frame's timestamp, its frame
+  cancelled if the task is interrupted (a 16 ms timer where there are no
+  frames).
+- `for (const x of yield* each(source)) { …; yield* each.next(); }`: `for
+  await` for a body; leaving the loop, or an interruption, returns the source.
+
+A search box, in a browser:
+
+```ts
+import { createRootContext, fork, task, sleep, wait, type Fiber } from 'ramme';
+import { fetch, listen } from 'ramme/platform';
+
+const search = task(function* (q: string) {
+  yield* sleep(200);                                               // debounce: a newer keystroke stops this run here
+  const res = yield* fetch(`/search?q=${encodeURIComponent(q)}`);  // or aborts its request here
+  show(yield* wait(res.json()));
+});
+
+const app = createRootContext();
+const box = app.child({ name: 'search-box' });
+let latest: Fiber<void> | undefined;
+box.run(() =>
+  listen(input, 'input', () => {                                   // runs inside box; removed when box ends
+    latest?.abort();
+    latest = fork(search.with({ onFailure: showError }), input.value); // box has no body to join it: name a handler
+  }),
+);
+```
+
+`await using` ends a node the way an exception would, by interruption; to
+drain, call `close()`. That holds for the root at the top level and for any
+node a test scopes with it.
 
 ## Errors you will meet
 
@@ -503,10 +554,14 @@ export default [...tseslint.configs.recommended, ramme.configs.recommended];
 
 `ramme.configs.recommended` reports an `async` function passed as a body, an
 op made and never yielded (`call(t);`), a discarded `attempt`, `settle` or
-`result` outcome, `setTimeout` and its siblings, a `lookup` result stored on
-an object or in a module variable, and a value provided on the node that owns
-it. The [plugin's README](packages/eslint-plugin-ramme/README.md) says what
-each rule flags, why, and where it is approximate.
+`result` outcome, `setTimeout` and its siblings (`requestAnimationFrame`
+included), a `lookup` result stored on an object or in a module variable, a
+value provided on the node that owns it, and, in code that uses ramme, the
+platform's bare forms `ramme/platform` replaces: a listener
+(`addEventListener`, `.on(…)`, `el.onclick =`), the global `fetch` in a body
+(fixed by importing ramme's), and `for await`. The
+[plugin's README](packages/eslint-plugin-ramme/README.md) says what each rule
+flags, why, and where it is approximate.
 
 ## Documentation
 

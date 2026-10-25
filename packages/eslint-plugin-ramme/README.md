@@ -6,7 +6,9 @@ A ramme body is a generator function that the runtime steps: every wait is a
 `yield*` where it waits. Most mistakes are type errors already; these rules
 flag what types do not see, or say it better: an `async` function passed as a
 body, a work op made and never yielded (it runs nothing), an outcome thrown
-away, a platform timer, and a few wiring errors visible in the syntax.
+away, a platform timer, a few wiring errors visible in the syntax, and the
+platform's bare waits and callbacks that `ramme/platform` spells: a listener,
+`fetch`, `for await`.
 
 The rules are syntactic: they need no type information and work on
 JavaScript and TypeScript alike. They recognize ramme's functions by name
@@ -59,9 +61,12 @@ there, which resolves to the generator object (ramme's DESIGN.md §4.14).
 | [`no-async-body`](#no-async-body) | error | an `async` function where a body is expected |
 | [`no-unused-op`](#no-unused-op) | error | a work op (`call(…)`, `sleep(…)`, …) as a statement, never yielded |
 | [`no-unused-outcome`](#no-unused-outcome) | error | `yield* attempt(…)`, `settle(…)` or `result(f)` whose outcome is discarded |
-| [`no-timers`](#no-timers) | error | `setTimeout`, `setInterval`, `setImmediate` |
+| [`no-timers`](#no-timers) | error | `setTimeout`, `setInterval`, `setImmediate`, `requestAnimationFrame` |
 | [`no-stored-borrow`](#no-stored-borrow) | error | a `lookup(…)` result stored in a field, on `this` or in a module variable |
 | [`no-owned-provider`](#no-owned-provider) | error | `addProvider(valueProvider(K, x))` for an `x` the node owns |
+| [`no-bare-listener`](#no-bare-listener) | error | `addEventListener`, an emitter's `.on(…)`/`.once(…)`, `el.onclick = …` in ramme code |
+| [`no-bare-fetch`](#no-bare-fetch) | error | the global `fetch` in a body of a file that uses ramme |
+| [`no-bare-async-iteration`](#no-bare-async-iteration) | error | `for await` in a file that uses ramme, or inside a body |
 
 The four rules of the async era (`no-swallowed-interruption`,
 `no-finally-in-async`, `no-using-in-async`, `no-promise-combinators`) are
@@ -110,7 +115,10 @@ another object (`fn.call(async () => …)` is flagged, as `call`).
 `t.attempt(…)`), as an expression statement or under `void`: a free one inside
 a function, a method one anywhere, module level included (an explicit receiver
 needs no current node, so `app.call(main);` at the top of a script runs
-nothing). `fork(…)` and the lifecycle verbs (`release`, `releaseAll`, `close`)
+nothing). So are `ramme/platform`'s ops, `fetch(…)`, `nextFrame()`, `each(…)`
+and `each.next()`, inside a function, when the file imports them from
+`ramme/platform` (aliased too): a dropped `fetch('/beacon', …);` sends nothing.
+`fork(…)` and the lifecycle verbs (`release`, `releaseAll`, `close`)
 are not flagged: they are eager. Nor are the platform's methods of those names:
 `Promise.all`, `Promise.race` and `Atomics.wait` on the globals, and
 `Function.prototype.call` where the syntax shows it: through a prototype
@@ -150,11 +158,14 @@ untyped parameter `t`, with an `x` that is none of those, is not flagged, and
 
 ### no-timers
 
-**Flags** calls of `setTimeout`, `setInterval` and `setImmediate`, bare or
-through `globalThis.`, `window.` or `global.`, when the file does not declare
-the name itself; and named imports of those three from `timers`,
-`node:timers`, `timers/promises` and `node:timers/promises`, reported once, at
-the import. `queueMicrotask` and the `clear…` functions are allowed.
+**Flags** calls of `setTimeout`, `setInterval`, `setImmediate` and
+`requestAnimationFrame`, bare or through `globalThis.`, `window.` or `global.`,
+when the file does not declare the name itself; and named imports of the first
+three from `timers`, `node:timers`, `timers/promises` and
+`node:timers/promises`, reported once, at the import. `queueMicrotask`,
+`cancelAnimationFrame` and the `clear…` functions are allowed.
+`requestAnimationFrame`'s message names its replacement, `yield* nextFrame()`
+from `ramme/platform`, a wait whose frame a halt cancels (D43).
 
 **Why.** A timer is a foreign wait (§4.14): a body waiting on one through
 `yield* wait(p)` is let finish by a halt, so its node, and everything the
@@ -254,6 +265,140 @@ ramme's or not. Not flagged: an outcome stored and never read
 (`const r = yield* attempt(t)`; `no-unused-vars` catches the unused variable),
 or passed to something that ignores it.
 
+### no-bare-listener
+
+**Flags** a listener registered on the platform in ramme code:
+`<x>.addEventListener(type, …)` (and the window's bare `addEventListener(…)`),
+an emitter's `<x>.on(type, …)`, `<x>.once(type, …)` and
+`<x>.addListener(type, …)` (two arguments or more), and an `on<event>` handler
+assigned as a property (`el.onclick = …`, `ws.onmessage = …`, `??=` and the
+other logical assignments too; assigning `null` or `undefined` removes one and
+is fine). Ramme code is what is lexically inside
+a generator function (a body, a helper, a generator method, with the callbacks
+nested in it) or anywhere in a class that uses ramme: one with a generator
+method, or a free call of `inject`, `lookup`, `own`, `current`, `signal`,
+`fork`, `child`, `pool` or `listen` anywhere in it (a service built under a
+node).
+
+**Why.** A callback the platform makes runs outside every node: `current()`,
+`lookup`, `own` and `fork` have no node there and throw, and nothing removes
+the listener when the node that registered it ends. Passing
+`{ signal: signal() }` removes it at the node's delivery, but the callback
+still runs outside the node, and a node's signal never fires at a natural exit
+or under `close()`, so it is still flagged. `listen` from `ramme/platform` runs
+the handler synchronously inside the registering node and removes it when the
+node ends; a handler that has work to wait for forks a task (D43):
+
+```ts
+import { listen } from 'ramme/platform';
+
+const box = app.child({ name: 'search-box' });
+box.run(() =>
+  listen(input, 'input', () => {                  // instead of input.addEventListener('input', …)
+    latest?.abort();
+    latest = fork(search.with({ onFailure: showError }), input.value);
+  }),
+);
+```
+
+**Approximations.** Matched by method name: any `.on(a, b)` in ramme code is
+taken for an emitter's (a router's or a jQuery object's too), and a class that
+uses none of the listed names (a plain helper class a body instantiates) is not
+checked. An `on<event>` property is matched by its name (`on` and lower-case
+letters) and by what it is assigned: a value that is never a function (a
+literal, a template, an object or array literal, an operator's result such as
+`!busy` or `n + 1`, or a choice among them) is data, and so is anything
+assigned by `+=` and its kin, so `this.online = true` and `opts.once = true`
+are not flagged. A few common words that name no handler (`once`, `one`,
+`only`, `online`, `ongoing`, `onset`, `onto`, `onward`, `onboarding`, …) are
+never flagged, whatever they are assigned (the `online` event's handler is
+`ononline`); another such word assigned a variable, a member or a call
+(`this.onramp = ramp`) is taken for a handler. Top-level code is not flagged (decision 26): the README's
+`server.on('request', (req) => app.fork(…))` names its node, as code outside
+every node must. Not flagged: `prependListener` and the other emitter methods;
+a listener registered through an alias or a library wrapper; a
+`new ResizeObserver(cb)` or another observer (decision 25's `bind` is not in
+`ramme/platform` yet).
+
+### no-bare-fetch
+
+**Flags** a call of the global `fetch`, bare or as `globalThis.fetch(…)`,
+`window.fetch(…)` or `self.fetch(…)`, lexically inside a generator function
+(a body, a helper, a generator method, and the callbacks nested in it, so the
+older `yield* wait((signal) => fetch(url, { signal }))` is flagged too), in a
+file that imports from `ramme` or one of its subpaths. A file that does not
+use ramme is not checked, and neither is code outside every generator
+function: there `fetch` is plain async code's, and `ramme/platform`'s would
+throw `NoCurrentNodeError`.
+
+**Why.** A bare `fetch` is a promise ramme cannot see. Waited for with
+`yield* wait(fetch(url))`, a halt lets the whole request finish, holding the
+node, and aborts nothing. `fetch` from `ramme/platform` has the global's
+parameters and is an op handed the body's signal, so a halt aborts the request
+(D43):
+
+```ts
+import { fetch } from 'ramme/platform';
+
+const load = task(function* (id: string) {
+  const res = yield* fetch(`/users/${id}`);       // instead of yield* wait(fetch(`/users/${id}`))
+  return yield* wait(res.json());
+});
+```
+
+**Fix.** The fix adds `fetch` to the file's `ramme/platform` import, or adds
+`import { fetch } from 'ramme/platform';` after the file's last ramme import.
+The import shadows the global in the whole file, so the fix is offered only
+when that keeps every use working: every reference to the global `fetch` in
+the file is a call made directly in a generator function, or in the function a
+`wait(…)` there is handed, and its result is used as an op can be: yielded,
+handed to `wait`, or chained with `.then(…)`. A `fetch(…)` whose result is
+dropped (`fetch('/beacon', …);` runs a request, the op would run nothing), one
+used as a promise (`.catch(…)` or `.finally(…)`, on it or down its `.then(…)`
+chain: the op is a plain thenable, with `then` only), one a plain `yield`
+hands on (`yield fetch(u)`: a generator that hands a request to its consumer is
+no body, and the op would throw there with no current node), one in a later
+callback (`p.then(() => fetch(u))`, which runs with no current node), one
+outside a body, and `fetch` read as a value prevent it.
+`globalThis.fetch(…)` and its siblings are reported without a fix: the import
+does not change them.
+
+**Approximations.** Not flagged: a `fetch` reached through an alias
+(`const f = fetch`), an import of another `fetch` (`node-fetch`), or a
+`fetch` in a synchronous function a body returns. A file is ramme's by an
+`import` declaration only (a type-only one included), never by `require` or
+`import()`.
+
+### no-bare-async-iteration
+
+**Flags** every `for await` in a file that imports from `ramme` or one of its
+subpaths, the top level included, and one lexically inside a generator
+function anywhere (in an async callback or helper a body contains). An
+`async function*` in a file that does not use ramme is no body, and is not
+flagged.
+
+**Why.** A body cannot write `for await` (TS1103: a generator is not async).
+Written in an async callback instead, the loop waits where ramme cannot see:
+a halt cannot stop it, no node is current after its first wait, and its source
+is not closed as the body's release work. `each` from `ramme/platform`
+iterates an async iterable in a body; a halt or a `break` returns the source,
+and the node waits for it (D43):
+
+```ts
+import { each } from 'ramme/platform';
+
+const tail = task(function* (lines: AsyncIterable<string>) {
+  for (const line of yield* each(lines)) {        // instead of for await (const line of lines)
+    handle(line);
+    yield* each.next();                           // every pass, a `continue` included
+  }
+});
+```
+
+**Approximations.** Every `for await` in a file that uses ramme is flagged,
+plain async code's included (a script that reads lines before it calls
+`app.call(main)`); disable it there with a reason.
+
 ## Not covered
 
 - A `yield*` in a helper's `finally` loses the halt: the body runs on past it
@@ -265,6 +410,10 @@ or passed to something that ignores it.
 - The hazards that depend on what happens at run time (a lost halt, a late
   read that creates a value, a stalled halted `finally`) are ramme's
   development-mode diagnostics and `node:stalled` (§4.4).
+- The rest of the platform's catalogue (PROPOSAL.md §5.2): observers
+  (`new ResizeObserver(cb)` outside `own`), `requestIdleCallback` and
+  `scheduler.postTask` are not flagged; their ramme spellings (`bind`,
+  `idle`) are not in `ramme/platform` yet.
 
 ## Development
 

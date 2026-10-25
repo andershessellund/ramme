@@ -13,6 +13,11 @@
 // `fork(t);` and `void release(x);` are fine. `no-unused-outcome` reports a
 // consumed `attempt`, `settle` or `result` whose outcome is discarded.
 //
+// `ramme/platform`'s ops are lazy too (D43): `fetch(…)`, `nextFrame()`,
+// `each(…)` and `each.next()`, flagged when the file imports them from
+// `ramme/platform` (the names alone are common: the global `fetch`, lodash's
+// `each`), so a dropped `fetch(url);` that sends nothing is reported.
+//
 // The platform's own methods of those names are not flagged: `Promise.all`,
 // `Promise.race` and `Atomics.wait` on the globals, and `Function.prototype.call`
 // where the syntax shows it (`X.prototype.m.call(…)`, a `this`-argument of
@@ -21,8 +26,37 @@
 // such as a parameter, called with an argument that is no task or body).
 
 import type { Rule, Scope } from 'eslint';
-import { type EsNode, type Identifier, type MemberExpression, calleeName, declaredVariable, enclosingFunction, isGlobalName, propertyName, unwrap } from '../ast.js';
+import {
+  type CallExpression,
+  type EsNode,
+  type Identifier,
+  type MemberExpression,
+  calleeName,
+  declaredVariable,
+  enclosingFunction,
+  importBinding,
+  isGlobalName,
+  propertyName,
+  unwrap,
+} from '../ast.js';
 import { docsUrl } from '../docs.js';
+
+/** `ramme/platform`'s work ops, recognized by their import. */
+const PLATFORM_OPS = new Set(['fetch', 'nextFrame', 'each']);
+
+/** The op a call of `ramme/platform`'s makes (`fetch`, `nextFrame`, `each`, `each.next`), by the file's import of it. */
+function platformOp(context: Rule.RuleContext, call: CallExpression): string | undefined {
+  const callee = unwrap(call.callee as EsNode);
+  const binding = (id: EsNode): string | undefined => {
+    if (id.type !== 'Identifier') return undefined;
+    const b = importBinding(context, id);
+    return b?.module === 'ramme/platform' && PLATFORM_OPS.has(b.imported) ? b.imported : undefined;
+  };
+  if (callee.type === 'Identifier') return binding(callee);
+  if (callee.type === 'MemberExpression' && propertyName(callee) === 'next' && binding(unwrap(callee.object as EsNode)) === 'each')
+    return 'each.next';
+  return undefined;
+}
 
 const WORK_VERBS = new Set([
   'call',
@@ -186,6 +220,11 @@ export const noUnusedOp: Rule.RuleModule = {
         let e = unwrap(node.expression as EsNode);
         if (e.type === 'UnaryExpression' && e.operator === 'void') e = unwrap(e.argument as EsNode);
         if (e.type !== 'CallExpression') return;
+        const platform = platformOp(context, e);
+        if (platform !== undefined) {
+          if (enclosingFunction(node) !== null) context.report({ node: e, messageId: 'unused', data: { name: platform } });
+          return;
+        }
         const name = calleeName(e);
         if (name === undefined || !WORK_VERBS.has(name)) return;
         const callee = unwrap(e.callee as EsNode);
