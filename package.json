@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "license": "Apache-2.0",
   "author": "Anders Hessellund Jensen",
-  "description": "One tree for JavaScript services and work: dependency injection, structured concurrency and resource lifetimes, carried across await by the platform's async context. Zero dependencies.",
+  "description": "One tree for JavaScript services and work: dependency injection, structured concurrency and resource lifetimes, with generator bodies the runtime steps and interrupts. Zero dependencies; Node 22+ or an evergreen browser.",
   "keywords": [
     "dependency injection",
     "di",
@@ -11,8 +11,7 @@
     "tasks",
     "fibers",
     "cancellation",
-    "async context",
-    "AsyncLocalStorage",
+    "generators",
     "resource management",
     "lifetime",
     "scopes"
@@ -24,22 +23,13 @@
   "bugs": "https://github.com/andershessellund/ramme/issues",
   "homepage": "https://github.com/andershessellund/ramme#readme",
   "sideEffects": [
-    "./dist/node.js",
-    "./dist/async-context.js"
+    "./dist/disposal-symbols.js"
   ],
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./node": {
-      "types": "./dist/node.d.ts",
-      "default": "./dist/node.js"
-    },
-    "./async-context": {
-      "types": "./dist/async-context.d.ts",
-      "default": "./dist/async-context.js"
     },
     "./result": {
       "types": "./dist/result.d.ts",

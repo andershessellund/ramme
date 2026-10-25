@@ -8,7 +8,6 @@
 // the creation-frame split of ambient.ts (I16; DESIGN.md §3.5); and the
 // `Context.run` suite ported from the pre-redesign push-context.test.ts.
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import './node.js';
 import {
   all,
   attempt,
@@ -19,7 +18,6 @@ import {
   interrupted,
   join,
   lookup,
-  managed,
   never,
   own,
   pool,
@@ -30,9 +28,10 @@ import {
   runSync,
   settle,
   signal,
+  wait,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber, Pool } from './context.js';
+import type { Context, Fiber, Op, Pool } from './context.js';
 import { peekCurrentNode } from './context-storage.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
@@ -84,8 +83,8 @@ interface Via {
 
 /**
  * Run `run` with `NodeImpl.prototype[method]` spied on, and report its first call. Vitest's spy
- * attaches `then` to a returned `Promise` (for `mock.settledResults`), which counts as awaiting a
- * managed promise; harmless here, because the node that makes these awaits is never delivered.
+ * attaches `then` to a returned `Promise` (for `mock.settledResults`): a lifecycle op, whose `then` is
+ * one more consumer of work already started; a work op is no `Promise`, so the spy never runs it.
  */
 function viaPrototype(method: keyof NodeImpl, run: () => unknown): Via {
   const spy = vi.spyOn(NodeImpl.prototype as any, method as string);
@@ -104,15 +103,15 @@ function viaPrototype(method: keyof NodeImpl, run: () => unknown): Via {
 }
 
 describe('each free function is current().<method>(...) (law 2, I21)', () => {
-  it('own, release, releaseAll, fork, call, all, race, pool, child, join, result, interrupted, never, managed, runSync and lookup call the method on the current node with the same arguments and return its result', async () => {
+  it('own, release, releaseAll, fork, call, all, race, pool, child, join, result, interrupted, never, wait, runSync and lookup call the method on the current node with the same arguments and return its result', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext();
-    const echo = task(async (n: number) => n, { name: 'echo' });
+    const echo = task(function* (n: number) { return n; }, { name: 'echo' });
     const onFailure = (): void => {};
     const checked: string[] = [];
     await root.call(
       task(
-        async () => {
+        function* () {
           const N = current();
           const expectVia = (r: Via, args: unknown[], label: string): void => {
             expect(r.self, label).toBe(N);
@@ -125,11 +124,11 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
           expectVia(viaPrototype('own', () => own(x)), [x], 'own');
           const relX = viaPrototype('release', () => release(x));
           expectVia(relX, [x], 'release');
-          await (relX.ret as Promise<void>);
+          yield* (relX.ret as Op<void>);
           own(() => {});
           const relAll = viaPrototype('releaseAll', () => releaseAll());
           expectVia(relAll, [], 'releaseAll');
-          await (relAll.ret as Promise<void>);
+          yield* (relAll.ret as Op<void>);
           expect(impl(N).explicit.size).toBe(0);
 
           const forked = viaPrototype('fork', () => fork(echo, 1));
@@ -139,22 +138,22 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
 
           const joined = viaPrototype('join', () => join(f));
           expectVia(joined, [f], 'join');
-          expect(await (joined.ret as Promise<number>)).toBe(1);
+          expect(yield* (joined.ret as Op<number>)).toBe(1);
           const resulted = viaPrototype('result', () => result(f));
           expectVia(resulted, [f], 'result');
-          expect(await (resulted.ret as Promise<unknown>)).toEqual({ status: 'success', value: 1 });
+          expect(yield* (resulted.ret as Op<unknown>)).toEqual({ status: 'success', value: 1 });
 
           const called = viaPrototype('call', () => call(echo, 2));
           expectVia(called, [echo, 2], 'call');
-          expect(await (called.ret as Promise<number>)).toBe(2);
+          expect(yield* (called.ret as Op<number>)).toBe(2);
 
           const members = [echo.bind(3)];
           const alled = viaPrototype('all', () => all(members, { name: 'g' }));
           expectVia(alled, [members, { name: 'g' }], 'all');
-          expect(await (alled.ret as Promise<number[]>)).toEqual([3]);
+          expect(yield* (alled.ret as Op<number[]>)).toEqual([3]);
           const raced = viaPrototype('race', () => race(members));
           expectVia(raced, [members, undefined], 'race');
-          expect(await (raced.ret as Promise<number>)).toBe(3);
+          expect(yield* (raced.ret as Op<number>)).toBe(3);
 
           const pooled = viaPrototype('pool', () => pool({ name: 'p', onFailure }));
           expectVia(pooled, [{ name: 'p', onFailure }], 'pool');
@@ -163,12 +162,13 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
           expectVia(childed, [{ name: 'c' }], 'child');
           expect(impl(childed.ret as Context).parent).toBe(N);
 
-          expectVia(viaPrototype('interrupted', () => interrupted()), [], 'interrupted'); // dropped unawaited: safe (D13)
+          expectVia(viaPrototype('interrupted', () => interrupted()), [], 'interrupted'); // dropped unconsumed: runs nothing
           expectVia(viaPrototype('never', () => never()), [], 'never');
           const p = Promise.resolve(5);
-          const managedVia = viaPrototype('managed', () => managed(p));
-          expectVia(managedVia, [p], 'managed');
-          expect(await (managedVia.ret as Promise<number>)).toBe(5);
+          const opts = { abandon: true };
+          const waited = viaPrototype('wait', () => wait(p, opts));
+          expectVia(waited, [p, opts], 'wait');
+          expect(yield* (waited.ret as Op<number>)).toBe(5);
 
           const add = (a: number, b: number): number => a + b;
           const synced = viaPrototype('runSync', () => runSync(add, 4, 5));
@@ -207,13 +207,13 @@ describe('each free function is current().<method>(...) (law 2, I21)', () => {
     };
     const seen: Record<string, Probe> = {};
     let caller: Context | undefined;
-    await root.call(async () => {
+    await root.call(function* () {
       caller = current();
-      const f = fork(async () => {
+      const f = fork(function* () {
         seen.fork = probe();
       });
-      await join(f);
-      await call(async () => {
+      yield* join(f);
+      yield* call(function* () {
         seen.call = probe();
       });
       const ctx = child({ name: 'ctx' });
@@ -257,7 +257,7 @@ describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
         ownerOutcome: owner!.outcome?.status,
       };
     };
-    await root.call(async () => {
+    await root.call(function* () {
       owner = current();
       own({ [Symbol.asyncDispose]: async () => record('asyncDispose') });
       own({ v: 1 }, () => record('value, release'));
@@ -275,10 +275,10 @@ describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
     let reason: unknown;
     await root.call(
       task(
-        async () => {
-          own(async () => {
+        function* () {
+          own(function* () {
             const s = signal();
-            await sleep(1000, s);
+            yield* wait(sleep(1000, s));
             reason = s.reason;
           });
         },
@@ -313,7 +313,7 @@ describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
     let inHandler: Context | undefined;
     root.fork(
       task(
-        async () => {
+        function* () {
           throw new Error('x');
         },
         {
@@ -337,20 +337,20 @@ describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
     own: () => own(() => {}),
     release: () => release({}),
     releaseAll: () => releaseAll(),
-    fork: () => fork(async () => 1),
-    call: () => call(async () => 1),
+    fork: () => fork(function* () { return 1; }),
+    call: () => call(function* () { return 1; }),
     all: () => all([]),
-    race: () => race([task(async () => 1)]),
+    race: () => race([task(function* () { return 1; })]),
     pool: () => pool({ name: 'p', onFailure: () => {} }),
     child: () => child(),
     join: () => join({} as Fiber<unknown>),
     result: () => result({} as Fiber<unknown>),
     interrupted: () => interrupted(),
     never: () => never(),
-    managed: () => managed(Promise.resolve(1)),
+    wait: () => wait(Promise.resolve(1), { abandon: true }),
     runSync: () => runSync(() => 1),
-    'task.fork': () => task(async () => 1).fork(),
-    'task.call': () => task(async () => 1).call(),
+    'task.fork': () => task(function* () { return 1; }).fork(),
+    'task.call': () => task(function* () { return 1; }).call(),
   };
 
   it('every free function throws synchronously at top level, naming the operation and not the adapter import', () => {
@@ -401,7 +401,7 @@ describe('runSync (DESIGN.md §4.11)', () => {
   it('runs fn in a fresh child of the current node and releases it before returning', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const me = current();
       const before = impl(me).explicit.size;
       let inner: Context | undefined;
@@ -429,7 +429,7 @@ describe('runSync (DESIGN.md §4.11)', () => {
   it('a throwing fn still releases the child, and the error propagates', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       expect(() =>
         runSync(() => {
           own(() => t.push('released'));
@@ -458,7 +458,7 @@ describe('lookup (DESIGN.md §3.2): optional and skipSelf pass through', () => {
     const K = createInjectionKey<string>('K');
     const M = createInjectionKey<string>('M');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
-    await root.call(async () => {
+    await root.call(function* () {
       const k = lookup(K);
       expectTypeOf(k).toEqualTypeOf<string>();
       expect(k).toBe('k');
@@ -477,7 +477,7 @@ describe('lookup (DESIGN.md §3.2): optional and skipSelf pass through', () => {
     const root = createRootContext({ providers: [valueProvider(K, 'outer')] });
     await root.call(
       task(
-        async () => {
+        function* () {
           expect(lookup(K)).toBe('inner');
           expect(lookup(K, { skipSelf: true })).toBe('outer');
           expect(lookup(M, { skipSelf: true, optional: true })).toBeUndefined();
@@ -495,7 +495,7 @@ describe('lookup (DESIGN.md §3.2): optional and skipSelf pass through', () => {
 
   it('lookup(ContextKey) with a current node is a CreationViolationError pointing at current()', async () => {
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       expect(() => lookup(ContextKey)).toThrow(CreationViolationError);
       expect(() => lookup(ContextKey)).toThrow(/use current\(\)/);
     });
@@ -507,7 +507,7 @@ describe('own (DESIGN.md §2.6, D16) and release', () => {
   it('own(x) twice with one argument returns x both times and registers one entry; own(x, release) on an owned x is AlreadyOwnedError', async () => {
     const dispose = vi.fn();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const x = { [Symbol.dispose]: dispose };
       expect(own(x)).toBe(x);
       expect(own(x)).toBe(x);
@@ -523,7 +523,7 @@ describe('own (DESIGN.md §2.6, D16) and release', () => {
     const t = trace();
     const root = createRootContext();
     let released: unknown;
-    await root.call(async () => {
+    await root.call(function* () {
       const r = own({ [Symbol.asyncDispose]: async () => t.push('async resource') });
       const v = own({ id: 7 }, (value) => {
         released = value;
@@ -541,9 +541,9 @@ describe('own (DESIGN.md §2.6, D16) and release', () => {
 
   it('own(fork(t)) unsubscribes the fiber; a node this node does not hold is NotOwnedError; non-objects and objects without a protocol are TypeErrors', async () => {
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const me = impl(current());
-      const f = own(fork(async () => 1));
+      const f = own(fork(function* () { return 1; }));
       expect(impl(f).subscribed).toBe(false);
       expect(me.subscribers.has(impl(f))).toBe(false);
       expect(me.explicit.find(f)).toBeDefined(); // its entry stays where it is
@@ -552,7 +552,7 @@ describe('own (DESIGN.md §2.6, D16) and release', () => {
       expect(() => own(42 as unknown as object, () => {})).toThrow(TypeError);
       expect(() => own({} as Disposable)).toThrow(TypeError);
       foreign.abort();
-      expect(await join(f)).toBe(1);
+      expect(yield* join(f)).toBe(1);
     });
     await root.close();
   });
@@ -560,14 +560,14 @@ describe('own (DESIGN.md §2.6, D16) and release', () => {
   it('release(x) runs that release now and once; releaseAll() releases the rest top-down; releasing what is not owned is NotOwnedError', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const a = own(t.at('a'));
       own(t.at('b'));
       const c = own(t.at('c'));
-      await release(a);
+      yield* release(a);
       expect(t.log).toEqual(['a']);
       expect(() => release(a)).toThrow(NotOwnedError);
-      await releaseAll();
+      yield* releaseAll();
       expect(t.log).toEqual(['a', 'c', 'b']);
       expect(() => release(c)).toThrow(NotOwnedError);
       expect(impl(current()).explicit.size).toBe(0);
@@ -599,7 +599,7 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
           result: () => result(f),
           interrupted: () => interrupted(),
           never: () => never(),
-          managed: () => managed(Promise.resolve(1)),
+          wait: () => wait(Promise.resolve(1), { abandon: true }),
           runSync: () => runSync(() => 1),
         };
         for (const [op, fn] of Object.entries(refused)) {
@@ -643,9 +643,9 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
         void release(x); // runs now
         own({ [Symbol.dispose]: t.at('kept') });
         this.reaper = own(
-          fork(async () => {
+          fork(function* () {
             reaperParent = impl(current()).parent;
-            await never();
+            yield* never();
           }),
         );
         this.pool = pool({ name: 'p', onFailure: () => {} });

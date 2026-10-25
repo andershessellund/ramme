@@ -1,8 +1,7 @@
-// The one test file that does not import './node.js': it exercises the
-// no-storage path first, then registers the adapter dynamically. `isolate:
-// true` and `pool: 'forks'` keep this file's module state its own.
-import { describe, it, expect, beforeAll } from 'vitest';
-// ambient.ts registers no adapter: its imports are context-storage and resource.
+// storage.test.ts — the current-node slot of context-storage.ts (DESIGN.md §6; D41 decision 18): a synchronous
+// module slot that `runInFrame` sets for a synchronous `fn` and restores, re-entrant and on throw. Nothing carries
+// it across an `await`, a microtask or a timer: ramme registers no async context on any platform.
+import { describe, it, expect } from 'vitest';
 import { call, current, fork, lookup, own, signal } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import {
@@ -10,11 +9,12 @@ import {
   currentCreation,
   currentFrame,
   currentNode,
-  hasStorage,
   peekCurrentNode,
+  runDetached,
   runInFrame,
 } from './context-storage.js';
 import type { Frame } from './context-storage.js';
+import { defineDisposalSymbols } from './disposal-symbols.js';
 import type { CreationState } from './inject.js';
 import type { NodeImpl } from './node-impl.js';
 import { NoCurrentNodeError } from './resource.js';
@@ -41,57 +41,28 @@ function fakeCreation(valueNode: NodeImpl): CreationState & { made: number } {
   return cs as unknown as CreationState & { made: number };
 }
 
-describe('without a context storage adapter', () => {
-  it('reads report no frame and never throw', () => {
-    expect(hasStorage()).toBe(false);
+describe('the slot (DESIGN.md §6, D41 decision 18)', () => {
+  it('outside any frame nothing is current, and the reads never throw: nothing needs registering', () => {
     expect(currentFrame()).toBeUndefined();
     expect(currentCreation()).toBeUndefined();
     expect(peekCurrentNode()).toBeUndefined();
     expect(currentNode()).toBeUndefined();
   });
 
-  it("runInFrame throws NoCurrentNodeError naming 'ramme/node' and does not run fn", () => {
-    let ran = false;
-    const run = () =>
-      runInFrame({ node: fakeNode(1), creation: undefined }, () => {
-        ran = true;
-      });
-    expect(run).toThrow(NoCurrentNodeError);
-    expect(run).toThrow(/import 'ramme\/node'/);
-    expect(run).toThrow(/ramme\/async-context/);
-    expect(ran).toBe(false);
-    try {
-      run();
-    } catch (e) {
-      expect((e as Error).name).toBe('NoCurrentNodeError');
-    }
-  });
-
-  it("current() and the other free functions throw NoCurrentNodeError naming 'ramme/node'", () => {
+  it('current() and the other free functions outside any frame throw NoCurrentNodeError naming the cause, not an import', () => {
     const ops: Record<string, () => unknown> = {
       current: () => current(),
       signal: () => signal(),
       lookup: () => lookup(createInjectionKey<string>('K')),
       own: () => own(() => {}),
-      fork: () => fork(async () => 1),
-      call: () => call(async () => 1),
+      fork: () => fork(function* () {}),
+      call: () => call(function* () {}),
     };
     for (const [op, fn] of Object.entries(ops)) {
       expect(fn, op).toThrow(NoCurrentNodeError);
-      expect(fn, op).toThrow(/import 'ramme\/node'/);
+      expect(fn, op).toThrow(/no async context/);
+      expect(fn, op).not.toThrow(/import 'ramme\/node'/);
     }
-  });
-});
-
-describe("with 'ramme/node' registered", () => {
-  beforeAll(async () => {
-    await import('./node.js');
-  });
-
-  it('the adapter registers storage; outside any frame nothing is current', () => {
-    expect(hasStorage()).toBe(true);
-    expect(currentFrame()).toBeUndefined();
-    expect(currentNode()).toBeUndefined();
   });
 
   it('a body frame is current inside runInFrame and gone after it returns', () => {
@@ -108,19 +79,23 @@ describe("with 'ramme/node' registered", () => {
     expect(currentFrame()).toBeUndefined();
   });
 
-  it('a frame survives await and setTimeout', async () => {
+  it('a frame does not survive an await, a microtask or a timer: the slot is synchronous', async () => {
     const frame: Frame = { node: fakeNode(3), creation: undefined };
     const fromTimer = deferred<Frame | undefined>();
+    const fromMicrotask = deferred<Frame | undefined>();
+    const seen: (Frame | undefined)[] = [];
     await runInFrame(frame, async () => {
-      await micro();
-      expect(currentFrame()).toBe(frame);
-      await tick();
-      expect(currentFrame()).toBe(frame);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      expect(currentFrame()).toBe(frame);
+      seen.push(currentFrame()); // before the first await: still the step's
+      queueMicrotask(() => fromMicrotask.resolve(currentFrame()));
       setTimeout(() => fromTimer.resolve(currentFrame()), 1);
+      await micro();
+      seen.push(currentFrame());
+      await tick();
+      seen.push(currentFrame());
     });
-    expect(await fromTimer.promise).toBe(frame);
+    expect(seen).toEqual([frame, undefined, undefined]);
+    expect(await fromMicrotask.promise).toBeUndefined();
+    expect(await fromTimer.promise).toBeUndefined();
     expect(currentFrame()).toBeUndefined();
   });
 
@@ -158,11 +133,11 @@ describe("with 'ramme/node' registered", () => {
       expect(peekCurrentNode()).toBe(valueNode);
       expect(currentNode()).toBe(valueNode);
       expect(cs.made).toBe(1);
-      // Continuations the factory schedules carry the creation frame in the platform's async context ...
+      // Continuations the factory schedules run after the slot is restored: none sees the creation
       queueMicrotask(() => inMicrotask.resolve(read()));
       void Promise.resolve().then(() => inReaction.resolve(read()));
       setTimeout(() => inTimer.resolve(read()), 0);
-      cs.ended = true; // ... and the creation ends when the factory returns (DESIGN.md §3.5)
+      cs.ended = true; // and the creation ends when the factory returns (DESIGN.md §3.5)
       expect(currentCreation()).toBeUndefined(); // from here on, even synchronously
     });
     expect(currentCreation()).toBeUndefined();
@@ -174,34 +149,40 @@ describe("with 'ramme/node' registered", () => {
     expect(cs.made).toBe(1);
   });
 
-  it('runInFrame(NO_NODE, fn) hides an outer frame inside fn, and a microtask queued there carries no frame (DESIGN.md §6)', async () => {
+  it('runDetached and runInFrame(NO_NODE, fn) hide an outer frame inside fn and restore it after (DESIGN.md §6)', () => {
     expect(Object.isFrozen(NO_NODE)).toBe(true);
     const outer: Frame = { node: fakeNode(7), creation: undefined };
-    const inMicrotask = deferred<Frame | undefined>();
-    const inReaction = deferred<Frame | undefined>();
-    const inOuterMicrotask = deferred<Frame | undefined>();
+    const seen: unknown[] = [];
     runInFrame(outer, () => {
-      runInFrame(NO_NODE, () => {
-        expect(currentFrame()).toBeUndefined();
-        expect(currentNode()).toBeUndefined();
-        expect(currentCreation()).toBeUndefined();
-        queueMicrotask(() => inMicrotask.resolve(currentFrame()));
-        void Promise.resolve().then(() => inReaction.resolve(currentFrame()));
-      });
-      expect(currentFrame()).toBe(outer);
-      queueMicrotask(() => inOuterMicrotask.resolve(currentFrame()));
+      runInFrame(NO_NODE, () => seen.push(currentFrame(), currentNode(), currentCreation()));
+      seen.push(currentFrame() === outer);
+      expect(runDetached(() => currentFrame())).toBeUndefined();
+      seen.push(currentFrame() === outer);
     });
-    expect(await inMicrotask.promise).toBeUndefined();
-    expect(await inReaction.promise).toBeUndefined();
-    expect(await inOuterMicrotask.promise).toBe(outer);
+    expect(seen).toEqual([undefined, undefined, undefined, true, true]);
   });
 
-  it('a microtask queued under NO_NODE from a creation frame does not see the creation (I16, DESIGN.md §6)', async () => {
+  it('runDetached in a creation frame hides the creation (I16, DESIGN.md §6)', () => {
     const cs = fakeCreation(fakeNode(8));
-    const seen = deferred<CreationState | undefined>();
+    let seen: CreationState | undefined | 'unread' = 'unread';
     runInFrame({ node: undefined, creation: cs }, () => {
-      runInFrame(NO_NODE, () => queueMicrotask(() => seen.resolve(currentCreation())));
+      runDetached(() => (seen = currentCreation()));
     });
-    expect(await seen.promise).toBeUndefined();
+    expect(seen).toBeUndefined();
+  });
+});
+
+describe('the floor’s one guard (PROPOSAL.md §2.1, D41 decision 18)', () => {
+  it('defines Symbol.dispose and Symbol.asyncDispose as the registered symbols where a runtime lacks them, and leaves present ones alone', () => {
+    const bare: { dispose?: symbol; asyncDispose?: symbol } = {};
+    defineDisposalSymbols(bare);
+    const own = Symbol('own');
+    const present: { dispose?: symbol; asyncDispose?: symbol } = { dispose: own, asyncDispose: own };
+    defineDisposalSymbols(present);
+    expect({ bare, present, runtime: [typeof Symbol.dispose, typeof Symbol.asyncDispose] }).toEqual({
+      bare: { dispose: Symbol.for('Symbol.dispose'), asyncDispose: Symbol.for('Symbol.asyncDispose') },
+      present: { dispose: own, asyncDispose: own },
+      runtime: ['symbol', 'symbol'],
+    });
   });
 });

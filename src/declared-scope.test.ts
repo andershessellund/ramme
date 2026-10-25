@@ -4,7 +4,6 @@
 // included. setScope is the form for keys you do not own, refused on a key that already declares one. The scope
 // places the key's own default only: a provider stores its value where it is registered (D36).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey, getKeyScope, setScope } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context } from './context.js';
@@ -30,7 +29,7 @@ class Config {
 
 /** Resolve `key` from a request fiber (it carries RequestScope) run under `session`. */
 async function fromRequest<T>(session: Context, key: InjectionKey<T>): Promise<T> {
-  return session.call(task(async () => lookup(key), { name: 'request', scopes: [RequestScope] }));
+  return session.call(task(function* () { return lookup(key); }, { name: 'request', scopes: [RequestScope] }));
 }
 
 /** The node a resolved key is cached on, among `nodes`. */

@@ -5,8 +5,8 @@
 // the file, when it arrives after the last test). Vitest reports unhandled
 // errors for the whole run too; this hook attributes them to a test.
 //
-// Deliberately imports no ramme module: `storage.test.ts` must be able to
-// run without a context storage adapter, the one test file that imports none.
+// Deliberately imports no ramme module, and registers nothing: ramme has no
+// async context to register (D41), so every test file runs on the core alone.
 // ---------------------------------------------------------------------------
 
 import { afterAll, afterEach } from 'vitest';

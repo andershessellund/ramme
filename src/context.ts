@@ -4,8 +4,8 @@
 // `Result`, which `Outcome` extends with `aborted` (DESIGN.md §4.12, D38).
 //
 // Types only: the one implementation of every interface here is `NodeImpl`
-// (node-impl.ts); tasks are `TaskImpl` (fiber.ts); every `Op` is a
-// `ManagedPromise` (managed.ts).
+// (node-impl.ts); tasks are `TaskImpl` (fiber.ts); a work op is a `WorkOp`
+// and a lifecycle op a `LifecycleOp` (managed.ts).
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
@@ -34,12 +34,15 @@ export interface Operation<T> {
 }
 
 /**
- * What every waiting verb returns (DESIGN.md §4.14): an `Operation<T>`, run by `yield* op` in a generator body, which
- * is also awaitable from async code. Transitional (D41, stage 1): every op is still the eager promise it was, a
- * `Promise` subclass that started its work when it was made, so `Op<T>` extends `Promise<T>`; a later stage makes work
- * ops lazy and narrows this to `PromiseLike<T>`.
+ * What every waiting verb returns (DESIGN.md §4.14, D41): an `Operation<T>`, run by `yield* op` in a body, and a plain
+ * thenable (`then` only: no `catch` or `finally`, and no `Promise`), which `await` reaches from plain async code. A
+ * work op (`call`, `attempt`, `all`, `race`, `settle`, `shield`, `unshield`, `join`, `result`, `sleep`,
+ * `interrupted`, `never`, `wait`) is lazy: making it runs nothing; `yield*` runs it for the yielding body, afresh each
+ * time, and `then` runs it once, as a child of the node it was made through, settling with its value or its failure,
+ * or `FiberAbortedError` when that child ended `aborted`. The lifecycle verbs (`release`, `releaseAll`, `close`,
+ * `[Symbol.asyncDispose]`) start their work when called and return an `Op<void> & Promise<void>`.
  */
-export interface Op<T> extends Operation<T>, Promise<T> {}
+export interface Op<T> extends Operation<T>, PromiseLike<T> {}
 
 /** `pending` exists only for a DI value's node before placement (DESIGN.md §3.3). */
 export type NodeState = 'pending' | 'running' | 'settling' | 'releasing' | 'complete';
@@ -47,7 +50,7 @@ export type NodeState = 'pending' | 'running' | 'settling' | 'releasing' | 'comp
 /**
  * How a node reacts to interruption (DESIGN.md §4.3).
  *
- * - `freeze` (default): delivered → applied; every managed await but release work rejects with `InterruptedError`; forwards to subscribers.
+ * - `freeze` (default): delivered → applied; the body is halted (`return()`) at its wait, as the wait's shape decides (DESIGN.md §4.14); forwards to subscribers.
  * - `observe`: delivered only; the body sees the signal and settles on its own; forwards only to `restore` subscribers.
  * - `restore`: delivered whenever any ancestor is; re-opens a cancellable window inside an `observe` region.
  */
@@ -79,15 +82,23 @@ export interface NodeOptions {
 
 /**
  * What a node runs (DESIGN.md §4.5, §4.14): a generator function, stepped by the driver, every wait a `yield*` of an
- * op; a synchronous function, whose returned generator or op is driven as the body (D41, decision 28); or, until a
- * later stage of D41 removes it, an async function. One function type with a union return, as before: the generator
- * and op members are matched first, so a generator that only throws infers `never` and a plain value infers itself.
+ * op; or a synchronous function, whose returned generator or op is driven as the body (D41, decision 28). An `async`
+ * function is no body (D41, decision 5): its promise matches no member (the last one is `never` for a thenable), so it
+ * is a type error, and at run time a `TypeError` naming `function*`; so is an `async function*`, whose async iterator
+ * the last member refuses too (PROPOSAL.md §6). One function type with a union return: the
+ * generator and op members are matched first, so a generator that only throws infers `never` and a plain value, an
+ * array included, infers itself (an `Operation<T>` member would read an array's iterator as an operation's, so the
+ * member is `Op<T>`). A generator's return value is a value: `return yield* op`, never `return op`.
  */
-export type Body<T, A extends unknown[] = []> = (...args: A) => Generator<Instruction, T, unknown> | Op<T> | Promise<T> | T;
+export type Body<T, A extends unknown[] = []> = (
+  ...args: A
+) => Generator<Instruction, T, unknown> | Op<T> | (T extends PromiseLike<unknown> | AsyncIterator<unknown, unknown, never> ? never : T);
 
 /**
  * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). A generator
- * function, or a function returning an op, is driven in the release fiber (DESIGN.md §4.14).
+ * function, or a function returning an op, is driven in the release fiber (DESIGN.md §4.14). One returning a promise
+ * (an `async` release) is waited for as a bare wait: the release fiber is current only until its first `await`, after
+ * which ramme throws `NoCurrentNodeError`; write a release that waits for ramme work as `function*`.
  */
 export type Release<T> = (value: T) => void | Promise<void> | Operation<void>;
 
@@ -143,12 +154,13 @@ export type Outcome<T> = Result<T, unknown> | { readonly status: 'aborted'; read
 /**
  * Where a fiber's `failure` goes (DESIGN.md §4.7). An `aborted` outcome fires no destination.
  *
- * A handler is called once, with the parent current: it may `lookup`, `own`, `fork`, `child` and
- * `pool` there, even while the parent's body awaits a call. If it returns a promise, the parent stays open
- * until that settles, and a rejection, like a throw, surfaces from the parent's completion. A
- * handler that awaits the parent's own completion or an ancestor's (`app.close()`, `join`) does not hold
- * the parent open, so `onFailure: () => app.close()` shuts the app down. A generator function handler is driven with
- * the parent current at every step, and holds the parent until it ends, as a returned promise does (DESIGN.md §4.14).
+ * A handler is called once, with the parent current: it may `lookup`, `own`, `fork`, `child` and `pool` there. A
+ * generator function handler is driven with the parent current at every step, and holds the parent until it ends; one
+ * that returns an op is driven as its own `yield*` of it (DESIGN.md §4.14). A handler that waits for the parent's own
+ * completion or an ancestor's (`yield* app.close()`, a `join`) does not hold the parent open, so
+ * `onFailure: () => app.close()` shuts the app down. One that returns a promise (an `async` handler) holds the parent
+ * until it settles, a bare wait whose rejection, like a throw, surfaces from the parent's completion; it has no current
+ * node after its first `await`.
  */
 export type FailureDestination = 'join' | 'link' | ((error: unknown, fiber: Fiber<unknown>) => void);
 
@@ -171,7 +183,7 @@ export interface Task<A extends unknown[], T> {
   readonly name: string;
   /** Run in a new child of the current node, concurrently. */
   fork(...args: A): Fiber<T>;
-  /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
+  /** Run in a new child of the current node and wait for it: `yield* t.call(…)` (DESIGN.md §4.5). */
   call(...args: A): Op<T>;
   /** `call`, resolving with the outcome: a failure is delivered as a value, never thrown (DESIGN.md §4.5). */
   attempt(...args: A): Op<Outcome<T>>;
@@ -239,32 +251,33 @@ export interface Context {
   own<T extends object>(value: T, release: Release<T>): T;
   /** Sugar: attach a deferred function, run at release; a generator function is driven there (DESIGN.md §4.14). */
   own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void>)): T;
-  /** Release `value` now, exactly once (C7). */
-  release(value: object): Op<void>;
-  releaseAll(): Op<void>;
+  /** Release `value` now, exactly once (C7): eager, so its op only waits; a promise as well (DESIGN.md §4.14). */
+  release(value: object): Op<void> & Promise<void>;
+  releaseAll(): Op<void> & Promise<void>;
 
   // --- running bodies in a child of THIS node (DESIGN.md §4.5) ---
   fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Fiber<T>;
   call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T>;
   /**
    * `call` with the outcome delivered as a value: the child's failure is consumed, never thrown. An interrupted
-   * `freeze` or `restore` caller is rejected here with `InterruptedError` as on `call`, so `aborted` describes the
-   * child's own abort, unless the child is `restore`: it also hears an `observe` caller's interruption, and an
-   * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted` (DESIGN.md §4.5).
+   * `freeze` or `restore` caller is halted once the child has completed and never sees an outcome, so `aborted`
+   * describes the child's own abort, unless the child is `restore`: it also hears an `observe` caller's interruption,
+   * and an `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted`
+   * (DESIGN.md §4.5).
    */
   attempt<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>>;
   /**
-   * Run `t` in a release fiber of this node and await it: release work, which no interruption rejects (D39,
-   * DESIGN.md §4.2). It lends the current node as `call` does, until it completes or that node's body settles;
-   * this node completes after it, awaited or not, and is the owner an `unshield` inside it follows.
+   * Run `t` in a release fiber of this node and wait for it: release work, which a halt lets finish (D39,
+   * DESIGN.md §4.14). This node completes after every shield it started, and is the owner an `unshield` inside it
+   * follows.
    */
   shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T>;
   /**
-   * A hole in the enclosing shield (D39, DESIGN.md §4.2): `attempt` on this node, whose child is also linked to the
+   * A hole in the enclosing shield (D39, DESIGN.md §4.14): `attempt` on this node, whose child is also linked to the
    * signal of the shield's owner, the node the nearest `shield` at or above this node runs on (its release fiber's
-   * parent). That node's interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject and it
-   * ends `aborted`; an `observe` hole hears it through `signal()`. One that already came skips the hole, and the
-   * outcome is a value. `TypeError` outside any shield.
+   * parent). That node's interruption delivers the hole: a `freeze` or `restore` hole is halted and ends `aborted`; an
+   * `observe` hole hears it through `signal()`. One that already came skips the hole, and the outcome is a value.
+   * `TypeError` outside any shield.
    */
   unshield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<Outcome<T>>;
   /** `const T` makes an array literal infer as a tuple, so `all([a.bind(1), b.bind('x')])` is `Op<[A, B]>` (DESIGN.md §4.8). */
@@ -275,34 +288,31 @@ export interface Context {
   pool(opts: PoolOptions): Pool;
   child(opts?: NodeOptions): Context;
 
-  // --- awaiting; the target is the awaiting body's node, current(), if any (DESIGN.md §4.2) ---
+  // --- waiting; the yielding body is the awaiter whose halt decides (DESIGN.md §4.14) ---
   join<T>(fiber: Fiber<T>): Op<T>;
   result<T>(fiber: Fiber<T>): Op<Outcome<T>>;
   interrupted(): Op<unknown>;
   never(): Op<never>;
   /**
-   * Resolves after `ms` milliseconds, in [0, 2^31 − 1] (`RangeError` otherwise). A managed await: a delivered
-   * `freeze` or `restore` body awaiting it is rejected with `InterruptedError` and its timer cleared; with no
-   * current node it is a plain delay (DESIGN.md §4.2).
+   * Resolves after `ms` milliseconds, in [0, 2^31 − 1] (`RangeError` when made). The timer is armed when the op runs:
+   * a delivered `freeze` or `restore` body waiting on it is halted and its timer cleared; awaited from plain async code
+   * it is a plain delay (DESIGN.md §4.14, D34).
    */
   sleep(ms: number): Op<void>;
-  /** @deprecated `wait(promise, { abandon: true })` is the same wait (DESIGN.md §4.14); `managed` goes in a later stage of D41. */
-  managed<T>(promise: Promise<T>): Op<T>;
   /**
    * Wait for a foreign promise (DESIGN.md §4.14): `wait(p)` lets `p` finish when the waiting body is halted, so a
-   * halted generator body is resumed with its value and returned at its next `yield*` (a failure of `p` then is
-   * discarded, as a halted body's throw is; in its halted `finally` it is a release failure); with `{ abandon: true }`
-   * the wait stops at the halt, as `managed(p)` does. `wait((signal) => p)` hands the work this node's signal (the
-   * unwind fiber's deadline in a halted `finally`). A ramme op as `p` is that op's own wait. In an async body `wait(p)`
-   * is a bare await of `p`.
+   * halted body is resumed with its value and returned at its next `yield*` (a failure of `p` then is discarded, as a
+   * halted body's throw is; in its halted `finally` it is a release failure); with `{ abandon: true }` the wait stops
+   * at the halt. `wait((signal) => p)` calls the function when the op runs, handing it this node's signal (the unwind
+   * fiber's deadline in a halted `finally`). A ramme op as `p` is that op's own wait.
    */
-  wait<T>(promise: Promise<T> | ((signal: AbortSignal) => Promise<T>), opts?: { abandon?: boolean }): Op<T>;
+  wait<T>(promise: PromiseLike<T> | ((signal: AbortSignal) => PromiseLike<T>), opts?: { abandon?: boolean }): Op<T>;
   /**
    * A library's async callback as a body (DESIGN.md §4.14): each call of the returned function runs `t` as a
-   * call-shaped child of this node, started synchronously and lending nothing, and returns a real promise of its
-   * value; it rejects with the child's failure, which it consumes unless this node is a halted body (the failure then
-   * surfaces at this node's completion), or with `FiberAbortedError` when the child ended `aborted`, with
-   * `NodeCompletedError` once this node has completed, and with `CreationViolationError` when called during a creation.
+   * call-shaped child of this node, started synchronously, and returns a real promise of its value; it rejects with
+   * the child's failure, which it consumes unless this node is a halted body (the failure then surfaces at this
+   * node's completion), or with `FiberAbortedError` when the child ended `aborted`, with `NodeCompletedError` once
+   * this node has completed, and with `CreationViolationError` when called during a creation.
    */
   promised<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>): (...args: A) => Promise<T>;
 
@@ -312,9 +322,9 @@ export interface Context {
   /** `child()` + `run` + `abort()` on exit: synchronous block scoping. */
   runSync<R, A extends unknown[]>(fn: (...args: A) => R, ...args: A): R;
 
-  // --- lifecycle (DESIGN.md §2.7) ---
+  // --- lifecycle (DESIGN.md §2.7): eager, so each op only waits, and is a promise as well ---
   abort(reason?: unknown): void;
-  close(): Op<void>;
+  close(): Op<void> & Promise<void>;
   [Symbol.dispose](): void;
-  [Symbol.asyncDispose](): Op<void>;
+  [Symbol.asyncDispose](): Op<void> & Promise<void>;
 }

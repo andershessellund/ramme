@@ -1,45 +1,39 @@
-// eslint-plugin-ramme: the hazards inside ramme bodies that look like plain
-// JavaScript (a `catch` that swallows the body's own interruption, `finally`,
-// `using`, timers, `Promise` combinators) and the wiring errors syntax can
-// see. What each rule flags, why, and its known approximations are in this
-// package's README; the design is ramme's DESIGN.md §9 and DECISIONS.md D35,
-// D39.
+// eslint-plugin-ramme: what syntax can see of ramme's rules for generator
+// bodies (D41): an `async` function where a body is expected, a work op made
+// and never consumed, an outcome discarded, a bare timer, and the wiring
+// errors of DI. What each rule flags, why, and its known approximations are in
+// this package's README; the design is ramme's DESIGN.md §9 and DECISIONS.md
+// D35, D41.
 
 import type { ESLint, Linter, Rule } from 'eslint';
-import { noFinallyInAsync } from './rules/no-finally-in-async.js';
+import { noAsyncBody } from './rules/no-async-body.js';
 import { noOwnedProvider } from './rules/no-owned-provider.js';
-import { noPromiseCombinators } from './rules/no-promise-combinators.js';
 import { noStoredBorrow } from './rules/no-stored-borrow.js';
-import { noSwallowedInterruption } from './rules/no-swallowed-interruption.js';
 import { noTimers } from './rules/no-timers.js';
+import { noUnusedOp } from './rules/no-unused-op.js';
 import { noUnusedOutcome } from './rules/no-unused-outcome.js';
-import { noUsingInAsync } from './rules/no-using-in-async.js';
 
 /** The rules, by name; each is `ramme/<name>` in a config. */
 const rules = {
-  'no-swallowed-interruption': noSwallowedInterruption,
-  'no-finally-in-async': noFinallyInAsync,
-  'no-using-in-async': noUsingInAsync,
+  'no-async-body': noAsyncBody,
+  'no-unused-op': noUnusedOp,
+  'no-unused-outcome': noUnusedOutcome,
   'no-timers': noTimers,
-  'no-promise-combinators': noPromiseCombinators,
   'no-stored-borrow': noStoredBorrow,
   'no-owned-provider': noOwnedProvider,
-  'no-unused-outcome': noUnusedOutcome,
 } satisfies Record<string, Rule.RuleModule>;
 
 /**
- * Each rule's severity in `recommended` (D35, D39). The three that flag constructs ramme supports since sticky
- * rejection, but cannot see or structure (`finally`, `using`, `Promise` combinators), warn; the rest are errors.
+ * Each rule's severity in `recommended` (D35, D41): every rule is an error. The rules that warned (`finally`, `using`
+ * and `Promise` combinators in async bodies) went with async bodies (D41, decision 14).
  */
 const severities: Record<keyof typeof rules, Linter.RuleSeverity> = {
-  'no-swallowed-interruption': 'error',
-  'no-finally-in-async': 'warn',
-  'no-using-in-async': 'warn',
+  'no-async-body': 'error',
+  'no-unused-op': 'error',
+  'no-unused-outcome': 'error',
   'no-timers': 'error',
-  'no-promise-combinators': 'warn',
   'no-stored-borrow': 'error',
   'no-owned-provider': 'error',
-  'no-unused-outcome': 'error',
 };
 
 /** The default export's type. */

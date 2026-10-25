@@ -4,10 +4,10 @@
 //   P1 resource-list leak: own/release and fork/join cycles, failing ones included, leave no entries, subscribers or failure records behind.
 //   P2 double dispose: asyncDispose twice, close and abort on one node release each entry once, share one completion and complete once.
 //   P3 admission after dispose: every operation on a complete node throws NodeCompletedError; the lifecycle four are no-ops.
-//   P4 call not awaited by parent dispose: a dropped call's child is still awaited by the parent's close(), and the next body-shaped operation throws UnawaitedCallError naming it.
+//   P4 call not yielded by its body: a dropped call is a lazy op that runs nothing (D41), so there is no child for the parent's close() to wait for.
 //   P5 creation-context leak into a forked body: a constructor fork starts after the factory returned and sees no creation; inject throws, lookup works, current() is the fiber.
 //   P7 order-dependent override / 'No provider' at the root: both resolution orders converge, and PlacementError never depends on sibling activity.
-//   P19 enterSync bleed: nothing is current after ctx.run(fn) returns or throws, and a run frame does not leak across await.
+//   P19 enterSync bleed: nothing is current after ctx.run(fn) returns or throws, and a run frame does not leak across await (no async context).
 //   P20 shadowed explicit key: a child providing A after an ancestor cached V with A in deps(V) gets V rebuilt by its own view.
 //   P21 lazy registration order: a value first looked up by a running fiber lands on the provided stack and is released after the fiber (G1).
 //   P22 constructor-forked fiber's parent: it is the value's node at the storage node; the fiber starts after placement and outlives the request.
@@ -18,8 +18,7 @@
 // Written in ramme's idiom (law 2): the free functions of ambient.ts inside
 // bodies, the method form only where a node that is not current is named.
 import { describe, expect, it } from 'vitest';
-import './node.js';
-import { call, current, fork, join, lookup, never, own, release, result } from './ambient.js';
+import { call, current, fork, join, lookup, never, own, release, result, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber } from './context.js';
 import { currentCreation, currentFrame } from './context-storage.js';
@@ -32,9 +31,8 @@ import {
   NoCurrentNodeError,
   NodeCompletedError,
   PlacementError,
-  UnawaitedCallError,
 } from './resource.js';
-import { deferred, events, impl, micro, settled, tick, trace, within } from './test/util.js';
+import { deferred, events, impl, micro, tick, trace, within } from './test/util.js';
 
 const link = { onFailure: 'link' } as const;
 
@@ -52,13 +50,13 @@ describe('probes', () => {
   // -------------------------------------------------------------------------
   it('P1 resource-list leak: own/release and fork/join cycles leave no entries, subscribers or failure records behind', async () => {
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const me = impl(current());
       let last: object | undefined;
       for (let i = 0; i < 10_000; i++) {
         const o = { [Symbol.dispose]() {} };
         own(o);
-        await release(o);
+        yield* release(o);
         last = o;
       }
       expect(me.explicit.size).toBe(0);
@@ -66,8 +64,8 @@ describe('probes', () => {
 
       let lastFiber: Fiber<number> | undefined;
       for (let i = 0; i < 10_000; i++) {
-        lastFiber = fork(async () => i);
-        expect(await join(lastFiber)).toBe(i);
+        lastFiber = fork(function* () { return i; });
+        expect(yield* join(lastFiber)).toBe(i);
       }
       expect(me.explicit.size).toBe(0); // completed fibers are unlinked
       expect(me.subscribers.size).toBe(0);
@@ -75,20 +73,20 @@ describe('probes', () => {
 
       const boom = new Error('boom');
       for (let i = 0; i < 10_000; i++) {
-        const f = fork(async () => {
+        const f = fork(function* () {
           throw boom;
         });
-        expect(await rejection(join(f))).toBe(boom);
+        expect(yield* wait(rejection(join(f)))).toBe(boom);
       }
       expect(me.unconsumed.size).toBe(0); // the record leaves the set at delivery (D16)
       expect(me.subscribers.size).toBe(0);
       expect(me.explicit.size).toBe(0);
 
       for (let i = 0; i < 1_000; i++) {
-        const f = fork(async () => {
+        const f = fork(function* () {
           throw boom;
         });
-        expect((await result(f)).status).toBe('failure');
+        expect((yield* result(f)).status).toBe('failure');
       }
       expect(me.unconsumed.size).toBe(0);
       expect(me.subscribers.size).toBe(0);
@@ -110,8 +108,8 @@ describe('probes', () => {
           ? ev.root.child({ name: 'N' })
           : ev.root.fork(
               task(
-                async () => {
-                  await never();
+                function* () {
+                  yield* never();
                 },
                 { ...link, name: 'N' },
               ),
@@ -161,9 +159,9 @@ describe('probes', () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     let otherFiber: Fiber<number> | undefined;
-    await root.call(async () => {
-      otherFiber = fork(async () => 1);
-      await join(otherFiber);
+    await root.call(function* () {
+      otherFiber = fork(function* () { return 1; });
+      yield* join(otherFiber);
     });
     const c = root.child();
     await c.close();
@@ -172,8 +170,8 @@ describe('probes', () => {
       ['get', () => c.get(K)],
       ['own', () => c.own({ [Symbol.dispose]() {} })],
       ['release', () => c.release({})],
-      ['fork', () => c.fork(async () => {})],
-      ['call', () => c.call(async () => {})],
+      ['fork', () => c.fork(function* () {})],
+      ['call', () => c.call(function* () {})],
       ['child', () => c.child()],
       ['pool', () => c.pool({ name: 'p', onFailure: () => {} })],
       ['addProvider', () => c.addProvider(valueProvider(K, 'again'))],
@@ -189,38 +187,27 @@ describe('probes', () => {
   });
 
   // -------------------------------------------------------------------------
-  it("P4 call not awaited by parent dispose: a dropped call's child is still awaited by the parent's close(); the next body-shaped operation throws UnawaitedCallError naming it", async () => {
+  it('P4 call not yielded by its body: a dropped call is a lazy op that runs nothing, so no child exists for the parent to wait for; the body goes on, lookup works, and close() completes', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const gate = deferred();
     let child: Context | undefined;
-    let err: unknown;
+    let looked: string | undefined;
     const t = trace();
     root.fork(
-      task(async () => {
-        void call(async () => {
+      task(function* () {
+        void call(function* () {
           child = current();
-          await gate.promise;
+          yield* wait(gate.promise);
           t.push('child finished');
-        }); // the await was forgotten
-        try {
-          lookup(K);
-        } catch (e) {
-          err = e;
-        }
+        }); // the yield* was forgotten (eslint-plugin-ramme's no-unused-op reports it)
+        looked = lookup(K);
         t.push('body returned');
       }, link),
     );
     await tick();
-    expect(err).toBeInstanceOf(UnawaitedCallError);
-    expect((err as UnawaitedCallError).child).toBe(child);
-    const closing = root.close();
-    expect(await settled(closing)).toBe('pending'); // the parent waits for the child, whatever it costs (DESIGN.md §2.8)
-    expect(child?.state).not.toBe('complete');
-    gate.resolve();
-    await within(closing);
-    expect(t.log).toEqual(['body returned', 'child finished']);
-    expect(child?.state).toBe('complete');
+    await within(root.close()); // nothing to wait for: the call never ran
+    expect({ child, looked, log: t.log }).toEqual({ child: undefined, looked: 'k', log: ['body returned'] });
   });
 
   // -------------------------------------------------------------------------
@@ -239,7 +226,7 @@ describe('probes', () => {
     class Service {
       constructor() {
         fiber = own(
-          fork(async () => {
+          fork(function* () {
             seen.started = factoryReturned;
             seen.creation = currentCreation();
             seen.frameCreation = currentFrame()?.creation;
@@ -302,7 +289,7 @@ describe('probes', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('P19 enterSync bleed: after ctx.run(fn) returns or throws nothing is current, there is no sync stack, and a run frame does not leak across await', async () => {
+  it('P19 enterSync bleed: after ctx.run(fn) returns or throws nothing is current, there is no sync stack, a run frame does not leak across await, and async work started inside run has no node after its first await (no async context, D41)', async () => {
     const root = createRootContext();
     expect(() => current()).toThrow(NoCurrentNodeError);
     expect(root.run(() => current())).toBe(root);
@@ -321,17 +308,21 @@ describe('probes', () => {
       expect(current()).toBe(root);
     });
     expect(currentFrame()).toBeUndefined();
-    // async work started inside run keeps run's node (the platform carries it); the caller's continuation does not
+    // async work started inside run sees run's node before its first await, and nothing after it: the slot is
+    // synchronous, and ramme has no async context (D41, decision 18); the caller's continuation sees nothing either
     let inner: Promise<Context> | undefined;
+    let before: Context | undefined;
     root.run(() => {
       inner = (async () => {
+        before = current();
         await micro();
         return current();
       })();
     });
     await micro();
     expect(currentFrame()).toBeUndefined();
-    expect(await inner).toBe(root);
+    expect(before).toBe(root);
+    await expect(inner).rejects.toThrow(NoCurrentNodeError);
     expect(currentFrame()).toBeUndefined();
     await root.close();
   });
@@ -378,19 +369,19 @@ describe('probes', () => {
     const gate = deferred();
     // A is forked before Pool exists and requests it last; B requests Cache first.
     svc.fork(
-      task(async () => {
-        await gate.promise;
+      task(function* () {
+        yield* wait(gate.promise);
         lookup(Pool);
         own(t.at('fiber A'));
-        await never();
+        yield* never();
       }, link),
     );
     svc.fork(
-      task(async () => {
+      task(function* () {
         lookup(Cache);
         own(t.at('fiber B'));
         gate.resolve();
-        await never();
+        yield* never();
       }, link),
     );
     await tick();
@@ -409,9 +400,9 @@ describe('probes', () => {
     class Service {
       constructor() {
         own(
-          fork(async () => {
+          fork(function* () {
             svcFiber = current();
-            await never();
+            yield* never();
           }),
         );
       }
@@ -419,10 +410,10 @@ describe('probes', () => {
     let request: Context | undefined;
     await root.call(
       task(
-        async () => {
+        function* () {
           request = current();
           lookup(Service);
-          await tick();
+          yield* wait(tick());
         },
         { name: 'request' },
       ),

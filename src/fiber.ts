@@ -29,7 +29,7 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
     return fork<T, A>(this, ...args);
   }
 
-  /** Run in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
+  /** Run in a new child of the current node and wait for it: `yield* t.call(…)` (DESIGN.md §4.5). Lazy, as `call` is. */
   call(...args: A): Op<T> {
     return call<T, A>(this, ...args);
   }
@@ -55,8 +55,8 @@ class TaskImpl<A extends unknown[], T> implements Task<A, T>, TaskLike<A, T> {
  * Define a task: a body that can only be `fork`ed or `call`ed, never invoked
  * as a plain function. Options live at the definition and are overridden per
  * use with `with`. The body is a generator function, stepped by the driver
- * (DESIGN.md §4.14), a synchronous function, or, until a later stage of D41,
- * an async function.
+ * (DESIGN.md §4.14), or a synchronous function; an `async` function is no body
+ * (D41, decision 5).
  *
  * @example
  * const handle = task(function* (req: Request) {

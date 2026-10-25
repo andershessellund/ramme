@@ -2,6 +2,10 @@
 // list, scripts/check-surface.mjs). The types of context.ts are listed by name
 // rather than re-exported with `export type *`, so the published index.d.ts
 // names every public type; the list is exactly context.ts's exports.
+//
+// The first import defines the disposal symbols where a runtime lacks them,
+// the floor's one guard (PROPOSAL.md §2.1); it exports nothing.
+import './disposal-symbols.js';
 export type {
   NodeState,
   InterruptMode,
@@ -53,7 +57,6 @@ export {
   interrupted,
   never,
   sleep,
-  managed,
   wait,
   promised,
   runSync,
@@ -65,10 +68,8 @@ export {
   PendingNodeError,
   NotOwnedError,
   AlreadyOwnedError,
-  UnawaitedCallError,
   FiberNotAwaitableError,
   FiberAbortedError,
-  InterruptedError,
   PoolClosedError,
   PoolFullError,
   CreationViolationError,
@@ -77,8 +78,6 @@ export {
   PlacementError,
   OwnerInterrupt,
 } from './resource.js';
-export { registerContextStorage } from './context-storage.js';
-export type { ContextStorage, Frame } from './context-storage.js';
 export { createInjectionKey, setScope, setDependencies } from './context-key.js';
 export type { InjectionKey, CreateInjectionKeyOptions } from './context-key.js';
 export { classProvider, factoryProvider, valueProvider, aliasProvider } from './provider-util.js';

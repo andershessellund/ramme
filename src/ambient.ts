@@ -2,10 +2,11 @@
 // The ambient surface (DESIGN.md §6, law 2, I21).
 //
 // Each free function is `current().<method>(...)`: it acts on the current
-// node, which the platform's async context carries across `await` (law 3).
-// The current node is a body's own fiber, the release fiber during a release,
-// the node `ctx.run(fn)` entered, or, in a creation frame, the value's node,
-// created on demand (DESIGN.md §3.3).
+// node, read from the synchronous slot (law 3; D41 decision 18). The current
+// node is a body's own fiber while it steps, the release fiber during a
+// release, the node `ctx.run(fn)` entered, or, in a creation frame, the
+// value's node, created on demand (DESIGN.md §3.3). Nothing carries it across
+// an `await`.
 //
 // Two groups differ in a creation frame:
 //
@@ -13,18 +14,19 @@
 //   `signal` materialise the value's (pending or live) node and act on it.
 // - The body-shaped ones, `lookup`, `call`, `attempt`, `all`, `race`,
 //   `settle`, `shield`, `unshield`, `join`, `result`, `interrupted`, `never`,
-//   `sleep`, `managed`, `wait` and `runSync`, throw `CreationViolationError`
-//   first, before touching any node (DESIGN.md §3.2, §3.5, I16): a refused call
-//   never creates the value's node. `promised` is in the first group: it runs
+//   `sleep`, `wait` and `runSync`, throw `CreationViolationError` first,
+//   before touching any node (DESIGN.md §3.2, §3.5, I16): a refused call never
+//   creates the value's node. `promised` is in the first group: it runs
 //   nothing when it is made.
 //
-// Outside any node every one of them throws `NoCurrentNodeError`; when no
-// context storage is registered the message names `import 'ramme/node'`.
+// Outside any node every one of them throws `NoCurrentNodeError`, whose
+// message names the cause (no async context) and the three entry points.
 //
-// Every waiting verb returns an `Op` (DESIGN.md §4.14): `yield*` it in a
-// generator body, or `await` it in async code. In a halted generator body's
-// `finally` the synchronous verbs still address the body's node (U3), while
-// the ops made there run on its unwind fiber.
+// Every waiting verb returns an `Op` (DESIGN.md §4.14): `yield*` it in a body.
+// A work op reads the slot when it is made (decision 17), so its receiver and
+// guards are fixed then, and runs only when it is consumed (decision 2). In a
+// halted generator body's `finally` the synchronous verbs still address the
+// body's node (U3), while the ops it runs there run on its unwind fiber.
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
@@ -44,22 +46,24 @@ import type {
   SettleResult,
   Task,
 } from './context.js';
-import { NO_STORAGE_MESSAGE, currentCreation, currentFrame, hasStorage } from './context-storage.js';
+import { currentCreation, currentFrame } from './context-storage.js';
 import type { NodeImpl } from './node-impl.js';
 import { CreationViolationError, NoCurrentNodeError } from './resource.js';
 
 /**
  * @internal The current node for a free function: a body frame's node, or the value node of a creation
  * frame, materialised on first use (DESIGN.md §3.3). Throws `NoCurrentNodeError` outside any node, naming the
- * adapter import when no storage is registered (DESIGN.md §6, D9′).
+ * cause and the three entry points of plain async code (DESIGN.md §6; D41 §4).
  */
 export function requireCurrent(op: string): NodeImpl {
   const f = currentFrame();
   if (f === undefined)
     throw new NoCurrentNodeError(
-      hasStorage()
-        ? `${op}() called with no current node: run it inside a body (call/fork), a release, a factory, or ctx.run(fn)`
-        : NO_STORAGE_MESSAGE,
+      `${op}() called with no current node. ramme has no async context: the current node is set only while a body ` +
+        'steps (and in what it calls synchronously), in a release, a factory, a failure handler, or node.run(fn), so ' +
+        'plain async code (an async function, an async release or handler) has none after its first await. Reach ramme ' +
+        'from there through an explicit receiver (await app.call(t), or node.fork(t) on a node taken before the first ' +
+        'await), promised(function* …) for a library’s async callback, or node.run(fn) for a synchronous callback',
     );
   return f.node ?? f.creation!.node();
 }
@@ -118,13 +122,13 @@ export function own(target: object, release?: Release<any>): object {
   return release === undefined ? n.own(target as Disposable) : n.own(target, release);
 }
 
-/** Release `value`, which the current node owns, now and exactly once (C7). A managed await; the release starts now. */
-export function release(value: object): Op<void> {
+/** Release `value`, which the current node owns, now and exactly once (C7). Eager: the release starts now, and the op waits for it. */
+export function release(value: object): Op<void> & Promise<void> {
   return requireCurrent('release').release(value);
 }
 
-/** Release everything on the current node's explicit stack, top down. A managed await; the releases start now. */
-export function releaseAll(): Op<void> {
+/** Release everything on the current node's explicit stack, top down. Eager: the releases start now, and the op waits for them. */
+export function releaseAll(): Op<void> & Promise<void> {
   return requireCurrent('releaseAll').releaseAll();
 }
 
@@ -135,16 +139,19 @@ export function fork<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args
   return requireCurrent('fork').fork(t, ...args);
 }
 
-/** Run `t` in a new child of the current node and await it; lends the current node until it settles (DESIGN.md §4.9). */
+/**
+ * Run `t` in a new child of the current node and wait for it: `yield* call(t, …)`. Lazy: the child is made, and its
+ * body starts synchronously, when the op is yielded (D22); an op nobody yields runs nothing (DESIGN.md §4.14).
+ */
 export function call<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T> {
   return requireBodyShaped('call').call(t, ...args);
 }
 
 /**
  * `call`, resolving with the child's outcome: its failure is delivered as a value and consumed, never
- * thrown. A `freeze` or `restore` caller that is itself interrupted is rejected here with `InterruptedError`, as
- * on `call`, once the child has completed, so `aborted` is the child's own abort (its `timeoutMs`, its `signal`,
- * an explicit abort). A `restore` child is the exception: it also hears an `observe` caller's interruption, and an
+ * thrown. A `freeze` or `restore` caller that is itself interrupted is halted here, as on `call`, once the child
+ * has completed, and sees no outcome, so `aborted` is the child's own abort (its `timeoutMs`, its `signal`, an
+ * explicit abort). A `restore` child is the exception: it also hears an `observe` caller's interruption, and an
  * `observe` ancestor's that a `freeze` caller below it does not, and reports either as `aborted`. The `observe`
  * caller sees its own in `signal().aborted`; the `freeze` caller's signal has not fired, so a deadline fallback
  * there tests the reason, the `TimeoutError` `DOMException` that `timeoutMs` delivers (DESIGN.md §4.5).
@@ -178,12 +185,12 @@ export function settle<const T extends readonly Task<[], unknown>[]>(tasks: T, o
 }
 
 /**
- * Release work on demand (D39, DESIGN.md §4.2): run `t` in a release fiber of the current node and await it. Its
- * `signal()` is the release deadline (`releaseTimeoutMs`), `own` attaches to it and `lookup` resolves through the
- * current node, and no interruption rejects the await, so it is the way to await cleanup after the body was
- * interrupted (a rollback in a `catch`). It lends the current node as `call` does, until it completes or the body
- * settles (DESIGN.md §4.9). The current node completes after every shield it started, awaited or not; a shield's
- * failure is the awaiter's, or surfaces from the current node (I11).
+ * A non-cancellable region (D39, D41 decision 13, DESIGN.md §4.14): run `t` in a release fiber of the current node
+ * and wait for it. Its `signal()` is the release deadline (`releaseTimeoutMs`), `own` attaches to it and `lookup`
+ * resolves through the current node, and a halt lets it finish (release work): the body is returned at its next
+ * `yield*` after it (`yield* shield(function* () { yield* call(charge); yield* call(record); })`). Cleanup after a
+ * halt belongs in the body's own `finally`, which may wait. The current node completes after every shield it ran; a
+ * shield's failure is the waiter's, or surfaces from the current node (I11).
  */
 export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...args: A): Op<T> {
   return requireBodyShaped('shield').shield(t, ...args);
@@ -191,12 +198,12 @@ export function shield<T, A extends unknown[]>(t: Task<A, T> | Body<T, A>, ...ar
 
 /**
  * A hole in the enclosing shield (D39, DESIGN.md §4.2): `shield` and `unshield` are Effect's `uninterruptibleMask`
- * and its `restore`. It runs `t` as `attempt` does, in a new child of the current node, started synchronously, lending
- * the current node until it completes, and resolves with its outcome. The child is also linked to the signal of the
+ * and its `restore`. It runs `t` as `attempt` does, in a new child of the current node, started synchronously when
+ * the op is yielded, and resolves with its outcome. The child is also linked to the signal of the
  * shield's owner, the node the nearest `shield` at or above the current node runs on (its release fiber's parent: the
  * node current at the free `shield`, `ctx` for `ctx.shield`), found from a call made in the shield too. The owner's
- * interruption delivers the hole: a `freeze` or `restore` hole's managed awaits reject and it ends `aborted` with the
- * owner's reason; an `observe` hole hears it through `signal()`. An interruption that already came skips the hole, and
+ * interruption delivers the hole: a `freeze` or `restore` hole is halted and ends `aborted` with the owner's reason;
+ * an `observe` hole hears it through `signal()`. An interruption that already came skips the hole, and
  * the shield's body goes on either way. A `failure` is a value, consumed on resume. A shield inside a shield, or inside
  * a call made under one, runs on that shield or call, so its holes follow only that node's own signal: the outer
  * shield's release deadline, or the call's own delivery.
@@ -217,74 +224,64 @@ export function child(opts?: NodeOptions): Context {
   return requireCurrent('child').child(opts);
 }
 
-// --- awaiting; the target is the current node (DESIGN.md §4.2) -------------------------
+// --- waiting; the yielding body's halt decides (DESIGN.md §4.14) -------------------------
 
 /**
- * The fiber's value, or its failure thrown. A managed await: an interrupted `freeze` or `restore` body awaiting it is
- * rejected with `InterruptedError`, once the fiber has completed when it is subscribed below the body, at once for
- * any other fiber, such as an owned one (DESIGN.md §4.2).
+ * The fiber's value, or its failure thrown. A delivered `freeze` or `restore` body waiting on it is halted once the
+ * fiber has completed when it is subscribed below the body, at once for any other fiber, such as an owned one
+ * (DESIGN.md §4.14).
  */
 export function join<T>(fiber: Fiber<T>): Op<T> {
   return requireBodyShaped('join').join(fiber);
 }
 
-/**
- * The fiber's outcome, never its failure thrown. A managed await: an interrupted `freeze` or `restore` body awaiting
- * it is rejected with `InterruptedError` instead, when `join` would be (DESIGN.md §4.2).
- */
+/** The fiber's outcome, never its failure thrown. A delivered body waiting on it is halted when `join` would be (DESIGN.md §4.14). */
 export function result<T>(fiber: Fiber<T>): Op<Outcome<T>> {
   return requireBodyShaped('result').result(fiber);
 }
 
 /**
- * Resolves with the reason when the current node is delivered, for `observe` bodies (DESIGN.md §4.3); in a
- * `freeze` or `restore` body that delivery rejects it with `InterruptedError` instead (DESIGN.md §4.2).
+ * Resolves with the reason when the current node is delivered, for `observe` bodies (DESIGN.md §4.3); a `freeze` or
+ * `restore` body waiting on it is halted by that delivery instead.
  */
 export function interrupted(): Op<unknown> {
   return requireBodyShaped('interrupted').interrupted();
 }
 
-/** A managed await that never resolves: in a `freeze` or `restore` body, its node's delivery rejects it. */
+/** A wait that never resolves: a `freeze` or `restore` body waiting on it is halted by its node's delivery. */
 export function never(): Op<never> {
   return requireBodyShaped('never').never();
 }
 
 /**
- * A managed await that resolves after `ms` milliseconds, a number in [0, 2^31 − 1] (`RangeError` otherwise). A
- * delivered `freeze` or `restore` body awaiting it is rejected with `InterruptedError`, and its timer is cleared
- * at that delivery; an `observe` body, a release and a failure handler wait the full `ms` (DESIGN.md §4.2, D34).
+ * A wait of `ms` milliseconds, a number in [0, 2^31 − 1] (`RangeError` when made). The timer is armed when the op is
+ * yielded; a delivered `freeze` or `restore` body waiting on it is halted and its timer cleared; an `observe` body, a
+ * release and a failure handler wait the full `ms` (DESIGN.md §4.14, D34). Make it where it is yielded: at module
+ * level there is no current node.
  */
 export function sleep(ms: number): Op<void> {
   return requireBodyShaped('sleep').sleep(ms);
 }
 
 /**
- * Make a bare promise a managed await: in a delivered `freeze` or `restore` body it rejects with `InterruptedError` (DESIGN.md §4.2).
- *
- * @deprecated `wait(promise, { abandon: true })` is the same wait (DESIGN.md §4.14); `managed` goes in a later stage of D41.
+ * Wait for a foreign promise in a body (DESIGN.md §4.14, D41 decision 10): `yield* wait(p)`. A halted body's `wait(p)`
+ * lets `p` finish: the body is resumed with its value and returned at its next `yield*`, so
+ * `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of `p` then ends
+ * the body there and is discarded, as a halted body's throw is (in its halted `finally` it is a release failure). With
+ * `{ abandon: true }` it stops waiting at the halt instead, and `p` runs on, marked handled.
+ * `wait((signal) => fetch(url, { signal }))` calls the function when the op is yielded, handing it the current node's
+ * `signal()`, so the halt aborts it; in a halted `finally` that is the unwind fiber's release deadline. A ramme op as
+ * `p` is that op's own wait.
  */
-export function managed<T>(promise: Promise<T>): Op<T> {
-  return requireBodyShaped('managed').managed(promise);
-}
-
-/**
- * Wait for a foreign promise in a body (DESIGN.md §4.14, D41): `yield* wait(p)` in a generator body, `await wait(p)`
- * in an async one. A halted body's `wait(p)` lets `p` finish: the body is resumed with its value and returned at its
- * next `yield*`, so `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of
- * `p` then ends the body there and is discarded, as a halted body's throw is (in its halted `finally` it is a release
- * failure). With `{ abandon: true }` it stops waiting at the halt instead, as `managed(p)` did, and `p` runs on, marked
- * handled. `wait((signal) => fetch(url, { signal }))` hands the work the current node's `signal()`, so the halt aborts
- * it; in a halted `finally` that is the unwind fiber's release deadline. A ramme op as `p` is that op's own wait. In an
- * async body `wait(p)` is a bare await of `p`.
- */
-export function wait<T>(promise: Promise<T> | ((signal: AbortSignal) => Promise<T>), opts?: { abandon?: boolean }): Op<T> {
+export function wait<T>(promise: PromiseLike<T> | ((signal: AbortSignal) => PromiseLike<T>), opts?: { abandon?: boolean }): Op<T> {
   return requireBodyShaped('wait').wait(promise, opts);
 }
 
 /**
- * A library's async callback written as a body (DESIGN.md §4.14, D41): `db.transaction(promised(function* (tx) { … }))`.
- * It captures the current node now; each call of the returned function runs `t` as a call-shaped child of that node,
- * started synchronously and lending nothing, and returns a real promise: the value, the child's failure (consumed,
+ * A library's async callback written as a body (DESIGN.md §4.14, D41 decision 30), one of the three entry points of
+ * plain async code: `db.transaction(promised(function* (tx) { … }))`. It captures the current node now; each call of
+ * the returned function runs `t` as a call-shaped child of that node, started synchronously, and returns a real
+ * promise: the value, the child's failure (consumed,
  * unless the node is a halted body: then it surfaces at the node's completion), or `FiberAbortedError` when the child
  * ended `aborted`. The node's interruption reaches the child as it reaches a callee: halted, its `finally` run, its
  * promise rejected, before the library's own `finally`. Called during a creation, it rejects with

@@ -2,7 +2,6 @@
 // The seven ported fiber-set cases (a pool created in a constructor on the
 // pending node) are at the end of the file.
 import { describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
 import type { Fiber, Pool } from './context.js';
 import { createRootContext } from './create-context.js';
@@ -10,7 +9,7 @@ import { task } from './fiber.js';
 import { factoryProvider, valueProvider } from './provider-util.js';
 import { NodeCompletedError, PoolClosedError, PoolFullError } from './resource.js';
 import { createScope } from './scope.js';
-import { lookup, own } from './ambient.js';
+import { lookup, own, wait } from './ambient.js';
 import { deferred, here, impl, tick, trace } from './test/util.js';
 
 const quiet = { name: 'pool', onFailure: () => {} };
@@ -27,19 +26,18 @@ describe('pools (DESIGN.md §4.10)', () => {
     await app.close();
   });
 
-  it("a pool's forks are its subscribers; the pool is an unsubscribed entry of its owner; pool.fork lends nothing", async () => {
+  it("a pool's forks are its subscribers; the pool is an unsubscribed entry of its owner", async () => {
     const app = createRootContext();
     const pool = app.pool(quiet);
     const gate = deferred();
-    const f = pool.fork(async () => {
-      await gate.promise;
+    const f = pool.fork(function* () {
+      yield* wait(gate.promise);
     });
     const P = impl(pool);
     expect(P.kind).toBe('pool');
     expect(P.subscribed).toBe(false);
     expect(P.subscribers.has(impl(f))).toBe(true);
     expect(impl(f).parent).toBe(P);
-    expect(P.lentTo).toBeUndefined();
     gate.resolve();
     await app.close();
   });
@@ -52,13 +50,13 @@ describe('pools (DESIGN.md §4.10)', () => {
     const e2 = new Error('two');
     const f1 = pool.fork(
       task(
-        async () => {
+        function* () {
           throw e1;
         },
         { onFailure: 'link' },
       ),
     );
-    const f2 = pool.fork(async () => {
+    const f2 = pool.fork(function* () {
       throw e2;
     });
     await tick();
@@ -76,9 +74,9 @@ describe('pools (DESIGN.md §4.10)', () => {
     const gates = [deferred(), deferred(), deferred(), deferred()];
     const started: number[] = [];
     const fibers = gates.map((g, i) =>
-      pool.fork(async () => {
+      pool.fork(function* () {
         started.push(i);
-        await g.promise;
+        yield* wait(g.promise);
       }),
     );
     await tick();
@@ -103,12 +101,14 @@ describe('pools (DESIGN.md §4.10)', () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1, whenFull: 'reject' });
     const gate = deferred();
-    pool.fork(() => gate.promise);
-    expect(() => pool.fork(async () => {})).toThrow(PoolFullError);
-    expect(() => pool.fork(async () => {})).toThrow(/is full \(1\)/);
+    pool.fork(function* () {
+      yield* wait(gate.promise);
+    });
+    expect(() => pool.fork(function* () {})).toThrow(PoolFullError);
+    expect(() => pool.fork(function* () {})).toThrow(/is full \(1\)/);
     gate.resolve();
     await tick();
-    expect(() => pool.fork(async () => {})).not.toThrow();
+    expect(() => pool.fork(function* () {})).not.toThrow();
     await app.close();
   });
 
@@ -117,7 +117,7 @@ describe('pools (DESIGN.md §4.10)', () => {
     const app = createRootContext();
     let runs = 0;
     const work = task(
-      async () => {
+      function* () {
         t.push(`run ${++runs}`);
         if (runs === 1) throw new Error('first run');
       },
@@ -146,14 +146,14 @@ describe('pools (DESIGN.md §4.10)', () => {
       concurrency: 1,
       onFailure: () => {
         t.push(`handler: running ${pool.running}, pending ${pool.pending}`);
-        pool.fork(async () => void t.push('restart'));
+        pool.fork(function* () { return void t.push('restart'); });
       },
     });
-    pool.fork(async () => {
+    pool.fork(function* () {
       t.push('first');
       throw new Error('first run');
     });
-    pool.fork(async () => void t.push('waiter'));
+    pool.fork(function* () { return void t.push('waiter'); });
     expect([pool.running, pool.pending]).toEqual([1, 1]);
     await tick(3);
     await expect(app.close()).resolves.toBeUndefined();
@@ -164,10 +164,10 @@ describe('pools (DESIGN.md §4.10)', () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     let ran = false;
-    const busy = pool.fork(async () => {
-      await here().never();
+    const busy = pool.fork(function* () {
+      yield* here().never();
     });
-    const waiter = pool.fork(async () => {
+    const waiter = pool.fork(function* () {
       ran = true;
     });
     await tick();
@@ -185,15 +185,15 @@ describe('pools (DESIGN.md §4.10)', () => {
     const t = trace();
     const gates = [deferred(), deferred(), deferred()];
     gates.forEach((g, i) =>
-      pool.fork(async () => {
+      pool.fork(function* () {
         t.push(`start ${i}`);
-        await g.promise;
+        yield* wait(g.promise);
         t.push(`end ${i}`);
       }),
     );
     await tick();
     const closing = pool.close();
-    expect(() => pool.fork(async () => {})).toThrow(PoolClosedError);
+    expect(() => pool.fork(function* () {})).toThrow(PoolClosedError);
     for (const g of gates) {
       g.resolve();
       await tick();
@@ -209,21 +209,21 @@ describe('pools (DESIGN.md §4.10)', () => {
     const app = createRootContext();
     const pool = app.pool({ ...quiet, concurrency: 1 });
     let waiterRan = false;
-    const running = pool.fork(async () => {
-      await here().never();
+    const running = pool.fork(function* () {
+      yield* here().never();
     });
-    const waiter = pool.fork(async () => {
+    const waiter = pool.fork(function* () {
       waiterRan = true;
     });
     await tick();
     pool.abort();
-    expect(() => pool.fork(async () => {})).toThrow(PoolClosedError);
+    expect(() => pool.fork(function* () {})).toThrow(PoolClosedError);
     await pool.close();
     expect(running.outcome?.status).toBe('aborted');
     expect(waiter.outcome?.status).toBe('aborted');
     expect(waiterRan).toBe(false);
     expect([pool.running, pool.pending]).toEqual([0, 0]);
-    expect(() => pool.fork(async () => {})).toThrow(NodeCompletedError);
+    expect(() => pool.fork(function* () {})).toThrow(NodeCompletedError);
     await app.close();
   });
 
@@ -232,11 +232,11 @@ describe('pools (DESIGN.md §4.10)', () => {
       const app = createRootContext();
       const pool = app.pool({ ...quiet, concurrency: 1 });
       let ran = 0;
-      const busy = pool.fork(async () => {
-        await here().never(); // close() does not signal: only the abort ends it
+      const busy = pool.fork(function* () {
+        yield* here().never(); // close() does not signal: only the abort ends it
       });
-      const w1 = pool.fork(async () => void ran++);
-      const w2 = pool.fork(async () => void ran++);
+      const w1 = pool.fork(function* () { return void ran++; });
+      const w2 = pool.fork(function* () { return void ran++; });
       await tick();
       expect([pool.running, pool.pending]).toEqual([1, 2]);
       const closing = pool.close(); // its loop waits on w2, the top entry
@@ -257,10 +257,10 @@ describe('pools (DESIGN.md §4.10)', () => {
     const pool = app.pool({ ...quiet, concurrency: 1 });
     const gate = deferred();
     const release = deferred();
-    const f1 = pool.fork(async () => {
-      await gate.promise;
+    const f1 = pool.fork(function* () {
+      yield* wait(gate.promise);
     });
-    const w = pool.fork(async () => {});
+    const w = pool.fork(function* () {});
     w.own({ [Symbol.asyncDispose]: () => release.promise });
     await tick();
     w.abort();
@@ -276,9 +276,9 @@ describe('pools (DESIGN.md §4.10)', () => {
     const g = deferred();
     let concurrent = 0;
     let peak = 0;
-    const body = async (): Promise<void> => {
+    const body = function* () {
       peak = Math.max(peak, ++concurrent);
-      await g.promise;
+      yield* wait(g.promise);
       concurrent--;
     };
     const a = pool.fork(body);
@@ -305,8 +305,10 @@ describe('pools (DESIGN.md §4.10)', () => {
     pool.get(V);
     pool.own(() => void released.push('passive'));
     const gate = deferred();
-    pool.fork(() => gate.promise);
-    pool.fork(async () => {});
+    pool.fork(function* () {
+      yield* wait(gate.promise);
+    });
+    pool.fork(function* () {});
     await tick();
     expect([pool.running, pool.pending]).toEqual([1, 1]);
     const p = impl(pool);
@@ -328,14 +330,16 @@ describe('pools (DESIGN.md §4.10)', () => {
     const a = app.pool(quiet);
     const c = app.pool(quiet);
     const gate = deferred();
-    c.fork(() => gate.promise);
+    c.fork(function* () {
+      yield* wait(gate.promise);
+    });
     a.abort();
     const closing = c.close();
-    expect(() => a.fork(async () => {})).toThrow(NodeCompletedError); // bodiless and idle: complete at once
-    expect(() => c.fork(async () => {})).toThrow(PoolClosedError);
+    expect(() => a.fork(function* () {})).toThrow(NodeCompletedError); // bodiless and idle: complete at once
+    expect(() => c.fork(function* () {})).toThrow(PoolClosedError);
     gate.resolve();
     await closing;
-    expect(() => c.fork(async () => {})).toThrow(NodeCompletedError);
+    expect(() => c.fork(function* () {})).toThrow(NodeCompletedError);
     await app.close();
   });
 
@@ -345,9 +349,9 @@ describe('pools (DESIGN.md §4.10)', () => {
     const t = trace();
     pool.fork(
       task(
-        async () => {
-          await here().interrupted();
-          await tick();
+        function* () {
+          yield* here().interrupted();
+          yield* wait(tick());
           t.push('pool fiber finished');
         },
         { interrupt: 'observe' },
@@ -362,8 +366,8 @@ describe('pools (DESIGN.md §4.10)', () => {
   it('the pool hears the signal at its turn, after the explicit entries above it (I4)', async () => {
     const app = createRootContext();
     const pool = app.pool(quiet);
-    const fiber: Fiber<unknown> = pool.fork(async () => {
-      await here().never();
+    const fiber: Fiber<unknown> = pool.fork(function* () {
+      yield* here().never();
     });
     const seen: boolean[] = [];
     app.own(() => void seen.push(fiber.signal.aborted)); // above the pool: released first
@@ -379,10 +383,10 @@ describe('pools (DESIGN.md §4.10)', () => {
     const pool: Pool = app.pool({ ...quiet, concurrency: 1 });
     const ac = new AbortController();
     ac.abort('pre');
-    const f = pool.fork(task(async () => 1, { signal: ac.signal }));
+    const f = pool.fork(task(function* () { return 1; }, { signal: ac.signal }));
     expect(f.outcome).toEqual({ status: 'aborted', reason: 'pre' });
     expect([pool.running, pool.pending]).toEqual([0, 0]);
-    const g = pool.fork(async () => 2);
+    const g = pool.fork(function* () { return 2; });
     expect(pool.running).toBe(1);
     await app.join(g);
     expect([pool.running, pool.pending]).toEqual([0, 0]);
@@ -419,7 +423,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
       run(n: number): Fiber<void> {
         return this.pool.fork(
           task(
-            async () => {
+            function* () {
               results.push(n);
             },
             { name: `task-${n}` },
@@ -448,7 +452,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
       fail() {
         this.pool.fork(
           task(
-            async () => {
+            function* () {
               throw new Error('boom');
             },
             { name: 'failing-task' },
@@ -482,7 +486,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
       fail() {
         return this.pool.fork(
           task(
-            async () => {
+            function* () {
               throw new Error('fail');
             },
             { name: 'ref-task' },
@@ -510,10 +514,10 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
       start() {
         return this.pool.fork(
           task(
-            async () => {
+            function* () {
               // Long-running work, aborted through signal() (was withAbortSignal)
               const signal = here().signal;
-              await new Promise<void>((resolve, reject) => {
+              yield* wait(new Promise<void>((resolve, reject) => {
                 const timer = setTimeout(resolve, 10_000);
                 signal.addEventListener(
                   'abort',
@@ -523,7 +527,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
                   },
                   { once: true },
                 );
-              });
+              }));
             },
             { name: 'long-task' },
           ),
@@ -576,7 +580,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
       run() {
         this.pool.fork(
           task(
-            async () => {
+            function* () {
               disposed.push('fiber-done');
             },
             { name: 'lifecycle-task' },
@@ -605,7 +609,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
 
       run(): Fiber<{ value: string; scoped: boolean }> {
         return this.pool.fork(
-          task(async () => ({ value: lookup(TestKey), scoped: here().scopes.has(fiberScope) }), {
+          task(function* () { return ({ value: lookup(TestKey), scoped: here().scopes.has(fiberScope) }); }, {
             name: 'opts-task',
             providers: [valueProvider(TestKey, 'provided-value')],
             scopes: [fiberScope],

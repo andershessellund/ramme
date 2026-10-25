@@ -1,12 +1,10 @@
 // ---------------------------------------------------------------------------
-// Test helpers.
-//
-// No adapter import: `storage.test.ts` runs without one, and these helpers
-// must not register one. The ramme modules imported here register nothing.
+// Test helpers. Top-level test code is plain async code: it reaches ramme
+// through an explicit receiver (`await root.call(function* () { … })`).
 // ---------------------------------------------------------------------------
 
 import { expect } from 'vitest';
-import type { Context, Fiber, NodeOptions } from '../context.js';
+import type { Context, Fiber, Instruction, NodeOptions } from '../context.js';
 import { currentNode } from '../context-storage.js';
 import { createRootContext } from '../create-context.js';
 import { NodeTopic } from '../lifecycle-events.js';
@@ -25,6 +23,15 @@ export async function tick(n = 1): Promise<void> {
   for (let i = 0; i < n; i++) await new Promise<void>((resolve) => realSetImmediate(resolve));
 }
 
+/**
+ * Run an op through its `then` now, as plain async code does when it awaits it (D41 §4.1). A work op is lazy, so
+ * `const p = app.call(t)` alone runs nothing until `p` is awaited; `start(app.call(t))` starts it at once (its child
+ * made and its body's first step run, D22) and returns a real promise of its result.
+ */
+export function start<T>(op: PromiseLike<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => void op.then(resolve, reject));
+}
+
 /** Await one microtask. */
 export function micro(): Promise<void> {
   return Promise.resolve();
@@ -39,7 +46,7 @@ export type SettledState = 'pending' | 'fulfilled' | 'rejected';
 
 /**
  * Probe: the state of `p` after one macrotask. Attaches a handler, so a
- * rejection is never unhandled; on a managed promise this counts as awaiting it.
+ * rejection is never unhandled; on a work op this runs it (its `then`).
  */
 export async function settled(p: PromiseLike<unknown>): Promise<SettledState> {
   let state: SettledState = 'pending';
@@ -191,19 +198,19 @@ export function events(opts: NodeOptions = {}): EventLog {
   };
 }
 
-/** `createRootContext(opts)`, run `fn` inside `root.call`, then close the root (rejecting with its unconsumed failures). */
-export async function withRoot<T>(opts: NodeOptions, fn: (root: Context) => T | Promise<T>): Promise<T>;
-export async function withRoot<T>(fn: (root: Context) => T | Promise<T>): Promise<T>;
+/** `createRootContext(opts)`, run the body `fn` inside `root.call`, then close the root (rejecting with its unconsumed failures). */
+export async function withRoot<T>(opts: NodeOptions, fn: (root: Context) => Generator<Instruction, T, unknown> | T): Promise<T>;
+export async function withRoot<T>(fn: (root: Context) => Generator<Instruction, T, unknown> | T): Promise<T>;
 export async function withRoot<T>(
-  a: NodeOptions | ((root: Context) => T | Promise<T>),
-  b?: (root: Context) => T | Promise<T>,
+  a: NodeOptions | ((root: Context) => Generator<Instruction, T, unknown> | T),
+  b?: (root: Context) => Generator<Instruction, T, unknown> | T,
 ): Promise<T> {
   const opts = typeof a === 'function' ? {} : a;
   const fn = typeof a === 'function' ? a : b!;
   const root = createRootContext(opts);
   let value: T;
   try {
-    value = await root.call(() => fn(root));
+    value = (await root.call(() => fn(root) as Generator<Instruction, T, unknown>)) as T;
   } catch (e) {
     await root.close().catch(() => {});
     throw e;

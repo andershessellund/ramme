@@ -7,12 +7,16 @@
 // type) and from its module: every core name (the node and the free functions,
 // task options, tasks, fibers, results and outcomes, pools, the error classes)
 // is there, `Fiber` only as a type, `runSync` only as the ambient function, and
-// no name removed by the redesign or since (`ProviderOptions`, D36) or internal
-// to ramme. Then requires dist/result.d.ts, the `ramme/result` subpath, to export
-// exactly the `resultExpected` functions and nothing else, and dist/result.js to
-// import nothing: the subpath is a leaf that imports only types (DESIGN.md §7). Also
-// requires that stripInternal left no `@internal` declaration in any
-// dist/*.d.ts. The type-level half is src/test/surface.check.ts.
+// no name removed by the redesign or since (`ProviderOptions`, D36; `managed`,
+// `InterruptedError`, `UnawaitedCallError` and the async-context registry, D41)
+// or internal to ramme. Then requires dist/result.d.ts, the `ramme/result`
+// subpath, to export exactly the `resultExpected` functions and nothing else,
+// and dist/result.js to import nothing: the subpath is a leaf that imports only
+// types (DESIGN.md §7). Also requires that stripInternal left no `@internal`
+// declaration in any dist/*.d.ts, and that the adapters of the async-context
+// era (dist/node.js, dist/async-context.js) are not built: package.json exports
+// `.` and `./result` only (D41, decision 18). The type-level half is
+// src/test/surface.check.ts.
 // ---------------------------------------------------------------------------
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -72,7 +76,6 @@ const expected = new Map([
     'interrupted',
     'never',
     'sleep',
-    'managed',
     'wait',
     'promised',
     'runSync',
@@ -85,10 +88,8 @@ const expected = new Map([
     'PendingNodeError',
     'NotOwnedError',
     'AlreadyOwnedError',
-    'UnawaitedCallError',
     'FiberNotAwaitableError',
     'FiberAbortedError',
-    'InterruptedError',
     'PoolClosedError',
     'PoolFullError',
     'CreationViolationError',
@@ -97,9 +98,6 @@ const expected = new Map([
     'PlacementError',
     'OwnerInterrupt',
   ].map((n) => [n, ['value', './resource.js']]),
-  ['registerContextStorage', ['value', './context-storage.js']],
-  ['ContextStorage', ['type', './context-storage.js']],
-  ['Frame', ['type', './context-storage.js']],
   ...['createInjectionKey', 'setScope', 'setDependencies'].map((n) => [n, ['value', './context-key.js']]),
   ['InjectionKey', ['type', './context-key.js']],
   ['CreateInjectionKeyOptions', ['type', './context-key.js']],
@@ -117,7 +115,7 @@ const coreNames = [
   // the node and the free functions
   'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'call', 'attempt', 'all', 'race', 'settle', 'shield',
-  'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep', 'managed',
+  'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
   // generator bodies (DESIGN.md §4.14, D41): the ops, what they yield, and the two verbs for foreign async code
   'Op', 'Operation', 'Instruction', 'wait', 'promised',
   // task options
@@ -128,8 +126,8 @@ const coreNames = [
   'PoolOptions', 'Pool',
   // errors
   'NoCurrentNodeError', 'NodeCompletedError', 'PendingNodeError', 'NotOwnedError', 'AlreadyOwnedError',
-  'UnawaitedCallError', 'FiberNotAwaitableError', 'FiberAbortedError', 'InterruptedError', 'PoolClosedError',
-  'CreationViolationError', 'AsyncRunError', 'PlacementError',
+  'FiberNotAwaitableError', 'FiberAbortedError', 'PoolClosedError', 'CreationViolationError', 'AsyncRunError',
+  'PlacementError',
 ];
 
 /** The exact export list of dist/result.d.ts, the `ramme/result` subpath (DESIGN.md §4.13): functions only. */
@@ -147,7 +145,9 @@ const absent = [
   'RefCountedKeyOptions', 'ContextRef', 'ManagedResource', 'ResourceHandle', 'RegisterResourceFunction',
   'ContextEvent', 'FiberEvent', 'Created', 'ContextStatus', 'RunSyncOptions', 'CreateContextOptions',
   'ProviderOptions', // removed with the provider `scope` option (D36)
-  'requireCurrent', 'captureAutoScoped', 'NodeImpl', 'NO_NODE', 'runInFrame', 'currentFrame',
+  // removed with async bodies and the async context (D41): the bridge's names and the storage registry
+  'managed', 'InterruptedError', 'UnawaitedCallError', 'registerContextStorage', 'ContextStorage', 'Frame',
+  'requireCurrent', 'captureAutoScoped', 'NodeImpl', 'NO_NODE', 'runInFrame', 'currentFrame', 'WorkOp', 'LifecycleOp',
 ];
 
 const problems = [];
@@ -176,6 +176,7 @@ for (const [, typeOnly, list, from] of text.matchAll(clause)) {
 }
 const rest = text
   .replace(clause, '')
+  .replace(/^import '\.\/disposal-symbols\.js';$/m, '') // the floor's guard, a side-effect import (PROPOSAL.md §2.1)
   .replace(/\/\/.*$/gm, '')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .trim();
@@ -226,6 +227,14 @@ for (const file of readdirSync(dist).filter((f) => f.endsWith('.d.ts'))) {
   if (readFileSync(new URL(file, dist), 'utf8').includes('@internal'))
     problems.push(`dist/${file} keeps an @internal declaration: is stripInternal off?`);
 }
+// No async context (D41, decision 18): the adapter modules are gone, and package.json exports the core and the
+// result subpath only.
+for (const gone of ['node.js', 'async-context.js'])
+  if (readdirSync(dist).includes(gone)) problems.push(`dist/${gone} exists: the async-context adapters are deleted (D41)`);
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const subpaths = Object.keys(pkg.exports ?? {}).sort();
+if (JSON.stringify(subpaths) !== JSON.stringify(['.', './result']))
+  problems.push(`package.json exports ${subpaths.join(', ')}; expected exactly . and ./result`);
 
 if (problems.length > 0) {
   console.error(`check-surface: the build output does not match the expected surface:\n- ${problems.join('\n- ')}`);

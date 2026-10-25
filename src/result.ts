@@ -148,10 +148,10 @@ export function unwrapOr<R extends Result<unknown, unknown>, U>(r: R, fallback: 
  * promise itself gives a promise of the `Result`, which never rejects; a function whose return type may or may
  * not be a promise gives either, as its value turns out (`Fenced`). A returned fiber is a value: its `then` getter
  * throws (DESIGN.md §4.5), so it is not chained, and `fromThrowing(() => pool.fork(job))` is the fiber, or the
- * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps `aborted`: over a
- * `call` this reports another node's abort as `failure(FiberAbortedError)`, and the caller's own interruption as
- * `failure(InterruptedError)`, a swallow no lint sees (DESIGN.md §4.13). The promise forms await at once, when
- * `fromThrowing` is called: over a managed promise, await or return `fromThrowing(…)` at once (DESIGN.md §4.2).
+ * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps `aborted`: over an
+ * op this runs it through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts, and reports its
+ * child's abort as `failure(FiberAbortedError)` (DESIGN.md §4.13). The promise forms await at once, when
+ * `fromThrowing` is called.
  */
 export function fromThrowing<T>(f: () => PromiseLike<T>): Promise<Result<Awaited<T>, unknown>>;
 export function fromThrowing<T>(f: () => T): Fenced<T>;
@@ -169,11 +169,8 @@ export function fromThrowing(x: unknown): Result<unknown, unknown> | Promise<Res
 
 /**
  * The promise form of `fromThrowing`: a direct `await` in an async function, never `p.then(success, failure)`.
- * The `await` calls `then` on `p` as soon as `fromThrowing` is called, in the caller's async context. Over a
- * managed promise that is the body's own direct await only when the caller awaits (or returns) `fromThrowing(…)`
- * at once (DESIGN.md §4.2). Stored, dropped or used as a combinator member, its managed await is armed although
- * the body is suspended elsewhere, and can consume a failure nothing reads. The `catch` takes every error, the
- * caller's own `InterruptedError` included, so this promise never rejects.
+ * The `await` calls `then` on `p` a job after `fromThrowing` is called; over an op that runs it (DESIGN.md §4.14).
+ * The `catch` takes every error, so this promise never rejects.
  */
 async function settled<T>(p: PromiseLike<T>): Promise<Result<Awaited<T>, unknown>> {
   try {
@@ -200,17 +197,17 @@ export function collect<R extends Result<unknown, unknown>>(rs: readonly R[]): R
  *
  * A hand-written async iterator, not an `async function*`, whose `return` would await the value: a thenable
  * success value would be unwrapped, and a fiber's `then` throws (DESIGN.md §4.5). Its first `next()` awaits `x`
- * once, always, so a promise is handled and a settled `Result` costs one microtask; over a managed promise that
- * is the body's own direct await, made in its async context (DESIGN.md §4.2), and over a bare promise it is a
- * bare await (DESIGN.md §4.4). Then it resolves `{ done: true, value }` for a success, without awaiting the
- * value, or `{ done: false, value: failure }` for a failure. A later `next()` never settles; `return()`
+ * once, always, so a promise is handled and a settled `Result` costs one microtask; over an op that runs it
+ * through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts. Then it resolves
+ * `{ done: true, value }` for a success, without awaiting the value, or `{ done: false, value: failure }` for a
+ * failure. A later `next()` never settles; `return()`
  * resolves `{ done: true, value: undefined }`.
  *
  * Typed by the argument as a whole, awaited: `$(charge(n))` over an unannotated function's
  * `Promise<Failure<A> | Failure<B> | Success<T>>`, and `$(c ? getUser(id) : getAdmin(id))` over a union of
  * promises, evaluate to the union of the values and yield the union of the errors.
  */
-export function $<X extends Result<unknown, unknown> | Promise<Result<unknown, unknown>>>(
+export function $<X extends Result<unknown, unknown> | PromiseLike<Result<unknown, unknown>>>(
   x: X,
 ): Unwrap<SuccessOf<Awaited<X>>, ErrorOf<Awaited<X>>> {
   let started = false;
@@ -228,7 +225,7 @@ export function $<X extends Result<unknown, unknown> | Promise<Result<unknown, u
 
 /** `$`'s first `next()`: one `await` of the source, then the success value as the delegation's return value, unawaited. */
 async function unwrapStep(
-  x: Result<unknown, unknown> | Promise<Result<unknown, unknown>>,
+  x: Result<unknown, unknown> | PromiseLike<Result<unknown, unknown>>,
 ): Promise<IteratorResult<Failure<unknown>, unknown>> {
   const r = await x;
   return r.status === 'success' ? { done: true, value: r.value } : { done: false, value: r };
@@ -239,11 +236,12 @@ async function unwrapStep(
  * failure ends the run and is the result; otherwise the body's return value is. The error type is the union of
  * the errors of the yielded and the returned failures.
  *
- * An async function, not a managed await: its promise rejects with whatever the body throws (a defect), so await
+ * An async function, plain async code: its promise rejects with whatever the body throws (a defect), so await
  * or return `gen(…)` at once. A dropped `gen(…)` whose body throws is an unhandled rejection, and a failure a
- * `call` inside `$` threw is consumed by that await, so the node does not surface it (DESIGN.md §4.13). The
- * caller's own `InterruptedError` propagates out of `$`, the generator and `gen` as a rejection, never as a
- * `Result` (D39), so a stored `gen(…)` rejects unhandled on interruption. On a yielded failure the generator is
+ * `call` inside `$` threw is consumed by that await, so the node does not surface it (DESIGN.md §4.13). Its body
+ * has no current node after its first `await` (DESIGN.md §6), so a `$(call(t))` after one throws
+ * `NoCurrentNodeError`; from a body, `yield* wait(gen(…))` makes its ops before the first `await`, or use
+ * `attempt`. Stage 3 of D41 retires `gen`. On a yielded failure the generator is
  * left suspended, never resumed: `gen` does not call its `return()`, which would run the body's `finally`
  * blocks, which are not where a body's cleanup belongs (A7: what must hold after the body ends is an entry).
  * `gen(thisArg, body)` runs the body with `this` bound, for a generator in a method.
@@ -259,7 +257,7 @@ export async function gen(...args: unknown[]): Promise<Result<unknown, unknown>>
   const [thisArg, body] = args.length >= 2 ? args : [undefined, args[0]];
   const it = (body as (this: unknown) => AsyncGenerator<Failure<unknown>, Result<unknown, unknown>, unknown>).call(thisArg);
   // Every yield is a failure, and the first ends the run; so does the return. The generator runs in the
-  // caller's frame up to its first await: the managed await inside `$` is the caller's own (DESIGN.md §4.2).
+  // caller's frame up to its first await, so the ops it makes there read the caller's node (DESIGN.md §6).
   const step = await it.next();
   return step.value;
 }

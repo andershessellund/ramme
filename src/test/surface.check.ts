@@ -90,7 +90,9 @@ export function attemptTypes(ctx: Context, a: Task<[number], number>): void {
   const _viaFree = attempt(a, 1);
   const _viaMethod = ctx.attempt(a, 1);
   const _viaTask = a.attempt(1);
-  const _inline = attempt(async (s: string) => s.length, 'x');
+  const _inline = attempt(function* (s: string) {
+    return s.length;
+  }, 'x');
   type _Free = Expect<Equal<typeof _viaFree, Op<Outcome<number>>>>;
   type _Method = Expect<Equal<typeof _viaMethod, Op<Outcome<number>>>>;
   type _Task = Expect<Equal<typeof _viaTask, Op<Outcome<number>>>>;
@@ -125,15 +127,17 @@ export const fiberNamespace = ramme.Fiber;
 /** `runSync` is the ambient function of DESIGN.md §4.11, `current().runSync(fn, ...args)`. */
 type _RunSync = Expect<Equal<typeof ramme.runSync, <R, A extends unknown[]>(fn: (...args: A) => R, ...args: A) => R>>;
 
-/** `sleep` is a free function and a method, both a managed await over a timer (DESIGN.md §4.2, D34). */
+/** `sleep` is a free function and a method, both an op over a timer (DESIGN.md §4.14, D34). */
 type _Sleep = Expect<Equal<typeof ramme.sleep, (ms: number) => Op<void>>>;
 type _SleepMethod = Expect<Equal<ReturnType<Context['sleep']>, Op<void>>>;
 
 /** `shield` takes a task or a body as `call` does, free and as a method, and resolves with its value (D39, DESIGN.md §4.2). */
 export function shields(ctx: Context, t: Task<[number], string>): void {
   const _free = ramme.shield(t, 1);
-  const _body = ramme.shield(async (n: number) => n * 2, 21);
-  const _method = ctx.shield(async () => 'done');
+  const _body = ramme.shield(function* (n: number) {
+    return n * 2;
+  }, 21);
+  const _method = ctx.shield(() => 'done');
   type _Free = Expect<Equal<typeof _free, Op<string>>>;
   type _Body = Expect<Equal<typeof _body, Op<number>>>;
   type _Method = Expect<Equal<typeof _method, Op<string>>>;
@@ -144,8 +148,10 @@ export function shields(ctx: Context, t: Task<[number], string>): void {
 /** `unshield` takes a task or a body as `attempt` does, free and as a method, and resolves with the outcome (D39, DESIGN.md §4.2). */
 export function unshields(ctx: Context, t: Task<[number], string>): void {
   const _free = ramme.unshield(t, 1);
-  const _body = ramme.unshield(async (n: number) => n * 2, 21);
-  const _method = ctx.unshield(async () => 'done');
+  const _body = ramme.unshield(function* (n: number) {
+    return n * 2;
+  }, 21);
+  const _method = ctx.unshield(() => 'done');
   type _Free = Expect<Equal<typeof _free, Op<Outcome<string>>>>;
   type _Body = Expect<Equal<typeof _body, Op<Outcome<number>>>>;
   type _Method = Expect<Equal<typeof _method, Op<Outcome<string>>>>;
@@ -156,9 +162,15 @@ export function unshields(ctx: Context, t: Task<[number], string>): void {
 
 // --- Generator bodies (DESIGN.md §4.14, D41) ----------------------------------
 
-/** An op is an `Operation` and, in this stage, a promise; a generator helper is an `Operation`; `Awaited` reads the value. */
+/**
+ * An op is an `Operation` and a plain thenable, no `Promise` (D41, decision 4); the lifecycle verbs return one that is a
+ * `Promise` too (decision 2); a generator helper is an `Operation`; `Awaited` reads the value.
+ */
 type _OpIsOperation = Expect<Op<number> extends Operation<number> ? true : false>;
-type _OpIsPromise = Expect<Op<number> extends Promise<number> ? true : false>;
+type _OpIsThenable = Expect<Op<number> extends PromiseLike<number> ? true : false>;
+type _OpIsNoPromise = Expect<Not<Op<number> extends Promise<number> ? true : false>>;
+type _CloseIsPromise = Expect<Equal<ReturnType<Context['close']>, Op<void> & Promise<void>>>;
+type _ReleaseIsPromise = Expect<Equal<ReturnType<typeof ramme.release>, Op<void> & Promise<void>>>;
 type _HelperIsOperation = Expect<Generator<Instruction, number, unknown> extends Operation<number> ? true : false>;
 type _AwaitedOp = Expect<Equal<Awaited<Op<number>>, number>>;
 /** `Instruction` is opaque: no plain object is one. */
@@ -202,7 +214,7 @@ export function waitAndPromised(ctx: Context): void {
     yield* ramme.sleep(n);
     return tx.length;
   });
-  const _pm = ctx.promised(async () => true);
+  const _pm = ctx.promised(() => true);
   type _W = Expect<Equal<typeof _w, Op<number>>>;
   type _Ws = Expect<Equal<typeof _ws, Op<boolean>>>;
   type _Wm = Expect<Equal<typeof _wm, Op<string>>>;
@@ -227,8 +239,8 @@ export function generatorReleases(ctx: Context): void {
 }
 
 /**
- * The core's values, exactly: 59 of the 91 names the surface check lists (scripts/check-surface.mjs), which also
- * checks the 32 types, which a namespace object does not carry.
+ * The core's values, exactly: 55 of the 85 names the surface check lists (scripts/check-surface.mjs), which also
+ * checks the 30 types, which a namespace object does not carry.
  */
 type _CoreValues = Expect<
   Equal<
@@ -236,22 +248,44 @@ type _CoreValues = Expect<
     | 'createRootContext' | 'task'
     | 'current' | 'signal' | 'lookup' | 'own' | 'release' | 'releaseAll' | 'fork' | 'call' | 'attempt' | 'all'
     | 'race' | 'settle' | 'shield' | 'unshield' | 'pool' | 'child' | 'join' | 'result' | 'interrupted' | 'never'
-    | 'sleep' | 'managed' | 'wait' | 'promised' | 'runSync'
+    | 'sleep' | 'wait' | 'promised' | 'runSync'
     | 'inject' | 'ContextKey'
     | 'NoCurrentNodeError' | 'NodeCompletedError' | 'PendingNodeError' | 'NotOwnedError' | 'AlreadyOwnedError'
-    | 'UnawaitedCallError' | 'FiberNotAwaitableError' | 'FiberAbortedError' | 'InterruptedError' | 'PoolClosedError'
+    | 'FiberNotAwaitableError' | 'FiberAbortedError' | 'PoolClosedError'
     | 'PoolFullError' | 'CreationViolationError' | 'FactoryReturnedUndefinedError' | 'AsyncRunError'
     | 'PlacementError' | 'OwnerInterrupt'
-    | 'registerContextStorage' | 'createInjectionKey' | 'setScope' | 'setDependencies'
+    | 'createInjectionKey' | 'setScope' | 'setDependencies'
     | 'classProvider' | 'factoryProvider' | 'valueProvider' | 'aliasProvider'
     | 'createScope' | 'SelfScope' | 'RootScope' | 'RequestScope'
     | 'createTopic' | 'NodeTopic'
   >
 >;
 
-/** `InterruptedError` is the awaiting body's own interruption: an `Error` with the delivery's `reason` (D39). */
-type _Interrupted = Expect<Equal<InstanceType<typeof ramme.InterruptedError>['reason'], unknown>>;
-type _InterruptedIsError = Expect<InstanceType<typeof ramme.InterruptedError> extends Error ? true : false>;
+/** An async function is no body (D41, decision 5): a type error wherever a body is taken, the `Promise` arm gone. */
+export function asyncBodiesRefused(ctx: Context): void {
+  // @ts-expect-error -- an async task body
+  void ramme.task(async () => 1);
+  // @ts-expect-error -- an async call body
+  void ramme.call(async () => 1);
+  // @ts-expect-error -- an async fork body, through a node
+  void ctx.fork(async () => 1);
+  // @ts-expect-error -- an async promised body
+  void promised(async (n: number) => n);
+  // @ts-expect-error -- a synchronous body returning a promise is no body either
+  void ramme.shield(() => Promise.resolve(1));
+  // @ts-expect-error -- an async generator task body (PROPOSAL.md §6: the guard refuses an async iterator too)
+  void ramme.task(async function* () {
+    yield 1;
+  });
+  // @ts-expect-error -- an async generator call body that yields nothing
+  void ramme.call(async function* () {});
+  // @ts-expect-error -- an async generator fork body, through a node
+  void ctx.fork(async function* () {});
+  // @ts-expect-error -- an async generator promised body
+  void promised(async function* (n: number) {
+    yield n;
+  });
+}
 
 /** `parent` is the resolution parent, a node or `undefined` (DESIGN.md §2.1, D33). */
 type _Parent = Expect<Equal<Context['parent'], Context | undefined>>;
@@ -339,7 +373,7 @@ type _Signatures = Expect<
       <R extends Result<unknown, unknown>>(r: R) => SuccessOf<R>,
       <R extends Result<unknown, unknown>, U>(r: R, fallback: U) => SuccessOf<R> | U,
       <R extends Result<unknown, unknown>>(rs: readonly R[]) => Result<SuccessOf<R>[], ErrorOf<R>>,
-      <X extends Result<unknown, unknown> | Promise<Result<unknown, unknown>>>(
+      <X extends Result<unknown, unknown> | PromiseLike<Result<unknown, unknown>>>(
         x: X,
       ) => { [Symbol.asyncIterator](): AsyncIterator<Failure<ErrorOf<Awaited<X>>>, SuccessOf<Awaited<X>>, unknown> },
     ]

@@ -1,13 +1,13 @@
-// node-core.test.ts — anatomy, delivery, sticky rejection, the release loop, release
+// node-core.test.ts — anatomy, delivery, the halt, the release loop, release
 // fibers, C1–C8, the lifecycle table and the use-after-release table
 // (DESIGN.md §2.7), run/runSync, unstarted fibers, stall.
 //
 // `here()` is a `current()` that throws; this suite uses the method form on it,
 // which is what the free functions are (DESIGN.md §6).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
+import { wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber } from './context.js';
+import type { Body, Context, Fiber } from './context.js';
 import { currentFrame } from './context-storage.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
@@ -22,20 +22,19 @@ import {
   CreationViolationError,
   FiberAbortedError,
   FiberNotAwaitableError,
-  InterruptedError,
   NodeCompletedError,
   NotOwnedError,
   OwnerInterrupt,
   PendingNodeError,
 } from './resource.js';
 import { RootScope } from './scope.js';
-import { deferred, events, here, impl, micro, tick, trace } from './test/util.js';
+import { deferred, events, here, impl, micro, start, tick, trace } from './test/util.js';
 
 /** A fiber forked onto a bodiless node needs a destination other than 'join' (D14); 'link' surfaces failures. */
 const linked = { onFailure: 'link' } as const;
 
 /** Fork a body onto a bodiless node with the 'link' destination. */
-function spawn<T>(on: Context, body: () => Promise<T> | T, opts: Parameters<typeof task>[1] = {}): Fiber<T> {
+function spawn<T>(on: Context, body: Body<T>, opts: Parameters<typeof task>[1] = {}): Fiber<T> {
   return on.fork(task(body, { ...linked, ...opts }));
 }
 
@@ -59,7 +58,7 @@ describe('anatomy', () => {
     const app = ev.root;
     app.child();
     app.pool({ name: 'p', onFailure: () => {} });
-    await app.call(async () => {
+    await app.call(function* () {
       here().own(() => {}); // a release fiber at the fiber's completion
       app.get(V);
     });
@@ -74,15 +73,15 @@ describe('anatomy', () => {
     const seen: string[] = [];
     const app = createRootContext();
     let F!: NodeImpl;
-    await app.call(async () => {
+    await app.call(function* () {
       F = here();
       here().own(() => void seen.push(`release:${F.state}`));
-      const g = here().fork(async () => {
-        await here().never();
+      const g = here().fork(function* () {
+        yield* here().never();
       });
       g.signal.addEventListener('abort', () => void seen.push(`interrupt:${F.state}`));
       seen.push(`body:${F.state}`);
-      await tick();
+      yield* wait(tick());
     });
     seen.push(`after:${F.state}`);
     expect(seen).toEqual(['body:running', 'interrupt:settling', 'release:releasing', 'after:complete']);
@@ -137,14 +136,14 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const ev = events();
     const app = ev.root;
     const A = app.child();
-    const B = spawn(app, async () => {
-      await here().never();
+    const B = spawn(app, function* () {
+      yield* here().never();
     });
     const C = app.child();
     await tick(); // B is suspended on never()
     let born: NodeImpl | undefined;
     A.signal.addEventListener('abort', () => {
-      born = impl(B.fork(async () => {})); // B is a fiber: 'join' is allowed
+      born = impl(B.fork(function* () {})); // B is a fiber: 'join' is allowed
       expect(born.delivered).toBe(true); // born delivered: B is marked and in freeze mode
       expect(born.signal.aborted).toBe(true);
       C.abort(); // already marked: no second delivery
@@ -200,12 +199,12 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     let afterAbort: string | undefined;
     const P = app.fork(
       task(
-        async () => {
+        function* () {
           F = here().fork(() => void (ran = true)); // not started: its start microtask is queued
           here().signal.addEventListener('abort', () => F.abort());
           here().abort(); // from P's own plain code: P's body is running, so P's loop does not reach F yet
           afterAbort = F.outcome?.status; // settled in pass 2b, after its signal fired
-          await here().never();
+          yield* here().never();
         },
         linked,
       ),
@@ -241,8 +240,8 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const app = createRootContext();
     const A = app.child({ name: 'A', interrupt: 'observe' });
     const R = A.child({ name: 'R', interrupt: 'restore' });
-    const F = spawn(A, async () => {
-      await here().never();
+    const F = spawn(A, function* () {
+      yield* here().never();
     });
     await tick(); // F is suspended on never(); A's delivery reaches it only through A's exit
     let closing: Promise<void> | undefined;
@@ -263,8 +262,8 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const gate = deferred();
     const O = spawn(
       app,
-      async () => {
-        await gate.promise;
+      function* () {
+        yield* wait(gate.promise);
       },
       { interrupt: 'observe' },
     );
@@ -286,9 +285,9 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const app = createRootContext();
     const gates = [deferred(), deferred(), deferred()];
     const ac = new AbortController();
-    const viaAbort = spawn(app, () => gates[0].promise, { interrupt: 'observe' });
-    const viaTimeout = spawn(app, () => gates[1].promise, { interrupt: 'observe', timeoutMs: 5 });
-    const viaSignal = spawn(app, () => gates[2].promise, { interrupt: 'observe', signal: ac.signal });
+    const viaAbort = spawn(app, function* () { return yield* wait(gates[0].promise); }, { interrupt: 'observe' });
+    const viaTimeout = spawn(app, function* () { return yield* wait(gates[1].promise); }, { interrupt: 'observe', timeoutMs: 5 });
+    const viaSignal = spawn(app, function* () { return yield* wait(gates[2].promise); }, { interrupt: 'observe', signal: ac.signal });
     await tick(); // started: an unstarted fiber would settle at abort (DESIGN.md §4.6)
     viaAbort.abort('direct');
     ac.abort('linked');
@@ -305,8 +304,8 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const app = createRootContext();
     const f = spawn(
       app,
-      async () => {
-        await here().never();
+      function* () {
+        yield* here().never();
       },
       { timeoutMs: 5 },
     );
@@ -323,7 +322,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     for (const k of ['timeoutMs', 'releaseTimeoutMs', 'stallWarningMs'] as const)
       for (const v of [-1, NaN, 2 ** 31, -Infinity, '5' as unknown as number]) {
         expect(() => app.child({ [k]: v }), `${k}: ${String(v)}`).toThrow(TypeError);
-        expect(() => app.fork(task(async () => {}, { ...linked, [k]: v })), `fork ${k}: ${String(v)}`).toThrow(TypeError);
+        expect(() => app.fork(task(function* () {}, { ...linked, [k]: v })), `fork ${k}: ${String(v)}`).toThrow(TypeError);
       }
     expect(() => createRootContext({ releaseTimeoutMs: -1 })).toThrow(TypeError);
     expect(() => app.pool({ name: 'p', onFailure: () => {}, timeoutMs: NaN })).toThrow(TypeError);
@@ -335,7 +334,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
   it('timeoutMs: Infinity arms no timer; it never delivers (DESIGN.md §2.1)', async () => {
     const app = createRootContext();
     const c = app.child({ timeoutMs: Infinity });
-    const f = spawn(app, () => new Promise<void>((r) => setTimeout(r, 30)), { timeoutMs: Infinity });
+    const f = spawn(app, function* () { return yield* wait(new Promise<void>((r) => setTimeout(r, 30))); }, { timeoutMs: Infinity });
     expect(impl(c).timeoutTimer).toBeUndefined();
     await new Promise((r) => setTimeout(r, 20));
     expect(c.signal.aborted).toBe(false);
@@ -357,9 +356,9 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     await N.close();
     const F = app.child({ releaseTimeoutMs: 1.5 });
     let fired: boolean | undefined;
-    F.own(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-      fired = here().signal.aborted;
+    F.own(function* () {
+      yield* wait(new Promise((r) => setTimeout(r, 20)));
+      fired = here().signal.aborted; // a generator release: its fiber is current at every step
     });
     await F.close();
     await expect(app.close()).resolves.toBeUndefined();
@@ -372,8 +371,8 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     const ac1 = new AbortController();
     const f1 = spawn(
       app,
-      async () => {
-        await here().never();
+      function* () {
+        yield* here().never();
       },
       { signal: ac1.signal },
     );
@@ -384,7 +383,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
 
     const ac2 = new AbortController();
     const remove = vi.spyOn(ac2.signal, 'removeEventListener');
-    const f2 = spawn(app, async () => 1, { signal: ac2.signal });
+    const f2 = spawn(app, function* () { return 1; }, { signal: ac2.signal });
     await app.join(f2);
     expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
     ac2.abort('late'); // nobody listens any more
@@ -405,7 +404,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
         it(`parent ${parentMode} × child ${childMode} → ${expected[parentMode][childMode] ? 'delivered' : 'not delivered'}`, async () => {
           const app = createRootContext();
           const gate = deferred();
-          const P = spawn(app, () => gate.promise, { interrupt: parentMode }); // a bare await: delivery does not reject it
+          const P = spawn(app, function* () { return yield* wait(gate.promise); }, { interrupt: parentMode }); // a bare await: delivery does not reject it
           await tick();
           P.abort('stop');
           expect(impl(P).delivered).toBe(true);
@@ -420,7 +419,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     it('restore: delivered at birth when any ancestor is, even through an undelivered freeze node', async () => {
       const app = createRootContext();
       const gate = deferred();
-      const O = spawn(app, () => gate.promise, { interrupt: 'observe' });
+      const O = spawn(app, function* () { return yield* wait(gate.promise); }, { interrupt: 'observe' });
       const F = O.child();
       await tick();
       O.abort('stop');
@@ -434,7 +433,7 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
     it('unsubscribed nodes are not delivered at birth: they hear at their turn (I4; D12)', async () => {
       const app = createRootContext();
       const gate = deferred();
-      const P = spawn(app, () => gate.promise);
+      const P = spawn(app, function* () { return yield* wait(gate.promise); });
       await tick();
       P.abort('stop');
       const pool = impl(P.pool({ name: 'late', onFailure: () => {} }));
@@ -450,8 +449,8 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
       const gate = deferred();
       app.own({}, () => gate.promise); // above the pool: app's loop waits here, so the pool's turn comes later
       const restore = task(
-        async () => {
-          await here().never();
+        function* () {
+          yield* here().never();
         },
         { interrupt: 'restore' },
       );
@@ -471,20 +470,20 @@ describe('delivery (DESIGN.md §4.1, §4.3)', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
-  it('a body suspended on join(f) is rejected with InterruptedError, runs its finally, and its node releases after the body has unwound', async () => {
+describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
+  it('a body suspended on join(f) of a fiber not below it is halted at once: no catch runs, its finally does, and its node releases after the body has unwound', async () => {
     const t = trace();
     const app = createRootContext();
-    const f = spawn(app, async () => {
-      await here().never();
+    const f = spawn(app, function* () {
+      yield* here().never();
     });
     let B!: NodeImpl;
-    let caught: unknown;
-    const p = app.call(async () => {
+    let caught: unknown = 'no catch ran';
+    const p = start(app.call(function* () {
       B = here();
       here().own(() => void t.push(`release:${t.log.includes('finally')}`));
       try {
-        await here().join(f);
+        yield* here().join(f);
         t.push('after');
       } catch (e) {
         caught = e;
@@ -492,33 +491,32 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
       } finally {
         t.push('finally');
       }
-    });
+    }));
     await tick();
     B.abort('stop');
-    expect(t.log).toEqual([]); // nothing inside abort(): the rejection is a queued job, and B completes after its body
+    expect(t.log).toEqual([]); // nothing inside abort(): the return is a queued job, and B completes after its body
     expect(B.state).toBe('running');
     await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
     expect(t.log).toEqual(['finally', 'release:true']);
-    expect(caught).toBeInstanceOf(InterruptedError);
-    expect((caught as InterruptedError).reason).toBe('stop');
+    expect(caught).toBe('no catch ran');
     expect(B.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     f.abort();
     await app.close();
   });
 
-  it('plain code between delivery and the next managed await runs, and what it owns is released', async () => {
+  it('plain code between a halted wait(p) and the next yield* runs, and what it owns is released', async () => {
     const t = trace();
     const app = createRootContext();
     const gate = deferred();
     let B!: NodeImpl;
-    const p = app.call(async () => {
+    const p = start(app.call(function* () {
       B = here();
-      await gate.promise; // bare
+      yield* wait(gate.promise); // the halt lets p finish (row 3)
       t.push('plain');
       here().own(t.at('late-own'));
-      await here().never();
+      yield* here().never();
       t.push('after');
-    });
+    }));
     await tick();
     B.abort();
     expect(t.log).toEqual([]);
@@ -528,25 +526,25 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
     await app.close();
   });
 
-  it('a stored, unawaited managed promise is not rejected while the body is in a bare await; awaiting it later rejects (D13, D39)', async () => {
+  it('a stored, unyielded join runs nothing while the body waits on wait(p); yielded after the delivery, it is not started, and the body is returned there (D13, D41)', async () => {
     const t = trace();
     const app = createRootContext();
-    const f = spawn(app, async () => {
-      await here().never();
+    const f = spawn(app, function* () {
+      yield* here().never();
     });
     const gate = deferred();
     let B!: NodeImpl;
-    const p = app.call(async () => {
+    const p = start(app.call(function* () {
       B = here();
       const j = here().join(f);
-      await gate.promise; // bare
+      yield* wait(gate.promise); // the halt lets p finish
       t.push('resumed');
-      await j;
+      yield* j; // returned here, without running it
       t.push('after');
-    });
+    }));
     await tick();
     B.abort();
-    expect(B.bodyDone).toBe(false); // nothing awaited j yet: the body runs on
+    expect(B.bodyDone).toBe(false); // a wait(p) the halt lets finish: the body runs on
     gate.resolve();
     await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
     expect(t.log).toEqual(['resumed']);
@@ -555,56 +553,24 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
     await app.close();
   });
 
-  it('after delivery, p.catch() on a stored join(f) does not release anything inside the body\'s synchronous code (DESIGN.md §4.4)', async () => {
-    const t = trace();
-    const app = createRootContext();
-    const f = spawn(app, async () => {
-      await here().never();
-    });
-    const gate = deferred();
-    let B!: NodeImpl;
-    let ownError: unknown;
-    const p = app.call(async () => {
-      B = here();
-      const j = here().join(f);
-      await gate.promise; // delivered meanwhile
-      j.catch(() => {});
-      try {
-        here().own(t.at('conn released'));
-        t.push(`conn owned, released so far: ${t.log.length}`);
-      } catch (e) {
-        ownError = e;
-      }
-      await here().never();
-    });
-    await tick();
-    B.abort();
-    gate.resolve();
-    await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
-    expect(ownError).toBeUndefined();
-    expect(t.log).toEqual(['conn owned, released so far: 0', 'conn released']);
-    f.abort();
-    await app.close();
-  });
-
-  describe('combinators and stored wrappers, pinned with a real node (DESIGN.md §4.2, §4.4)', () => {
-    it("Promise.allSettled([join(f1), join(f2)]): f1 failed, the owner aborted while f2 runs — both outcomes reach the body, f1's failure as its rejection (D39)", async () => {
+  describe('Promise combinators over ops, pinned with a real node (DESIGN.md §4.14)', () => {
+    it("Promise.allSettled([join(f1), join(f2)]) runs both joins through their then, which nothing halts: f1 failed, the owner aborted while f2 runs, and both outcomes reach the body, f1's failure as its rejection and f2's abort as FiberAbortedError", async () => {
       const app = createRootContext();
       let B!: NodeImpl;
       let f1!: NodeImpl;
       let seen: PromiseSettledResult<unknown>[] | undefined;
-      const p = app.call(async () => {
+      const p = start(app.call(function* () {
         B = here();
         f1 = impl(
-          here().fork(async () => {
+          here().fork(function* () {
             throw new Error('f1');
           }),
         );
-        const f2 = here().fork(async () => {
-          await here().never();
+        const f2 = here().fork(function* () {
+          yield* here().never();
         });
-        seen = await Promise.allSettled([here().join(f1 as unknown as Fiber<unknown>), here().join(f2)]);
-      });
+        seen = yield* wait(Promise.allSettled([here().join(f1 as unknown as Fiber<unknown>), here().join(f2)]));
+      }));
       await tick();
       expect(f1.outcome?.status).toBe('failure');
       B.abort('stop');
@@ -612,118 +578,72 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
       expect(B.outcome?.status).toBe('aborted');
       expect(seen?.map((s) => s.status)).toEqual(['rejected', 'rejected']);
       expect(((seen![0] as PromiseRejectedResult).reason as Error).message).toBe('f1'); // consumed by a delivery the body saw
-      expect((seen![1] as PromiseRejectedResult).reason).toBeInstanceOf(InterruptedError);
+      expect((seen![1] as PromiseRejectedResult).reason).toBeInstanceOf(FiberAbortedError); // f2, a subscriber, was aborted with B
       expect(f1.failure?.consumed).toBe(true);
       await expect(app.close()).resolves.toBeUndefined();
     });
 
-    it('a .catch attached to a stored wrapper before delivery, then a bare await: the delivery rejects into the .catch, and the node completes after the body returns', async () => {
+    it('the loser of Promise.race([join(f1), join(f2)]) is a then subscription that no halt touches: it adds no hook to the body, the body runs on through a halted wait(p), and the node completes after the body', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const t = trace();
       const app = createRootContext();
-      const f = spawn(app, async () => {
-        await here().never();
+      const f1 = spawn(app, function* () { return 1; });
+      const f2 = spawn(app, function* () {
+        yield* here().never();
       });
       const gate = deferred();
+      const sizes: number[] = [];
       let B!: NodeImpl;
-      const p = app.call(async () => {
+      const p = start(app.call(function* () {
         B = here();
-        here().own(t.at('released'));
-        const j = here().join(f);
-        j.catch((e: unknown) => t.push(`catch: ${(e as Error).name}`)); // arms the await
-        await gate.promise; // bare
+        yield* wait(Promise.race([here().join(f1), here().join(f2)]));
+        sizes.push(B.onApplied.size); // in a step: no hook; the loser's then is no wait of this body
+        yield* wait(gate.promise); // the halt lets p finish
         t.push('resumed');
         return 'done';
-      });
+      }));
       await tick();
+      sizes.push(B.onApplied.size); // the hook of the wait(p) in flight
       B.abort();
-      expect(B.bodyDone).toBe(false); // the body is running plain code: nothing settles it
-      await tick();
-      expect(t.log).toEqual(['catch: InterruptedError']);
-      gate.resolve();
-      await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
-      expect(t.log).toEqual(['catch: InterruptedError', 'resumed', 'released']);
-      expect(warn).not.toHaveBeenCalled();
-      expect(B.outcome?.status).toBe('aborted'); // by state: the return value is discarded (D24)
-      f.abort();
-      await app.close();
-    });
-
-    it('a managed promise awaited by another body: dev mode reports the foreign awaiter (DESIGN.md §4.4)', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const app = createRootContext();
-      const f = spawn(app, async () => 7);
-      let wrapper!: Promise<number>;
-      const creator = spawn(app, async () => {
-        wrapper = here().join(f) as Promise<number>; // created in `creator`'s body, targeted at it
-        await here().never();
-      });
-      await tick();
-      const awaiter = spawn(app, async () => wrapper); // another body awaits it
-      expect(await app.join(awaiter)).toBe(7);
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/is awaited by fiber/));
-      creator.abort();
-      await app.close();
-    });
-
-    it('the loser of await Promise.race([join(f1), join(f2)]) stays armed; a delivery during a later bare await rejects it into the settled race, and the node completes after the body (DESIGN.md §4.2)', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const t = trace();
-      const app = createRootContext();
-      const f1 = spawn(app, async () => 1);
-      const f2 = spawn(app, async () => {
-        await here().never();
-      });
-      const gate = deferred();
-      let B!: NodeImpl;
-      const p = app.call(async () => {
-        B = here();
-        await Promise.race([here().join(f1), here().join(f2)]);
-        expect(B.onApplied.size).toBe(1); // the loser's await is still armed
-        await gate.promise; // bare
-        t.push('resumed');
-        return 'done';
-      });
-      await tick();
-      B.abort();
-      expect(B.onApplied.size).toBe(0); // rejected into the race, which ignores it
+      sizes.push(B.onApplied.size); // fire() ran it
       expect(B.bodyDone).toBe(false);
       gate.resolve();
       await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
       expect(t.log).toEqual(['resumed']);
+      expect(sizes).toEqual([0, 1, 0]);
       expect(B.outcome?.status).toBe('aborted');
       expect(warn).not.toHaveBeenCalled();
       f2.abort();
       await app.close();
     });
 
-    it('await Promise.all([call(a), a bare promise rejected by the signal]): the bare rejection reaches the catch at once, and the node completes after its call child (DESIGN.md §4.2)', async () => {
+    it('yield* wait(Promise.all([call(a), a foreign promise rejected by the signal])): the call runs through its then as a child of the body; the rejection after the halt returns the body, no catch runs, and the node completes after its call child (DESIGN.md §4.14)', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const t = trace();
       const app = createRootContext();
       let B!: NodeImpl;
       let A!: NodeImpl;
-      const p = app.call(async () => {
+      const p = start(app.call(function* () {
         B = here();
         const sig = here().signal;
         const fetchLike = new Promise((_, reject) => sig.addEventListener('abort', () => reject(new Error('aborted fetch'))));
         try {
-          await Promise.all([
-            here().call(async () => {
+          yield* wait(Promise.all([
+            here().call(function* () {
               A = here();
-              await here().never();
+              yield* here().never();
             }),
             fetchLike,
-          ]);
+          ]));
         } catch (e) {
           t.push(`caught ${(e as Error).message}`);
         }
         return 'done';
-      });
+      }));
       await tick();
       B.abort();
       await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
-      expect(t.log).toEqual(['caught aborted fetch']);
+      expect(t.log).toEqual([]); // returned at the failure of a wait(p) the halt let finish (row 3), never thrown in
       expect(A.state).toBe('complete'); // B waited for its call child before completing (D21)
       expect(warn).not.toHaveBeenCalled();
       await app.close();
@@ -739,21 +659,21 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
       c.own(() => hold.promise);
       c.abort('done');
       expect(c.state).toBe('releasing');
-      const early = await app.call(async () => {
-        const reason = await c.interrupted();
+      const early = await app.call(function* () {
+        const reason = yield* c.interrupted();
         return reason;
       });
       expect(early).toBe('done');
       hold.resolve();
       // Delivered during the await: from a call child, and from a subscribed fork that app.close() waits for.
       const other = app.child({ name: 'other' });
-      const called = app.call(async () => {
-        const reason = await other.interrupted();
+      const called = start(app.call(function* () {
+        const reason = yield* other.interrupted();
         return `woke: ${String(reason)}`;
-      });
+      }));
       let forkHeard: unknown;
-      const forked = spawn(app, async () => {
-        forkHeard = await other.interrupted();
+      const forked = spawn(app, function* () {
+        forkHeard = yield* other.interrupted();
       });
       await tick(); // both bodies are suspended on other.interrupted(); neither is delivered
       other.abort('stop');
@@ -770,8 +690,8 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
       const t = trace();
       const reaper = svc.own(
         svc.fork(
-          task(async () => {
-            const reason = await svc.interrupted();
+          task(function* () {
+            const reason = yield* svc.interrupted();
             t.push(`reaper woke: ${String(reason)}`);
           }, linked),
         ),
@@ -793,13 +713,13 @@ describe('sticky rejection (DESIGN.md §4.2, D39)', () => {
     });
   });
 
-  it('an observe body settles its managed awaits after delivery and finishes on its own', async () => {
+  it('an observe body is never halted: its waits settle after delivery and it finishes on its own', async () => {
     const app = createRootContext();
     const f = spawn(
       app,
-      async () => {
-        const reason = await here().interrupted();
-        const v = await here().call(async () => 7); // a freeze child under a delivered observe parent: not delivered at birth
+      function* () {
+        const reason = yield* here().interrupted();
+        const v = yield* here().call(function* () { return 7; }); // a freeze child under a delivered observe parent: not delivered at birth
         return [reason, v];
       },
       { interrupt: 'observe' },
@@ -1116,7 +1036,7 @@ describe('ownership contracts (DESIGN.md §2.6)', () => {
     const t = trace();
     const app = createRootContext();
     const gate = deferred();
-    const f = spawn(app, () => gate.promise);
+    const f = spawn(app, function* () { return yield* wait(gate.promise); });
     await tick();
     f.abort();
     f.own(t.at('late'));
@@ -1151,20 +1071,20 @@ describe('ownership contracts (DESIGN.md §2.6)', () => {
     const gate = deferred();
     let ownerNode!: NodeImpl;
     let ok!: NodeImpl;
-    const p = app.call(async () => {
+    const p = start(app.call(function* () {
       ownerNode = here();
-      ok = impl(here().own(here().fork(async () => 'ok')));
-      await tick();
+      ok = impl(here().own(here().fork(function* () { return 'ok'; })));
+      yield* wait(tick());
       expect(ok.state).toBe('complete');
       expect(ownerNode.explicit.find(ok)).toBeUndefined(); // removed
       here().own(
-        here().fork(async () => {
-          await gate.promise;
+        here().fork(function* () {
+          yield* wait(gate.promise);
           throw new Error('owned failed');
         }),
       );
-      await here().never();
-    });
+      yield* here().never();
+    }));
     await tick();
     gate.resolve();
     await expect(p).rejects.toThrow('owned failed'); // aborted, then the failure surfaced (DESIGN.md §4.12, C5)
@@ -1236,14 +1156,14 @@ describe('the lifecycle table (DESIGN.md §2.7)', () => {
     const app = createRootContext();
     const N = app.child();
     const owned = N.own(
-      spawn(N, async () => {
-        await here().never();
+      spawn(N, function* () {
+        yield* here().never();
       }),
     );
     const C = N.child(); // above `owned` on N's stack: released (closed) first
     const gate = deferred();
-    const natural = spawn(C, async () => {
-      await gate.promise;
+    const natural = spawn(C, function* () {
+      yield* wait(gate.promise);
       return 'done';
     });
     await tick();
@@ -1263,11 +1183,11 @@ describe('the lifecycle table (DESIGN.md §2.7)', () => {
     const app = createRootContext();
     const gate = deferred();
     let sub!: Fiber<unknown>;
-    const f = spawn(app, async () => {
-      sub = here().fork(async () => {
-        await here().never();
+    const f = spawn(app, function* () {
+      sub = here().fork(function* () {
+        yield* here().never();
       });
-      await gate.promise;
+      yield* wait(gate.promise);
       return 1;
     });
     await tick();
@@ -1286,8 +1206,8 @@ describe('the lifecycle table (DESIGN.md §2.7)', () => {
   it("close(), then abort(), on an observe node whose bodiless exit was 'await': the abort wins and interrupts its freeze subscribers (DESIGN.md §2.7)", async () => {
     const app = createRootContext();
     const A = app.child({ name: 'A', interrupt: 'observe' });
-    const f = spawn(A, async () => {
-      await here().never();
+    const f = spawn(A, function* () {
+      yield* here().never();
     });
     await tick(); // f is suspended on never()
     const closing = A.close();
@@ -1306,13 +1226,13 @@ describe('the lifecycle table (DESIGN.md §2.7)', () => {
   it('close() of an already-delivered bodiless node is an interrupt, not a wait: the abort came first and wins (DESIGN.md §2.7)', async () => {
     const app = createRootContext();
     const gate = deferred();
-    const P = spawn(app, () => gate.promise); // a bare await: delivery does not reject it
+    const P = spawn(app, function* () { return yield* wait(gate.promise); }); // a bare await: delivery does not reject it
     await tick();
     P.abort('stop');
     const C = P.child({ name: 'C' }); // born delivered (D12)
     const O = C.child({ name: 'O', interrupt: 'observe' }); // observe: never delivered at birth
-    const G = spawn(O, async () => {
-      await here().never();
+    const G = spawn(O, function* () {
+      yield* here().never();
     }); // freeze under an undelivered observe node
     await tick();
     expect([impl(C).delivered, impl(O).delivered, impl(G).delivered]).toEqual([true, false, false]);
@@ -1367,7 +1287,7 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
   it('a complete node refuses every operation but the lifecycle quartet (DESIGN.md §2.7)', async () => {
     const K = createInjectionKey<number>('K');
     const app = createRootContext({ providers: [valueProvider(K, 1)] });
-    const f = spawn(app, async () => 1);
+    const f = spawn(app, function* () { return 1; });
     await app.join(f);
     const n = app.child();
     await n.close();
@@ -1376,8 +1296,8 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
       ['own', () => n.own(() => {})],
       ['release', () => n.release({})],
       ['releaseAll', () => n.releaseAll()],
-      ['fork', () => n.fork(task(async () => 1, linked))],
-      ['call', () => n.call(async () => 1)],
+      ['fork', () => n.fork(task(function* () { return 1; }, linked))],
+      ['call', () => n.call(function* () { return 1; })],
       ['child', () => n.child()],
       ['pool', () => n.pool({ name: 'p', onFailure: () => {} })],
       ['addProvider', () => n.addProvider(valueProvider(K, 2))],
@@ -1387,7 +1307,7 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
       ['result', () => n.result(f)],
       ['interrupted', () => n.interrupted()],
       ['never', () => n.never()],
-      ['managed', () => n.managed(Promise.resolve(1))],
+      ['managed', () => n.wait(Promise.resolve(1), { abandon: true })],
     ];
     for (const [op, call] of ops) expect(call, op).toThrow(NodeCompletedError);
     expect(() => n.abort()).not.toThrow();
@@ -1402,18 +1322,18 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
     const app = createRootContext({ providers: [valueProvider(K, 1)] });
     const gate = deferred();
     const results: unknown[] = [];
-    const f = spawn(app, async () => {
-      await gate.promise; // bare: delivery arrives while the body runs
+    const f = spawn(app, function* () {
+      yield* wait(gate.promise); // bare: delivery arrives while the body runs
       const self = here();
       results.push(self.get(K));
       const x = self.own({}, () => void results.push('x released'));
-      void self.release(x); // runs now; not awaited (the test reads what plain code does after delivery, I8)
-      let inside!: NodeImpl;
+      void self.release(x); // eager: runs now; not waited for (the test reads what plain code does after delivery, I8)
+      let inside: NodeImpl | undefined;
       void self.call(() => {
         inside = here();
         return 3;
-      }); // not awaited, for the same reason; the call child completed synchronously
-      results.push(inside.delivered, inside.outcome?.status);
+      }); // a work op nobody consumes: it runs nothing (D41, decision 2)
+      results.push(inside === undefined);
     });
     await tick();
     f.abort();
@@ -1426,13 +1346,13 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
     const observeChild = impl(f.child({ interrupt: 'observe' }));
     expect(freezeChild.delivered).toBe(true);
     expect(observeChild.delivered).toBe(false);
-    const fiber = impl(f.fork(async () => 1));
+    const fiber = impl(f.fork(function* () { return 1; }));
     expect(fiber.delivered).toBe(true);
     let outside!: NodeImpl;
-    const called = f.call(() => {
+    const called = start(f.call(() => {
       outside = here();
       return 2;
-    });
+    }));
     expect(outside.parent).toBe(n);
     expect(outside.delivered).toBe(true); // born delivered: its outcome is aborted, so join semantics reject
     await expect(called).rejects.toBeInstanceOf(FiberAbortedError);
@@ -1440,7 +1360,7 @@ describe('use after release (DESIGN.md §2.7, I7, I8)', () => {
     expect(p.state).toBe('running');
     gate.resolve();
     await app.close();
-    expect(results).toEqual([1, 'x released', true, 'aborted']);
+    expect(results).toEqual([1, 'x released', true]);
   });
 });
 
@@ -1449,13 +1369,13 @@ describe('bodies and messages (DESIGN.md §4.5, §4.12)', () => {
   it('a body that returns a context or a pool returns it as its value, sync or async; one that returns a fiber fails (DESIGN.md §4.5)', async () => {
     const app = createRootContext();
     let c!: Context;
-    await expect(app.call(() => (c = app.child()))).resolves.toBe(c);
-    await expect(app.call(async () => (c = app.child()))).resolves.toBe(c);
+    expect(await app.call(() => (c = app.child()))).toBe(c); // the op runs when awaited: c is set by then
+    expect(await app.call(function* () { return (c = app.child()); })).toBe(c);
     let p: unknown;
-    await expect(app.call(() => (p = app.pool({ name: 'p', onFailure: () => {} })))).resolves.toBe(p);
+    expect(await app.call(() => (p = app.pool({ name: 'p', onFailure: () => {} })))).toBe(p);
     const f = spawn(app, () => here().never());
     await expect(app.call(() => f as unknown as number)).rejects.toThrow(/returned a fiber/);
-    await expect(app.call(async () => f as unknown as number)).rejects.toBeInstanceOf(FiberNotAwaitableError);
+    await expect(app.call(function* () { return f as unknown as number; })).rejects.toBeInstanceOf(FiberNotAwaitableError);
     f.abort();
     await app.close();
   });
@@ -1486,6 +1406,20 @@ describe('run and runSync (DESIGN.md §4.11)', () => {
   it('run(fn) returning a promise throws AsyncRunError (DESIGN.md §4.4, §4.11)', async () => {
     const app = createRootContext();
     expect(() => app.run(async () => 1)).toThrow(AsyncRunError);
+    await app.close();
+  });
+
+  it('run(fn) returning an op returns it as a value: made in the run, it ran nothing, and runs when consumed (D41, decision 28)', async () => {
+    const app = createRootContext();
+    let ran = 0;
+    const op = app.run(() =>
+      here().call(function* () {
+        ran++;
+        return 'ran';
+      }),
+    );
+    const before = ran;
+    expect({ before, value: await op, after: ran }).toEqual({ before: 0, value: 'ran', after: 1 });
     await app.close();
   });
 
@@ -1535,22 +1469,22 @@ describe('unstarted fibers (DESIGN.md §4.6)', () => {
     await app.close();
   });
 
-  it('a fiber forked under an already-delivered freeze parent runs until its first managed await', async () => {
+  it('a fiber forked under an already-delivered freeze parent is stepped to its first yield* of an op not yet started and halted there (D41 decision 9)', async () => {
     const t = trace();
     const app = createRootContext();
     const gate = deferred();
     let child!: NodeImpl;
-    const P = spawn(app, async () => {
-      await gate.promise;
+    const P = spawn(app, function* () {
+      yield* wait(gate.promise);
       child = impl(
-        here().fork(async () => {
+        here().fork(function* () {
           t.push('child ran');
           here().own(t.at('child released'));
-          await here().never();
+          yield* here().never();
           t.push('child resumed');
         }),
       );
-      await here().join(child as unknown as Fiber<unknown>);
+      yield* here().join(child as unknown as Fiber<unknown>);
     });
     await tick();
     P.abort();
@@ -1564,11 +1498,11 @@ describe('unstarted fibers (DESIGN.md §4.6)', () => {
 
 // ---------------------------------------------------------------------------
 describe('stall diagnostics (DESIGN.md §4.4)', () => {
-  it('node:stalled after stallWarningMs for a delivered freeze body that never reaches a managed await', async () => {
+  it('node:stalled after stallWarningMs for a delivered freeze body whose wait(p) the halt lets finish and p never settles', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const ev = events({ stallWarningMs: 100 });
     const gate = deferred();
-    const f = spawn(ev.root, () => gate.promise);
+    const f = spawn(ev.root, function* () { return yield* wait(gate.promise); });
     await micro();
     await micro();
     f.abort();
@@ -1605,7 +1539,7 @@ describe('stall diagnostics (DESIGN.md §4.4)', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const ev = events({ stallWarningMs: 0 });
     const gate = deferred();
-    const f = spawn(ev.root, () => gate.promise);
+    const f = spawn(ev.root, function* () { return yield* wait(gate.promise); });
     await micro();
     f.abort();
     vi.advanceTimersByTime(1e6);
@@ -1622,12 +1556,12 @@ describe('body exit (DESIGN.md §2.4)', () => {
     const app = createRootContext();
     let sub!: Fiber<unknown>;
     let P!: NodeImpl;
-    await app.call(async () => {
+    await app.call(function* () {
       P = here();
-      sub = here().fork(async () => {
-        await here().never();
+      sub = here().fork(function* () {
+        yield* here().never();
       });
-      await tick();
+      yield* wait(tick());
     });
     expect(sub.signal.reason).toBeInstanceOf(OwnerInterrupt);
     expect((sub.signal.reason as OwnerInterrupt).owner).toBe(P);
@@ -1640,17 +1574,17 @@ describe('body exit (DESIGN.md §2.4)', () => {
     const app = createRootContext();
     const gate = deferred();
     let sub!: Fiber<unknown>;
-    const p = app.call(
+    const p = start(app.call(
       task(
-        async () => {
-          sub = here().fork(async () => {
-            await gate.promise;
+        function* () {
+          sub = here().fork(function* () {
+            yield* wait(gate.promise);
             return 'natural';
           });
         },
         { childrenOnExit: 'await' },
       ),
-    );
+    ));
     await tick();
     expect(sub.signal.aborted).toBe(false);
     gate.resolve();
@@ -1684,8 +1618,8 @@ describe('NodeTopic receivers are sinks (DESIGN.md §4.7, §5)', () => {
         }),
       ],
     });
-    await app.call(async () => 1);
-    await app2.call(async () => 2);
+    await app.call(function* () { return 1; });
+    await app2.call(function* () { return 2; });
     await app.close();
     await app2.close();
     await tick(); // the setup hook fails this test on an unhandled rejection (I10)
@@ -1714,20 +1648,20 @@ describe('parent (DESIGN.md §2.1, D33)', () => {
     expect(c.child().parent).toBe(c);
     const p = app.pool({ name: 'p', onFailure: () => {} });
     expect(p.parent).toBe(app);
-    const pf = p.fork(async () => {});
+    const pf = p.fork(function* () {});
     expect(pf.parent).toBe(p);
     const seen: { fork?: unknown; forkBody?: unknown; call?: unknown; me?: Context } = {};
-    await app.call(async () => {
+    await app.call(function* () {
       const me = here() as Context;
       seen.me = me;
-      const f = here().fork(async () => {
+      const f = here().fork(function* () {
         seen.forkBody = here().parent; // a body reads its own node's parent the same way
       });
       seen.fork = f.parent;
-      await here().call(async () => {
+      yield* here().call(function* () {
         seen.call = here().parent;
       });
-      await here().join(f);
+      yield* here().join(f);
     });
     expect(seen.fork).toBe(seen.me);
     expect(seen.forkBody).toBe(seen.me);
@@ -1776,9 +1710,9 @@ describe('parent (DESIGN.md §2.1, D33)', () => {
     const app = createRootContext();
     const c = app.child();
     let f!: Fiber<unknown>;
-    await app.call(async () => {
-      f = here().fork(async () => 1);
-      await here().join(f);
+    await app.call(function* () {
+      f = here().fork(function* () { return 1; });
+      yield* here().join(f);
     });
     c.abort();
     expect(c.state).toBe('complete');

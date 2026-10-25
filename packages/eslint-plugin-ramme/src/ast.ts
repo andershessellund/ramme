@@ -80,12 +80,6 @@ export function enclosingFunction(node: EsNode): EsNode | null {
   return null;
 }
 
-/** Whether `node` is lexically inside an `async` function, method or arrow, with no non-async function in between. */
-export function isInAsyncFunction(node: EsNode): boolean {
-  const fn = enclosingFunction(node);
-  return fn !== null && isFunction(fn) && fn.async === true;
-}
-
 /**
  * The variable `name` resolves to from `node`'s scope, or `undefined` when it resolves to nothing
  * declared in this file (a global, or an undeclared name).

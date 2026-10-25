@@ -4,7 +4,7 @@ import { noTimers } from './no-timers.js';
 ruleTester.run('no-timers', noTimers, {
   assertionOptions,
   valid: [
-    { name: "ramme's sleep", code: 'const t = task(async () => { await sleep(20); });' },
+    { name: "ramme's sleep", code: 'const t = task(function* () { yield* sleep(20); });' },
     { name: 'ctx.sleep where no node is current', code: 'await app.sleep(10);' },
     { name: 'queueMicrotask is allowed', code: 'queueMicrotask(() => tick());' },
     { name: 'clearing a timer is allowed', code: 'clearTimeout(t); clearInterval(i); clearImmediate(m);' },
@@ -33,8 +33,8 @@ ruleTester.run('no-timers', noTimers, {
     },
     {
       name: 'a timer promise in a body',
-      code: 'const t = task(async () => {\n  await new Promise((r) => setTimeout(r, 20));\n});',
-      errors: [{ messageId: 'call', data: { name: 'setTimeout' }, line: 2, column: 28 }],
+      code: 'const t = task(function* () {\n  yield* wait(new Promise((r) => setTimeout(r, 20)));\n});',
+      errors: [{ messageId: 'call', data: { name: 'setTimeout' }, line: 2, column: 34 }],
     },
     {
       name: 'through globalThis, window and global',

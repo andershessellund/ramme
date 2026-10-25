@@ -9,13 +9,12 @@ you can resolve dies before you do.
 *Ramme* is Danish for frame: scoped resolution is literally "inden for
 rammerne af", within the frame of.
 
-Zero dependencies. Requires async context propagation (below).
+Zero dependencies. Node 22+ or an evergreen browser ([below](#the-platform)).
 
 ## Sixty seconds
 
 ```ts
-import 'ramme/node'; // once, at startup: carries the current node across await
-import { createRootContext, task, all, lookup, own, inject, signal } from 'ramme';
+import { createRootContext, task, all, lookup, own, inject, wait } from 'ramme';
 
 class Config {
   readonly apiUrl = 'https://api.example.com';
@@ -25,17 +24,17 @@ class Api {
   readonly #base = inject(Config).apiUrl;          // a dependency, declared where the service is built
   readonly #pool = own(openPool(this.#base));      // released with the service, never before its users
 
-  async get(path: string): Promise<unknown> {
-    const res = await fetch(this.#base + path, { signal: signal() });   // the running task's signal
-    return res.json();
+  *get(path: string) {                              // an operation: yield* api.get(…)
+    const res = yield* wait((signal) => fetch(this.#base + path, { signal }));   // the running task's signal
+    return yield* wait(res.json());
   }
 }
 
-const fetchUser = task(async (id: string) => lookup(Api).get(`/users/${id}`));
-const fetchOrders = task(async (id: string) => lookup(Api).get(`/users/${id}/orders`));
+const fetchUser = task(function* (id: string) { return yield* lookup(Api).get(`/users/${id}`); });
+const fetchOrders = task(function* (id: string) { return yield* lookup(Api).get(`/users/${id}/orders`); });
 
-const profile = task(async (id: string) => {
-  const [user, orders] = await all([fetchUser.bind(id), fetchOrders.bind(id)]);
+const profile = task(function* (id: string) {
+  const [user, orders] = yield* all([fetchUser.bind(id), fetchOrders.bind(id)]);
   return { user, orders };
 });
 
@@ -45,9 +44,15 @@ console.log(await app.call(profile, '42'));
 
 What the example shows:
 
+- **A body is a generator function; every wait is a `yield*`.** `call`,
+  `all`, `sleep` and the rest return an *op*, which `yield*` runs and
+  waits for; a foreign promise is `yield* wait(p)`. An op runs when it is
+  yielded, so `call(t);` without the `yield*` does nothing (a lint catches
+  it). Outside a body, `await app.call(profile, '42')` runs one on a node you
+  name.
 - **A task is a definition; each run is a node.** `task(body)` is not
-  callable. `call` runs it in a new child node and awaits it; `fork` runs it
-  concurrently; `all` runs several and returns the tuple, and `race` runs
+  callable. `call` runs it in a new child node and waits for it; `fork` runs
+  it concurrently; `all` runs several and returns the tuple, and `race` runs
   several and returns the first success. `fetchUser.bind(id)` is the same
   task with its arguments fixed, the form `all` and `race` take. Whatever a
   run attached is released when it finishes, however it finishes.
@@ -61,7 +66,8 @@ What the example shows:
   or `Disposable`) to the current node, which releases it. In a constructor
   that node is the service's own, so the pool lives exactly as long as `Api`.
 - **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
-  the *current node*, which the platform carries across `await`.
+  the *current node*, which ramme sets while a body runs, on every platform:
+  no setup, no async context.
 - **Shutdown lives on the root.** `await using app` releases the whole tree:
   running work first, then the services it used. `app.abort()` interrupts
   the tree without waiting, and `await app.close()` lets running work
@@ -70,14 +76,14 @@ What the example shows:
 ## A request
 
 ```ts
-import { createInjectionKey, valueProvider, task, call, lookup, own } from 'ramme';
+import { createInjectionKey, valueProvider, task, call, lookup, own, wait } from 'ramme';
 
 const Conn = createInjectionKey<Connection>('Conn');
 
-const handle = task(async (req: Request, res: Response) => {
+const handle = task(function* (req: Request, res: Response) {
   const db = lookup(Connections);                   // your connection pool: a service, shared, outlives every request
-  const lease = own(await db.acquire());            // returned to the pool when the handler ends
-  return call(task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] }));
+  const lease = own(yield* wait(db.acquire()));     // returned to the pool when the handler ends
+  return yield* call(task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] }));
 });
 
 server.on('request', (req, res) =>
@@ -86,22 +92,18 @@ server.on('request', (req, res) =>
 
 - `Connections` is the application's own class, a service like `Api`
   above; its `acquire()` returns a lease that can be released.
-- `work(req)` is a plain function. It runs in the call's node and reads the
-  connection with `lookup(Conn)`.
+- `work(req)` is a generator helper (`function* work(req) { … }`). It runs in
+  the call's node and reads the connection with `lookup(Conn)`.
 - The server's callback runs outside any node, so it names one:
   `app.fork(...)` attaches the handler to the root. This is the only place a
   node is passed explicitly. `handle.with({...})` is the same task with
   options for this use: a `name`, a `signal` that interrupts it, and
   `onFailure`, where its failure goes.
-- When the client hangs up, `req.signal` interrupts the handler: its next
-  *managed await* rejects with `InterruptedError`, and so does every one
-  after it, so the handler unwinds; then the lease goes back to the pool. A
-  managed await is an `await` on a promise ramme returned (`call`, `join`,
-  `all`, `race`, `release`, `sleep`, …); `await fetch(...)` is not one,
-  which is why you pass `signal()` on, and a timer is one only as
-  `await sleep(ms)` ([DESIGN.md
-  §4.2](DESIGN.md#42-sticky-rejection-and-managed-awaits-d13-d39)). An
-  interruption is not a failure, so `onFailure` is not called.
+- When the client hangs up, `req.signal` interrupts the handler: ramme
+  *halts* it, returning it at the `yield*` where it waits, once the call it
+  waits on has stopped too; no `catch` sees that, every `finally` runs, and
+  then the lease goes back to the pool. An interruption is not a failure, so
+  `onFailure` is not called.
 - If `work` throws, `onFailure` gets the error once.
 
 ## Services that hold state
@@ -137,7 +139,7 @@ per-request service whose release reads the request's outcome through
 `parent`, the node that stores it:
 
 ```ts
-import { RequestScope, current, inject, lookup, own, signal, task } from 'ramme';
+import { RequestScope, current, inject, lookup, own, signal, task, wait } from 'ramme';
 
 class UnitOfWork {
   static readonly scope = RequestScope;
@@ -150,14 +152,14 @@ class UnitOfWork {
       return o.status === 'success' ? this.commit() : this.rollback();
     });
   }
-  done(): Promise<void> { return this.#node.release(this); }   // commit now, while the request runs
+  done() { return this.#node.release(this); }     // commit now, while the request runs: yield* uow.done()
   query(sql: string) { return this.#lease.conn.query(sql, signal()); }
   async commit(): Promise<void> { … }
   async rollback(): Promise<void> { … }
 }
 
-const handle = task(async (req: Request) => {
-  await lookup(UnitOfWork).query('…');            // every lookup in this request shares one
+const handle = task(function* (req: Request) {
+  yield* wait(lookup(UnitOfWork).query('…'));     // every lookup in this request shares one
 }, { scopes: [RequestScope] });                   // the request's own fiber carries the scope
 ```
 
@@ -222,10 +224,10 @@ await using test = createRootContext({
 ## Fork now, join later
 
 ```ts
-const report = task(async (id: string) => {
-  const audit = fork(writeAudit, id);      // concurrent, in its own node
-  const data = await call(buildReport, id);
-  await join(audit);                        // its value, or its failure thrown here
+const report = task(function* (id: string) {
+  const audit = fork(writeAudit, id);       // concurrent, in its own node
+  const data = yield* call(buildReport, id);
+  yield* join(audit);                       // its value, or its failure thrown here
   return data;
 });
 ```
@@ -239,121 +241,33 @@ rejection.
 Something that repeats is a fork that loops on `sleep`:
 
 ```ts
-const session = task(async (user: User) => {
-  fork(async () => {
+const session = task(function* (user: User) {
+  fork(function* () {
     for (;;) {
-      await sleep(30_000);                  // an interrupted loop stops here: its timer is cleared, the sleep rejects
-      await call(sendHeartbeat, user);
+      yield* sleep(30_000);                 // an interrupted loop is halted here, its timer cleared
+      yield* call(sendHeartbeat, user);
     }
   });
-  await call(serve, user);                  // when serve returns, the heartbeat is interrupted
+  yield* call(serve, user);                 // when serve returns, the heartbeat is interrupted
 });
 ```
 
-In a body, `await sleep(ms)` is the timer to use: a bare `setTimeout` is
-not a managed await, so an interrupted body waiting on one keeps its node,
-and everything attached to it, until the timer fires. Outside any node,
-`app.sleep(ms)` is a plain delay.
+In a body, `yield* sleep(ms)` is the timer to use: a bare `setTimeout` is
+one no interruption clears, so a body waiting on one keeps its node, and
+everything attached to it, until the timer fires. Outside any node,
+`await app.sleep(ms)` is a plain delay.
 
-## The rules
+## Waiting, and what an interruption does
 
-- **Own it before the work.** Anything that must be undone is attached with
-  `own(...)` and released by its node, however the body ends. An interrupted
-  body is unwound, so its `finally` does run, but ramme cannot see what a
-  `finally` (or a `using` / `await using` inside an async body) cleans up,
-  and inside one every managed await other than release work rejects again.
-  Keep invariants in `own`. `await using` for the root at the top level is
-  fine.
-- **A `catch` can see your own interruption: rethrow it.** After an
-  interruption, every managed await of the body rejects with
-  `InterruptedError`. Swallowing it gets you nowhere: the next managed await
-  rejects again, and the task's outcome is `aborted` whatever it returns.
-  Write `if (e instanceof InterruptedError) throw e`, or branch on outcomes
-  with `attempt` and `settle` and keep `catch` for translating errors.
-  Awaiting other work that was interrupted throws `FiberAbortedError`
-  (below), which is a real error of yours to handle. One exception: a promise
-  another task's code made and shares with yours (a memoized loader's cached
-  promise, a batched load) carries *that* task's `InterruptedError` when it
-  is interrupted. `signal().aborted` tells your own, so where tasks share
-  such promises write `if (e instanceof InterruptedError && signal().aborted)
-  throw e`, and handle the other as a failed load.
-- **Cleanup that must await goes in `shield`.** After an interruption only
-  release work still completes: `release(x)`, `releaseAll()`, `close()` or
-  `[Symbol.asyncDispose]()` of a node below your task, and
-  `shield(async () => …)`, which runs its body to the end (its `signal()` is
-  the release deadline) and hands you its result. Inside a `shield(…)` your
-  task's own body opens, `await unshield(step)` runs the one step your
-  task's interruption should still stop, skips it if that interruption
-  already came, and hands you its outcome (`aborted` then) instead of ending
-  the shield; elsewhere it follows the node the shield runs on (`ctx` for
-  `ctx.shield`, and for a shield nested in another the outer one, which
-  only the release deadline stops).
-- **Await every `call`.** A forgotten await is detected: the next
-  body-shaped operation in that body (`lookup`, `fork`, `call`, `join`, …)
-  throws `UnawaitedCallError`. `own`, `release`, `abort` and `close` stay
-  allowed, so they do not reveal it. Use `all([...])` for concurrent calls.
-- **Await derived promises at once.** An async helper, a `Promise`
-  combinator, a `.then` chain or a `gen(…)` over a managed await rejects
-  when the task is interrupted. Stored and awaited later, it is an unhandled
-  rejection in the meantime. Await it where you make it, or combine with
-  `all()`.
-- **Release early whenever you like.** `await release(x)` runs `x`'s release
-  now, exactly once.
-- **Pass `signal()` on to `fetch` and drivers; use `sleep` for timers**, so
-  work stops promptly when interrupted.
-- **`inject` in constructors, `lookup` in bodies.** `lookup` throws during
-  creation and `inject` throws outside it. Don't store a `lookup` result on
-  anything that outlives the current task.
-
-**Foreign code.** A library's code runs inside your task, in its async
-context, so ramme cannot tell it from yours. A driver's transaction callback
-(Prisma's `$transaction`, Knex's or Drizzle's `transaction`; with
-node-postgres, which has no callback API, your own `withTx(client, fn)`
-helper) around a `call` that is interrupted sees the rejection, so its
-`finally` commits or rolls back as it would on any error, after the call
-has completed. The same holds around a `join` of a task you forked, and a
-connection your task got from a `child()` scope is still open then: the
-scope is released after your task has unwound. Around a `join` of an owned
-fork (`own(fork(t))`), or a `managed(p)`, the `finally` runs at once while
-that work goes on, so hand a driver call inside a transaction or a mutex
-`signal()`.
-
-Three more things to know about libraries:
-
-- A retry wrapper that retries on any error retries the interruption too.
-  Every attempt's managed awaits are rejected again, but the retried task's
-  plain work, such as a driver write not handed `signal()`, still runs to its
-  end each time: a non-idempotent write is repeated once per attempt. Give
-  such helpers, and the writes inside them, `signal()`, and watch for
-  `node:stalled`.
-- A helper that swallows errors inside a transaction callback (a
-  `safe(() => …)` returning a fallback) lets the rest of the callback run, and
-  the driver then commits half a transaction. End every transaction callback
-  with `signal().throwIfAborted()`, or any managed await, so an interrupted
-  callback always rejects into the rollback.
-- Cleanup that awaits a driver with no timeout of its own (a `ROLLBACK` on a
-  dead connection) holds your task, and `await using app` shutdown with it,
-  for as long as it hangs: `releaseTimeoutMs` does not reach a task's own
-  code. Give such cleanup a driver-level timeout.
-
-```ts
-const save = task(async (order: Order) => {
-  await withTx(db, async (tx) => {               // its finally runs on interruption, after the call completed
-    await call(insertOrder, tx, order);
-    signal().throwIfAborted();                   // if anything above swallowed an interruption, still no COMMIT
-  });
-});
-```
-
-## Generator bodies
-
-A body may also be a generator function, where every wait is a `yield*`.
-This is where ramme is heading (DECISIONS.md, D41): async bodies still work
-in this release, and both kinds need the platform setup below
-(`import 'ramme/node'`). In a generator body an interruption never arrives as
-an error. ramme *halts* the body by returning it at the `yield*` where it
-waits: no `catch` runs, every `finally` does, and a `finally` in the body
-itself may wait, as release work that runs to its end:
+An interruption *halts* a body: ramme returns its generator at the `yield*`
+where it waits. No `catch` sees it, every `finally` runs, and nothing after
+that `yield*` does; the task's outcome is `aborted`, whatever it then does.
+When the body is returned depends on what it waits on: at once for a
+`sleep`, a `never()`, an owned fork's `join`; once the awaited work has
+stopped for a `call`, an `all`, a `join` of a fork it made; and after it
+finishes for a release or a foreign promise. A `finally` in the body itself
+may wait, and what it waits on runs to its end, so cleanup can wait for a
+rollback:
 
 ```ts
 import { call, own, task, wait } from 'ramme';
@@ -375,12 +289,10 @@ const transfer = task(function* (from: Id, to: Id, amount: number) {
 });
 ```
 
-Every ramme operation (`call`, `all`, `sleep`, `join`, …) is `yield*`ed in
-a generator body and `await`ed in async code. A foreign promise is
-`yield* wait(p)`: the halt lets `p` finish, so what it produced can still be
-owned, and `wait(p, { abandon: true })` stops waiting at once instead.
-`wait((signal) => fetch(url, { signal }))` hands the work the task's
-signal. A library that calls you back with an async function gets
+A foreign promise is `yield* wait(p)`: the halt lets `p` finish, so what it
+produced can still be owned, and `wait(p, { abandon: true })` stops waiting
+at once instead. `wait((signal) => fetch(url, { signal }))` hands the work
+the task's signal. A library that calls you back with an async function gets
 `promised(function* …)`, which runs your generator as a child of the current
 task and hands the library a real promise:
 
@@ -400,35 +312,71 @@ its promise rejects, the database driver rolls back, and only then is `save`
 itself halted and its resources released. No `catch` in the callback can
 swallow the interruption, so nothing can let the database driver commit.
 
+## The rules
+
+- **Own it before the work.** Anything that must be undone is attached with
+  `own(...)` and released by its node, however the body ends. ramme cannot
+  see what a `finally` cleans up, and an interruption that halts a
+  `finally` reached by normal completion cuts it short, so keep invariants
+  in `own`. `await using` for the root at the top level is fine.
+- **Every wait is a `yield*`.** Run ramme's ops with `yield*`
+  (`yield* call(t)`, `yield* sleep(ms)`): an op you make and do not yield
+  runs nothing. Wait for a foreign promise with `yield* wait(p)`, which an
+  interruption lets finish, or `wait(p, { abandon: true })`, which it stops
+  waiting for. Run concurrent work with `all([...])`.
+- **A `finally` in the body may wait; a helper's may not.** What the body's
+  own `finally` yields after an interruption runs to its end. A `yield*` in
+  the `finally` of a generator helper the body called loses the
+  interruption, and the body runs on (development mode reports it): put
+  waiting cleanup in `own(value, function* (v) { … })`, or run the helper as
+  `yield* call(helper)`.
+- **A library's async callback is `promised(function* …)`.** Plain async
+  code has no current node after its first `await`: `lookup`, `own` and the
+  other free functions throw there. Reach ramme from plain async code
+  through a node you name (`await app.call(main)`), `promised`, or
+  `node.run(fn)` for a synchronous callback.
+- **Pass `signal()` on to `fetch` and drivers; use `sleep` for timers**, so
+  work stops promptly when interrupted: `wait((signal) => fetch(url, { signal }))`.
+- **Release early whenever you like.** `yield* release(x)` runs `x`'s release
+  now, exactly once.
+- **`inject` in constructors, `lookup` in bodies.** `lookup` throws during
+  creation and `inject` throws outside it. Don't store a `lookup` result on
+  anything that outlives the current task.
+
+**Foreign code.** A driver's transaction callback is a `promised` body, as
+above: interrupted, it is halted once its work has stopped, and the driver's
+own `finally` rolls back before your task releases what the driver
+borrowed. Two more things to know about libraries:
+
+- A retry wrapper that retries on any error retries a halted callback: each
+  retry starts already interrupted and is halted at its first `yield*`,
+  repeating only the code before it. Keep writes behind a `yield*`.
+- Cleanup that waits for a driver with no timeout of its own (a `ROLLBACK`
+  on a dead connection) holds your task, and `await using app` shutdown with
+  it, for as long as it hangs: `releaseTimeoutMs` only signals. Give such
+  cleanup a driver-level timeout, or hand it the deadline:
+  `yield* wait((signal) => conn.query('ROLLBACK', { signal }))`.
+
 ## The platform
 
-ramme needs the platform's async context to carry the current node across
-`await`. Import an adapter once at startup:
-
-| Import | Runtime |
-| --- | --- |
-| `ramme/node` | `AsyncLocalStorage`: Node ≥ 22, Bun, Deno, Cloudflare Workers (`nodejs_compat`) |
-| `ramme/async-context` | TC39 `AsyncContext`, where it ships |
-
-Without one, every operation that needs the current node (the free
-functions, bodies, factories, releases) throws `NoCurrentNodeError`, and the
-message names the import. Code that only names nodes (`createRootContext()`,
-`root.child()` to make a child node, `node.own(x)` to attach `x` to a named
-node) does not need it and runs, so a missing import
-can first show up when a body, a factory or a release runs, as late as
-shutdown. Import the adapter before anything else.
+Node 22+ or an evergreen browser, with nothing to import or register: the
+current node is a slot ramme sets while a body runs, on every platform.
+ramme needs ES2022 syntax and four runtime APIs, `Promise.withResolvers`,
+`AbortSignal.any`, `AbortSignal.timeout` and the disposal symbols
+(`Symbol.dispose`, `Symbol.asyncDispose`); it defines the two symbols itself
+where they are missing and polyfills nothing else, so on an older runtime
+polyfill the other three.
 
 ## Errors you will meet
 
 | Error | Means |
 | --- | --- |
-| `NoCurrentNodeError` | A free function ran outside any task, or no adapter is imported. |
-| `UnawaitedCallError` | A `call` was not awaited before the body used its node again. |
+| `NoCurrentNodeError` | A free function ran outside any task: at top level, or in plain async code after its first `await`. |
 | `CreationViolationError` | `lookup` (or `call`) inside a constructor or factory, or `inject` outside one. |
 | `NodeCompletedError` | A node, or a service, was used after it was released. |
 | `FiberNotAwaitableError` | `await fiber`: use `join(fiber)` or `result(fiber)`. |
-| `FiberAbortedError` | `join` / `call` / `all` / `race` of work that was interrupted, by code that is not itself interrupted (top level, a platform callback, or a body whose own node was not aborted). |
-| `InterruptedError` | Your own task was interrupted: every managed await it makes now rejects with this. Rethrow it. Through a promise another task made and shared with yours (a cached load), it is that task's interruption: then your `signal().aborted` is not set, unless your task was interrupted too. |
+| `FiberAbortedError` | `join` / `call` / `all` / `race` of work that was interrupted, by code that is not itself interrupted (top level, a platform callback, or a body whose own node was not aborted). Your own interruption is no error: it halts your task. |
+| `TypeError` naming `function*` | An `async` function was passed as a body: write it as `function*`. |
 
 To branch on how work ended instead of catching, `attempt` is `call` that
 resolves with the outcome, and `settle` is `all` that resolves with every
@@ -436,26 +384,26 @@ task's outcome instead of rejecting (both wait for every task, and neither
 cancels the others when one fails):
 
 ```ts
-const r = await attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
+const r = yield* attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
 if (r.status === 'failure') throw r.error;                             // a real failure stays a failure
 const prices = r.status === 'success' ? r.value : cachedPrices(sku);   // 'aborted': the 500 ms ran out
 
-const [user, orders] = await settle([fetchUser.bind(id), fetchOrders.bind(id)]);
-if (orders.status === 'failure') log(orders.error);                    // all would have rejected; user is still here
+const [user, orders] = yield* settle([fetchUser.bind(id), fetchOrders.bind(id)]);
+if (orders.status === 'failure') log(orders.error);                    // all would have thrown; user is still here
 
-let quote = await attempt(fetchQuote, sku);
+let quote = yield* attempt(fetchQuote, sku);
 for (let i = 0; quote.status === 'failure' && i < 3; i++) {
-  await sleep(100 * 2 ** i);                                           // back off; an interrupted caller is rejected here
-  quote = await attempt(fetchQuote, sku);
+  yield* sleep(100 * 2 ** i);                                          // back off; an interrupted caller is halted here
+  quote = yield* attempt(fetchQuote, sku);
 }
 ```
 
 `aborted` means the task's own abort (its `timeoutMs` or `signal`, or an
 explicit abort), the abort of the context it runs in (`ctx.attempt(…)`), or,
 for a `settle` member, `settle`'s own `timeoutMs` or `signal`: a body that
-is itself interrupted is rejected at `attempt` or `settle` with
-`InterruptedError`, as at `call`, once the task has stopped; its own
-interruption never comes back as an outcome. The
+is itself interrupted is halted at `attempt` or `settle`, as at `call`, once
+the task has stopped; its own interruption never comes back as an outcome.
+The
 exception is a task declared `interrupt: 'restore'` inside a shutdown-aware
 body (`interrupt: 'observe'`, DESIGN.md §4.3), whether that body is the
 caller or encloses it: the body's shutdown reaches the task without stopping
@@ -496,17 +444,16 @@ if (r.status === 'failure') return notFound(r.error);
 TypeScript compares types by structure, so error classes need a
 distinguishing member, like the literal `name` above, to stay separate in
 the inferred union. `unwrap(r)` is the named conversion to a defect: the
-value, or the error thrown. Await or return `gen(…)` at once: it is an
-ordinary async function, so a dropped `gen(…)` whose body throws is an
-unhandled rejection, and so is a stored one when the task is interrupted,
-since the `InterruptedError` propagates out of `gen` (it never becomes a
-`Result`). `@typescript-eslint/no-floating-promises`, which needs
+value, or the error thrown. In a body, wait for it with `yield* wait(gen(…))`;
+elsewhere await or return it at once: it is an ordinary async function, so a
+dropped `gen(…)` whose body throws is an unhandled rejection.
+`@typescript-eslint/no-floating-promises`, which needs
 type-aware linting (`recommendedTypeChecked`, or
 `parserOptions.projectService`), flags a bare `gen(…)` statement, but not
 `void gen(…)` or an awaited `gen` whose `Result` is discarded. The other
-helpers (`map`, `andThen`, `orElse`, `collect`, `fromThrowing`, …) and how
-`gen` behaves when the body is interrupted are in [DESIGN.md
-§4.13](DESIGN.md#413-results-and-gen-d38).
+helpers (`map`, `andThen`, `orElse`, `collect`, `fromThrowing`, …) are in
+[DESIGN.md §4.13](DESIGN.md#413-results-and-gen-d38). A later release
+replaces `gen` with `yield* fail(e)` in the body itself.
 
 ## Lint
 
@@ -525,15 +472,12 @@ import tseslint from 'typescript-eslint';
 export default [...tseslint.configs.recommended, ramme.configs.recommended];
 ```
 
-`ramme.configs.recommended` reports a `catch` in an async function that can
-swallow the task's own `InterruptedError`, `setTimeout` and its siblings, a
-`lookup` result stored on an object or in a module variable, a value
-provided on the node that owns it, and a discarded `attempt` or `settle`;
-and it warns on `finally` and `using` in async functions and on `Promise`
-combinators, which work but which ramme cannot see or structure. Some rules
-are stricter than ramme itself: a top-level `Promise.all` is flagged too.
-The [plugin's README](packages/eslint-plugin-ramme/README.md) says what each
-rule flags, why, and where it is approximate.
+`ramme.configs.recommended` reports an `async` function passed as a body, an
+op made and never yielded (`call(t);`), a discarded `attempt`, `settle` or
+`result` outcome, `setTimeout` and its siblings, a `lookup` result stored on
+an object or in a module variable, and a value provided on the node that owns
+it. The [plugin's README](packages/eslint-plugin-ramme/README.md) says what
+each rule flags, why, and where it is approximate.
 
 ## Documentation
 

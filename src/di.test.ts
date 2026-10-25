@@ -22,7 +22,6 @@
 //
 // `lookup` and `own` are the free functions of ambient.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey, setDependencies, setScope } from './context-key.js';
 import type { Context } from './context.js';
 import { createRootContext } from './create-context.js';
@@ -2239,9 +2238,10 @@ describe('Disposal', () => {
         ctx = inject(ContextKey);
         constructor() {
           const n = here();
+          const ctx = this.ctx; // a function* has its own `this`
           n.own(
-            n.fork(async () => {
-              seen = { state: this.ctx.state, parent: impl(this.ctx).parent };
+            n.fork(function* () {
+              seen = { state: ctx.state, parent: impl(ctx).parent };
             }),
           );
         }

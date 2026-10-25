@@ -1,26 +1,29 @@
-// A discarded `attempt(…)` or `settle(…)`. Both deliver a failure as a value
-// and consume it, so an outcome nobody reads is a failure dropped silently,
-// where `call` or `all` would have thrown it (DESIGN.md §4.5, D31). Flagged:
-// the call as an expression statement, alone or under `await` or `void`.
+// A discarded outcome of `attempt(…)`, `settle(…)` or `result(f)`. Each
+// delivers a failure as a value and consumes it, so an outcome nobody reads is
+// a failure dropped silently, where `call`, `all` or `join` would have thrown
+// it (DESIGN.md §4.5, D31). Flagged: the call run and its outcome discarded,
+// `yield* attempt(t);` or `await attempt(t);` as an expression statement, under
+// `void` too. The op alone (`attempt(t);`) runs nothing, which is
+// `no-unused-op`'s to report.
 
 import type { Rule } from 'eslint';
 import { type EsNode, calleeName, unwrap } from '../ast.js';
 import { docsUrl } from '../docs.js';
 
-const OUTCOME_CALLS = new Set(['attempt', 'settle']);
+const OUTCOME_CALLS = new Set(['attempt', 'settle', 'result']);
 
 export const noUnusedOutcome: Rule.RuleModule = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Disallow discarding the outcome of `attempt` or `settle`, which drops a failure silently',
+      description: 'Disallow discarding the outcome of `attempt`, `settle` or `result`, which drops a failure silently',
       recommended: true,
       url: docsUrl('no-unused-outcome'),
     },
     messages: {
       discarded:
         'The outcome of `{{name}}` is discarded: an outcome nobody inspects is a failure dropped. ' +
-        'Use `call` (or `all`) to have a failure thrown, or read the outcome (ramme DECISIONS.md D31).',
+        'Use `call` (or `all`, `join`) to have a failure thrown, or read the outcome (ramme DECISIONS.md D31).',
     },
     schema: [],
   },
@@ -28,12 +31,15 @@ export const noUnusedOutcome: Rule.RuleModule = {
     return {
       ExpressionStatement(node) {
         let e = unwrap(node.expression as EsNode);
+        let consumed = false;
         for (;;) {
-          if (e.type === 'AwaitExpression') e = unwrap(e.argument as EsNode);
-          else if (e.type === 'UnaryExpression' && e.operator === 'void') e = unwrap(e.argument as EsNode);
+          if (e.type === 'AwaitExpression' || (e.type === 'YieldExpression' && e.delegate && e.argument !== null)) {
+            e = unwrap(e.argument as EsNode);
+            consumed = true;
+          } else if (e.type === 'UnaryExpression' && e.operator === 'void') e = unwrap(e.argument as EsNode);
           else break;
         }
-        if (e.type !== 'CallExpression') return;
+        if (e.type !== 'CallExpression' || !consumed) return;
         const name = calleeName(e);
         if (name !== undefined && OUTCOME_CALLS.has(name)) context.report({ node: e, messageId: 'discarded', data: { name } });
       },

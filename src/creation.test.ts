@@ -13,7 +13,6 @@
 // ambient.ts. The other operations use the method form on `here()`
 // (= current()), which is what the free functions are.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Provider } from './context.js';
 import { currentCreation, peekCurrentNode } from './context-storage.js';
@@ -32,7 +31,7 @@ import {
   PendingNodeError,
 } from './resource.js';
 import { RootScope, SelfScope } from './scope.js';
-import { child, fork, lookup, own, pool } from './ambient.js';
+import { child, fork, lookup, own, pool, wait } from './ambient.js';
 import { deferred, events, gcUntil, here, impl, tick, trace } from './test/util.js';
 
 afterEach(() => {
@@ -55,7 +54,7 @@ describe('the pending node (DESIGN.md §3.3)', () => {
       'current()': () => void here(),
       'inject(ContextKey)': () => void inject(ContextKey),
       // The free functions themselves: none of them goes through current() first.
-      fork: () => void fork(task(async () => {}, { onFailure: () => {} })),
+      fork: () => void fork(task(function* () {}, { onFailure: () => {} })),
       pool: () => void pool({ name: 'p', onFailure: () => {} }),
       child: () => void child(),
     };
@@ -94,7 +93,7 @@ describe('the pending node (DESIGN.md §3.3)', () => {
         const n = here();
         vid = n.id;
         const x = own(() => {});
-        const f = n.own(n.fork(task(async () => {}, { name: 'reaper' })));
+        const f = n.own(n.fork(task(function* () {}, { name: 'reaper' })));
         fid = f.id;
         void n.release(x); // a release fiber under the pending node
         return {};
@@ -121,7 +120,7 @@ describe('the pending node (DESIGN.md §3.3)', () => {
   it('get / call / run / abort / close and the other refused operations throw PendingNodeError on it', async () => {
     const KEY = createInjectionKey<string>('KEY');
     const root = createRootContext();
-    const f = root.fork(task(async () => 1, { onFailure: () => {} })); // a live fiber the pending node may not await (DESIGN.md §3.3)
+    const f = root.fork(task(function* () { return 1; }, { onFailure: () => {} })); // a live fiber the pending node may not await (DESIGN.md §3.3)
     const refused: Record<string, (n: Context) => unknown> = {
       get: (n) => n.get(KEY),
       addProvider: (n) => n.addProvider(valueProvider(KEY, 'x')),
@@ -132,7 +131,7 @@ describe('the pending node (DESIGN.md §3.3)', () => {
       result: (n) => n.result(f),
       interrupted: (n) => n.interrupted(),
       never: (n) => n.never(),
-      managed: (n) => n.managed(Promise.resolve(1)),
+      managed: (n) => n.wait(Promise.resolve(1), { abandon: true }),
       run: (n) => n.run(() => 1),
       runSync: (n) => n.runSync(() => 1),
       abort: (n) => n.abort(),
@@ -252,7 +251,7 @@ describe('creation is pure (DESIGN.md §3.2, §3.5)', () => {
     const root = createRootContext();
     const V = createInjectionKey<object>('V', {
       factory: () => {
-        root.fork(task(async () => void t.push('outside fork ran'), { onFailure: 'link' }));
+        root.fork(task(function* () { return void t.push('outside fork ran'); }, { onFailure: 'link' }));
         t.push('factory returned');
         return {};
       },
@@ -261,6 +260,57 @@ describe('creation is pure (DESIGN.md §3.2, §3.5)', () => {
     expect(t.log).toEqual(['factory returned']);
     await tick();
     expect(t.log).toEqual(['factory returned', 'outside fork ran']);
+    await root.close();
+  });
+
+  it('then of a work op made outside and handed in refuses to run it inside a factory: CreationViolationError, no body entered and no wait function called (I16); the op stays unrun, so a then after the creation runs it, and an op already running is only awaited there', async () => {
+    const t = trace();
+    const root = createRootContext();
+    const op = root.call(
+      task(function* () {
+        t.push('call body ran');
+        return 'called';
+      }),
+    );
+    const fnOp = root.wait(() => {
+      t.push('wait fn called');
+      return Promise.resolve('waited');
+    });
+    const running = root.call(
+      task(function* () {
+        t.push('running body ran');
+        return 'ran';
+      }),
+    );
+    const before = running.then((v) => v); // runs it now, before the creation
+    const inFactory: Record<string, unknown> = {};
+    const record = (name: string) => [(v: unknown) => void (inFactory[name] = v), (e: unknown) => void (inFactory[name] = e)] as const;
+    const V = createInjectionKey<object>('V', {
+      factory: () => {
+        t.push('factory starts');
+        void op.then(...record('call'));
+        void fnOp.then(...record('wait'));
+        void running.then(...record('running'));
+        t.push('factory ends');
+        return {};
+      },
+    });
+    root.get(V);
+    await tick();
+    const after = { call: await op, wait: await fnOp, running: await before };
+    expect({
+      log: t.log,
+      call: inFactory.call instanceof CreationViolationError,
+      wait: inFactory.wait instanceof CreationViolationError,
+      running: inFactory.running,
+      after,
+    }).toEqual({
+      log: ['running body ran', 'factory starts', 'factory ends', 'call body ran', 'wait fn called'],
+      call: true,
+      wait: true,
+      running: 'ran',
+      after: { call: 'called', wait: 'waited', running: 'ran' },
+    });
     await root.close();
   });
 
@@ -273,7 +323,7 @@ describe('creation is pure (DESIGN.md §3.2, §3.5)', () => {
       constructor() {
         const n = here();
         n.own(
-          n.fork(async () => {
+          n.fork(function* () {
             t.push('body');
             let injectError: unknown;
             try {
@@ -352,7 +402,7 @@ describe('forks in a constructor (DESIGN.md §4.6, D14)', () => {
         const n = here();
         svcNode = impl(n);
         n.own(
-          n.fork(async () => {
+          n.fork(function* () {
             t.push('fork runs');
             seen = { parent: impl(here()).parent, config: lookup(Config), svcState: n.state };
           }),
@@ -382,7 +432,7 @@ describe('forks in a constructor (DESIGN.md §4.6, D14)', () => {
         here().own(() => {
           released = true;
         });
-        here().fork(async () => {
+        here().fork(function* () {
           ran = true;
         });
       }
@@ -410,7 +460,7 @@ describe('forks in a constructor (DESIGN.md §4.6, D14)', () => {
           own(() => {
             released = true;
           });
-          here().fork(async () => {
+          here().fork(function* () {
             ran = true;
           });
           return {};
@@ -432,10 +482,10 @@ describe('forks in a constructor (DESIGN.md §4.6, D14)', () => {
     class Good {
       constructor() {
         const n = here();
-        n.own(n.fork(async () => void t.push('owned')));
-        n.fork(task(async () => void t.push('handled'), { onFailure: () => {} }));
-        n.fork(task(async () => void t.push('linked'), { onFailure: 'link' }));
-        n.pool({ name: 'p', onFailure: () => {} }).fork(async () => void t.push('pooled'));
+        n.own(n.fork(function* () { return void t.push('owned'); }));
+        n.fork(task(function* () { return void t.push('handled'); }, { onFailure: () => {} }));
+        n.fork(task(function* () { return void t.push('linked'); }, { onFailure: 'link' }));
+        n.pool({ name: 'p', onFailure: () => {} }).fork(function* () { return void t.push('pooled'); });
       }
     }
     const root = createRootContext();
@@ -803,9 +853,9 @@ describe('a failed or refused creation is owned by its requester (DESIGN.md §3.
         let node: NodeImpl | undefined;
         const factory = (): object => {
           node = here();
-          own(async () => {
-            if (shape === 'all') await here().all([task(async () => 1)]);
-            else await here().join(here().fork(async () => 1));
+          own(function* () {
+            if (shape === 'all') yield* here().all([task(function* () { return 1; })]);
+            else yield* here().join(here().fork(function* () { return 1; }));
           });
           throw new Error('boom');
         };
@@ -828,9 +878,9 @@ describe('a failed or refused creation is owned by its requester (DESIGN.md §3.
     const K = createInjectionKey<object>('K', {
       factory: () => {
         node = here();
-        const x = own({}, async () => {
-          const f = here().fork(async () => 1); // queued on the value node until placement (DESIGN.md §4.6)
-          fiberOutcome = (await here().result(f)).status;
+        const x = own({}, function* () {
+          const f = here().fork(function* () { return 1; }); // queued on the value node until placement (DESIGN.md §4.6)
+          fiberOutcome = (yield* here().result(f)).status;
         });
         void here().release(x); // in flight while the factory throws
         throw new Error('boom');
@@ -854,8 +904,8 @@ describe('a failed or refused creation is owned by its requester (DESIGN.md §3.
           runs++;
           if (release === 'sync') own(() => void (looked = lookup(K, { optional: true })));
           else
-            own(async () => {
-              await tick();
+            own(function* () {
+              yield* wait(tick());
               looked = lookup(K, { optional: true });
             });
           throw new Error('boom');
@@ -967,7 +1017,7 @@ describe('a release started during creation cannot re-enter resolution (DESIGN.m
               runSync: () => here().runSync(() => 1),
               all: () => here().all([]),
               race: () => here().race([task(() => 1)]),
-              managed: () => here().managed(Promise.resolve(1)),
+              managed: () => here().wait(Promise.resolve(1), { abandon: true }),
             };
             for (const [op, f] of Object.entries(ops)) {
               try {
@@ -1148,7 +1198,7 @@ describe('a creation ends when its factory returns (DESIGN.md §3.5)', () => {
             seen = { creation: currentCreation(), node: peekCurrentNode() };
             const ops: Record<string, () => unknown> = {
               own: () => own(() => void (released = true)),
-              fork: () => fork(task(async () => void (forkRan = true), { onFailure: () => {} })),
+              fork: () => fork(task(function* () { return void (forkRan = true); }, { onFailure: () => {} })),
               inject: () => inject(Other),
               lookup: () => lookup(Other),
             };

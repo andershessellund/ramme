@@ -11,14 +11,13 @@
 // release work, run to its end under an unwind fiber of the node, while the synchronous verbs still address the node
 // (U3). The outcome is `aborted` by state whatever the generator then does (D24).
 //
-// PR 1 is additive and its ops are eager (the proposal's transitional state, §8): a verb starts its work when it is
-// called and `yield*` consumes it, and calls still lend. Tests that pin a fact of that state say "transitional"; PR 2
-// (lazy work ops, construction reads the slot) changes them.
+// Since PR 2 work ops are lazy (decision 2): an op runs when it is yielded, for the yielding body, so an op made and
+// never yielded runs nothing, and a body that finds its node delivered at a `yield*` of an op not yet started is
+// returned there without running it. The tests PR 1 marked "transitional" (eager ops, lending) are restated for that.
 //
 // Each test first compares one observation object, so that a failure shows the whole of the behaviour in its diff,
 // and checks classes only afterwards.
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import './node.js';
 import {
   all,
   attempt,
@@ -49,7 +48,7 @@ import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { inject } from './inject.js';
 import { valueProvider } from './provider-util.js';
-import { FiberAbortedError, InterruptedError, NoCurrentNodeError, UnawaitedCallError } from './resource.js';
+import { FiberAbortedError, NoCurrentNodeError } from './resource.js';
 import { RequestScope } from './scope.js';
 import { deferred, events, impl, tick, trace, unhandledRejectionGuard, within } from './test/util.js';
 import type { Trace } from './test/util.js';
@@ -89,7 +88,7 @@ function bare(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** `.reason` of an error (InterruptedError, FiberAbortedError) or of an outcome; `undefined` for anything else. */
+/** `.reason` of an error (FiberAbortedError) or of an outcome; `undefined` for anything else. */
 function reasonOf(x: unknown): unknown {
   return typeof x === 'object' && x !== null ? (x as { reason?: unknown }).reason : undefined;
 }
@@ -265,7 +264,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
         function* () {
           t.push('waiting');
           try {
-            yield* wait(late.promise, { abandon: true }); // today's managed(p)
+            yield* wait(late.promise, { abandon: true }); // PR #4's managed(p)
             t.push('unreachable');
           } finally {
             t.push('finally');
@@ -518,7 +517,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
     });
   });
 
-  it('7. I10: ops made and never yielded, before the delivery and in the halted finally, are never an unhandled rejection (transitional: each started when made)', async () => {
+  it('7. I10: work ops made and never yielded, before the delivery and in the halted finally, run nothing and are never an unhandled rejection; a work op is a plain thenable, not a Promise', async () => {
     const t = trace();
     const reason = new Error('hang up');
     const quick = task(
@@ -534,11 +533,11 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
     const f = root.fork(
       task(
         function* () {
-          before = sleep(10_000); // made before the delivery and never yielded: the delivery clears its timer
+          before = sleep(10_000); // made before the delivery and never yielded: no timer was ever armed
           try {
             yield* never();
           } finally {
-            after = call(quick); // made in the halted finally and never yielded
+            after = call(quick); // made in the halted finally and never yielded: quick never runs
             t.push('body ends');
           }
         },
@@ -557,15 +556,15 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
       unhandled: (guard?.seen ?? []).map((e) => (e instanceof Error ? `${e.name}: ${e.message}` : String(e))),
       made: [before instanceof Promise, typeof before?.[Symbol.iterator], after instanceof Promise, typeof after?.[Symbol.iterator]],
     }).toEqual({
-      log: ['quick ran', 'body ends', 'complete'],
+      log: ['body ends', 'complete'],
       outcome: { status: 'aborted', reason },
       unhandled: [],
-      made: [true, 'function', true, 'function'], // a Promise subclass and iterable, read, never awaited
+      made: [false, 'function', false, 'function'], // a plain thenable and iterable, read, never consumed
     });
     await root.close();
   });
 
-  it('7b. I10: a source ramme made for a wait, the function form’s promise or a thenable’s Promise.resolve wrapper, is never an unhandled rejection, though the body is halted before it yields that wait (transitional: each started when made)', async () => {
+  it('7b. I10: a wait’s function is called, and a thenable resolved, only when the wait is yielded: one made and never yielded calls nothing; the function form’s promise, rejected after the halt, ends the body and is never an unhandled rejection', async () => {
     const t = trace();
     const reason = new Error('hang up');
     /** A fetch-like driver: answers after 10 s, or rejects with the signal's reason when it aborts. */
@@ -624,7 +623,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
       outcomes,
       unhandled: (guard?.seen ?? []).map((e) => (e instanceof Error ? `${e.name}: ${e.message}` : String(e))),
     }).toEqual({
-      log: ['a aborted', 'b aborted', 'thenable rejects'],
+      log: ['a aborted'], // b's function and the thenable's then are never called
       outcomes: [
         { status: 'aborted', reason },
         { status: 'aborted', reason },
@@ -956,20 +955,21 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     await root.close();
   });
 
-  it('a body born delivered is stepped to its first yield* and returned there; a wait(p) on the way finishes first, resuming it to its next yield* (decision 9, row 5; transitional: a call made after the delivery is born delivered)', async () => {
+  it('a body born delivered is stepped to its first yield*: a wait(p, { abandon: true }) there, started when made, returns it at once, p left running and its later rejection handled; a call yielded after the delivery is not run (decision 9, row 5)', async () => {
     const t = trace();
     const reason = new Error('hang up');
+    const p = deferred<string>();
+    let runs = 0;
     let bornNode: Context | undefined;
     let bornDelivered: boolean | undefined;
     const born = task(
       function* () {
+        runs++;
         bornNode = current();
         bornDelivered = signal().aborted;
         t.push('born: first step');
-        const v = yield* wait(bare(5).then(() => 'v')); // started when evaluated: subscribed, and it finishes
-        t.push(`born: resumed with ${v}`);
         try {
-          yield* sleep(1); // returned here
+          yield* wait(p.promise, { abandon: true }); // started: subscribed, so p is handled, and returned at once
           t.push('born: unreachable');
         } finally {
           t.push('born: finally');
@@ -983,7 +983,8 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
         function* () {
           yield* wait(bare(20)); // halted meanwhile: p finishes and the body is resumed, its node delivered
           t.push('resumed');
-          yield* call(born); // a freeze child of a delivered node: born delivered (D12)
+          fork(born); // a freeze child of a delivered node: born delivered (D12); fork is eager
+          yield* call(born); // not started: the parent is returned here, and born runs once
           t.push('unreachable');
         },
         { name: 'parent', ...quiet },
@@ -993,11 +994,22 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     const done = completion(root, f, t);
     f.abort(reason);
     const o = await within(done);
-    expect({ log: t.log, outcome: o, bornDelivered, born: bornNode?.outcome }).toEqual({
-      log: ['resumed', 'born: first step', 'born: resumed with v', 'born: finally', 'complete'],
+    p.reject(new Error('late')); // handled: the abandoned wait subscribed to p before it was returned
+    await tick(3);
+    expect({
+      log: t.log,
+      outcome: o,
+      runs,
+      bornDelivered,
+      born: bornNode?.outcome,
+      unhandled: (unhandledRejectionGuard()?.seen ?? []).length,
+    }).toEqual({
+      log: ['resumed', 'born: first step', 'born: finally', 'complete'],
       outcome: { status: 'aborted', reason },
+      runs: 1,
       bornDelivered: true,
       born: { status: 'aborted', reason },
+      unhandled: 0,
     });
     await root.close();
   });
@@ -1100,7 +1112,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
                   t.push(`handler slept; parent current ${String(current() === parent)}`);
                   t.push(
                     yield* call(function* () {
-                      return 'handler called'; // a call from a handler lends nothing
+                      return 'handler called'; // a call from a handler, which nothing halts
                     }),
                   );
                 },
@@ -1189,36 +1201,6 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     });
   });
 
-  it('wait in an async body (the async profile, until PR 2): without abandon a bare await of p, with it today’s managed(p)', async () => {
-    const t = trace();
-    const reason = new Error('hang up');
-    let abandoned: unknown;
-    const root = app();
-    const f = root.fork(
-      task(
-        async () => {
-          t.push(`resumed with ${await wait(bare(20).then(() => 'v'))}`); // interrupted meanwhile: a bare await is not rejected
-          try {
-            await wait(new Promise<never>(() => {}), { abandon: true }); // a managed await on an applied node: rejected
-          } catch (e) {
-            abandoned = e;
-            throw e;
-          }
-        },
-        { name: 'async', ...quiet },
-      ),
-    );
-    await tick();
-    f.abort(reason);
-    const o = await within(root.result(f));
-    expect({ log: t.log, outcome: o, abandoned: reasonOf(abandoned) }).toEqual({
-      log: ['resumed with v'],
-      outcome: { status: 'aborted', reason },
-      abandoned: reason,
-    });
-    expect(abandoned).toBeInstanceOf(InterruptedError);
-  });
-
   it('types: yield* infers through verbs, generator helpers and tasks; a generator is an Operation; an op is awaitable; promised keeps the arguments', () => {
     // Never run: the generators below are only type-checked (vitest's expectTypeOf is a no-op at run time).
     function* double(n: number) {
@@ -1230,7 +1212,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
       return `${id}:${n}`;
     });
     const returnsOp = task(() => call(byLength, 'x')); // a synchronous body returning an op (decision 28)
-    const asyncBody = task(async (n: number) => n + 1); // still accepted in PR 1
+    const asyncBody = task(function* (n: number) { return n + 1; }); // still accepted in PR 1
     const throws = task(function* (): Generator<Instruction, never, unknown> {
       throw new Error('never returns'); // T is never, not the generator object
     });
@@ -1283,7 +1265,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
 });
 
 describe('generator bodies: promised', () => {
-  it('promised: a real Promise per call, a call-shaped child of the node captured at creation, started synchronously and lending nothing; its value, its failure consumed, NoCurrentNodeError outside any node', async () => {
+  it('promised: a real Promise per call, a call-shaped child of the node captured at creation, started synchronously; its value, its failure consumed, NoCurrentNodeError outside any node', async () => {
     const boom = new Error('boom');
     let outside: unknown;
     try {
@@ -1429,7 +1411,7 @@ describe('generator bodies: promised', () => {
 });
 
 describe('generator bodies: the amendments (D39 settled notes, re-expressed)', () => {
-  it('A.2: after a halted call the finally runs lookup, fork, shield and call without UnawaitedCallError, the callee complete; a fork there is born delivered (it addresses the node, U3), a shield and a call are release work', async () => {
+  it('A.2: after a halted call the finally runs lookup, fork, shield and call, the callee complete; a fork there is born delivered (it addresses the node, U3), a shield and a call are release work', async () => {
     const t = trace();
     const reason = new Error('hang up');
     const K = createInjectionKey<string>('K');
@@ -1470,11 +1452,10 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
       outcome: { status: 'aborted', reason },
       inFinally: { callee: 'complete', lookup: 'k', forkBornDelivered: true, shield: 'k', call: 'called; delivered false' },
     });
-    expect(Object.values(inFinally).some((v) => v instanceof UnawaitedCallError)).toBe(false);
     await root.close();
   });
 
-  it('A.2: transitional (eager ops): a call of an observe task yielded after a halted wait(p) resumed the body delivers it through the mark and returns the body once it has stopped; a join of an observe fork made then delivers it before it starts, so it settles unstarted', async () => {
+  it('A.2, with lazy ops: a call of an observe task yielded after a halted wait(p) resumed the body is not run; a join of an observe fork made then returns the body at once, the fork undelivered, which hears the interruption when the body’s exit interrupts it', async () => {
     const logs: Record<string, readonly string[]> = {};
     for (const shape of ['call', 'join'] as const) {
       const t = trace();
@@ -1484,7 +1465,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
         function* () {
           drained = current();
           t.push('drain started');
-          const r = yield* interrupted(); // an observe body: resolves when the mark delivers it
+          const r = yield* interrupted(); // an observe body: resolves when its parent's exit delivers it
           t.push(`drain heard the reason: ${String(r === reason)}`);
         },
         { name: 'drain', interrupt: 'observe' }, // not born delivered (D12)
@@ -1497,8 +1478,8 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
             try {
               yield* wait(bare(20)); // halted meanwhile: resumed when p finishes
               t.push('resumed');
-              if (shape === 'call') yield* call(drain); // started synchronously, then marked at the yield*
-              else yield* join((forked = fork(drain))); // marked at the yield*, before the fork's start microtask
+              if (shape === 'call') yield* call(drain); // not started: returned here, drain never runs
+              else yield* join((forked = fork(drain))); // fork is eager; the join is not started: returned here
               t.push('unreachable');
             } finally {
               const d = forked ?? drained;
@@ -1515,8 +1496,9 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
       logs[shape] = t.log;
     }
     expect(logs).toEqual({
-      call: ['resumed', 'drain started', 'drain heard the reason: true', 'finally; drain complete, delivered true, success', 'aborted'],
-      join: ['resumed', 'finally; drain complete, delivered true, aborted', 'aborted'], // cancelled before it ran (DESIGN.md §4.6)
+      call: ['resumed', 'finally; drain undefined, delivered undefined, undefined', 'aborted'],
+      // The return is a job queued after the fork's start: the fork runs first, undelivered (an observe child)
+      join: ['resumed', 'drain started', 'finally; drain running, delivered false, undefined', 'drain heard the reason: true', 'aborted'],
     });
   });
 
@@ -1600,7 +1582,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
     await root.close();
   });
 
-  it('A.3: a body that yields its own current()[Symbol.asyncDispose](), an ancestor’s, or the release of its own entry is returned there, not waited for, no catch run, and completes aborted', async () => {
+  it('A.3: a body that yields its own current()[Symbol.asyncDispose](), an ancestor’s, the release of its own entry, or its owner’s releaseAll() that releases it, is returned there, not waited for, no catch run, and completes aborted', async () => {
     const ran: string[] = [];
     const caught: unknown[] = [];
     const root = app();
@@ -1621,17 +1603,21 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
     const self = root.fork(body('self', () => current()[Symbol.asyncDispose]()));
     const svc = root.child({ name: 'svc' });
     const shutdown = svc.fork(body('shutdown', () => svc[Symbol.asyncDispose]())); // a shutdown fork awaiting its own owner
-    const outcomes = await within(Promise.all([root.result(selfRelease), root.result(self), root.result(shutdown)]));
+    const owner = root.child({ name: 'owner' });
+    const drain = owner.fork(body('self-releaseAll', () => owner.releaseAll())); // releases this fork too, and waits for its completion
+    const outcomes = await within(
+      Promise.all([root.result(selfRelease), root.result(self), root.result(shutdown), root.result(drain)]),
+    );
     expect({ outcomes: outcomes.map((o) => o.status), ran: [...ran].sort(), caught, svc: svc.state }).toEqual({
-      outcomes: ['aborted', 'aborted', 'aborted'],
-      ran: ['self', 'self-release', 'shutdown'],
+      outcomes: ['aborted', 'aborted', 'aborted', 'aborted'],
+      ran: ['self', 'self-release', 'self-releaseAll', 'shutdown'],
       caught: [],
       svc: 'complete',
     });
     await root.close();
   });
 
-  it('A.4: transitional (eager): a shield nobody yields holds its owner: its lookup after a tick finds the value still live, the owner completes after it, and its failure surfaces from the owner', async () => {
+  it('A.4, with lazy ops: a shield nobody yields runs nothing: its body never runs, and the owner releases and completes without it; one run through then holds its owner: its lookup after a tick finds the value still live, the owner completes after it, and its failure is consumed by that then, so the owner succeeds', async () => {
     const t = trace();
     const shieldError = new Error('cleanup failed');
     class Conn {
@@ -1647,10 +1633,14 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
         function* () {
           const conn = lookup(Conn); // stored on this fiber, which carries RequestScope
           void shield(function* () {
+            t.push('unconsumed shield ran'); // never: an op nobody consumes runs nothing
+          });
+          // Run through its then, a promise consumer nobody waits for: the shield starts now, on this node.
+          void shield(function* () {
             yield* wait(tick());
             t.push(`shield: same conn ${String(lookup(Conn) === conn)}`);
             throw shieldError;
-          });
+          }).then(undefined, (e: unknown) => void t.push(`then rejected: ${e === shieldError ? 'shieldError' : String(e)}`));
           t.push('body returns');
           return 'done';
         },
@@ -1659,9 +1649,9 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
     );
     const o = await within(completion(root, f, t));
     expect({ log: t.log, outcome: o, failures }).toEqual({
-      log: ['body returns', 'shield: same conn true', 'conn released', 'complete'],
-      outcome: { status: 'failure', error: shieldError }, // success + the shield's unconsumed failure (I11)
-      failures: [shieldError],
+      log: ['body returns', 'shield: same conn true', 'then rejected: shieldError', 'conn released', 'complete'],
+      outcome: { status: 'success', value: 'done' }, // the then consumed the shield's failure
+      failures: [],
     });
     await expect(root.close()).resolves.toBeUndefined();
   });
@@ -1674,11 +1664,14 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
         function* () {
           const owner = current();
           own(() => {
-            // In the entry's release fiber: a shield on the owner, which is releasing, not on this release fiber.
-            void owner.shield(function* () {
-              yield* wait(tick(2));
-              t.push(`late shield done; owner ${owner.state}`);
-            });
+            // In the entry's release fiber: a shield on the owner, which is releasing, not on this release fiber. Run
+            // through its then (a work op runs only when consumed): nothing waits for it but the owner.
+            void owner
+              .shield(function* () {
+                yield* wait(tick(2));
+                t.push(`late shield done; owner ${owner.state}`);
+              })
+              .then(() => {});
             t.push('entry released');
           });
           return 'done';
@@ -1691,66 +1684,6 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
       log: ['entry released', 'late shield done; owner releasing', 'complete'],
       outcome: { status: 'success', value: 'done' },
     });
-    await root.close();
-  });
-
-  it('A.7: transitional (eager): an undelivered body yielding an op a delivered body made gets FiberAbortedError thrown in, and rethrowing it fails with it, never as an interruption', async () => {
-    const reason = new Error('hang up');
-    const made = deferred();
-    let shared: Op<never> | undefined;
-    const root = app();
-    const long = root.fork(
-      task(
-        function* (): Generator<Instruction, never, unknown> {
-          return yield* never();
-        },
-        { name: 'long', ...quiet },
-      ),
-    );
-    const creator = root.fork(
-      task(
-        function* () {
-          shared = join(long); // targeted at creator, which made it
-          made.resolve();
-          yield* never();
-        },
-        { name: 'creator', ...quiet },
-      ),
-    );
-    await within(made.promise);
-    const failures: unknown[] = [];
-    let seen: unknown;
-    const awaiter = root.fork(
-      task(
-        function* () {
-          try {
-            yield* shared!;
-          } catch (e) {
-            seen = e;
-            throw e;
-          }
-        },
-        { name: 'awaiter', onFailure: (e) => void failures.push(e) },
-      ),
-    );
-    await tick();
-    creator.abort(reason);
-    const o = await within(root.result(awaiter));
-    expect({
-      outcome: o.status,
-      seen: (seen as Error)?.name,
-      seenReason: (seen as { reason?: unknown })?.reason,
-      failures: failures.map((e) => (e as Error).name),
-      warnings: rammeWarnings().map((w) => /is awaited by fiber #\d+ 'awaiter'.*FiberAbortedError/.test(w)),
-    }).toEqual({
-      outcome: 'failure', // not aborted: the awaiter was not interrupted (I12)
-      seen: 'FiberAbortedError',
-      seenReason: reason,
-      failures: ['FiberAbortedError'],
-      warnings: [true],
-    });
-    expect(seen).not.toBeInstanceOf(InterruptedError);
-    long.abort();
     await root.close();
   });
 
@@ -1805,17 +1738,17 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     };
   }
 
-  it('A.7: a synchronous body returning another body’s op (driven as its body, decision 28) and a yield* of one are its own cross-body waits: FiberAbortedError and the dev warning, never an InterruptedError', async () => {
+  it('A.7, with lazy ops: an op one body made, returned by a synchronous body (driven as its body, decision 28) or yielded by another, runs for the body that consumes it: its maker’s interruption reaches neither, nothing is classified by awaiter, and nothing warns', async () => {
     const reason = new Error('hang up');
     const root = app();
-    /** A body that makes a sleep, its own op, and parks on never(). */
+    /** A body that makes a sleep, through its own node, and parks on never(). */
     const creator = (name: string) => {
       const box: { shared?: Op<void> } = {};
       const made = deferred();
       const f = root.fork(
         task(
           function* () {
-            box.shared = sleep(1000);
+            box.shared = sleep(30);
             made.resolve();
             yield* never();
           },
@@ -1834,6 +1767,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
       task(
         function* () {
           yield* b.box.shared!;
+          return 'slept';
         },
         { name: 'via-yield', onFailure },
       ),
@@ -1841,15 +1775,21 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     await tick();
     a.f.abort(reason);
     b.f.abort(reason);
+    const makers = await within(Promise.all([root.result(a.f), root.result(b.f)]));
     const outcomes = await within(Promise.all([root.result(syncReturn), root.result(viaYield)]));
     expect({
-      outcomes: outcomes.map((o) => (o.status === 'failure' ? `${(o.error as Error).name}, reason ${String(reasonOf(o.error) === reason)}` : o.status)),
-      failures: failures.map((e) => (e as Error).name),
-      warnings: rammeWarnings().map((w) => /is awaited by fiber #\d+ '([^']+)'.*FiberAbortedError/.exec(w)?.[1]),
+      makers: makers.map((o) => o.status),
+      outcomes,
+      failures,
+      warnings: rammeWarnings(),
     }).toEqual({
-      outcomes: ['FiberAbortedError, reason true', 'FiberAbortedError, reason true'], // not interrupted, so not InterruptedError (I12)
-      failures: ['FiberAbortedError', 'FiberAbortedError'],
-      warnings: ['sync-return', 'via-yield'],
+      makers: ['aborted', 'aborted'],
+      outcomes: [
+        { status: 'success', value: undefined },
+        { status: 'success', value: 'slept' },
+      ],
+      failures: [],
+      warnings: [],
     });
     await root.close();
   });
@@ -1872,7 +1812,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
           const awaiter = fork(function* () {
             started.resolve();
             try {
-              yield* p; // a cross-body wait on the parent's op
+              yield* p; // the parent's eager op: this body subscribes to the same release
             } catch (e) {
               awaiterSaw = e;
               throw e;
@@ -1893,7 +1833,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
       failures: [rollbackError],
       awaiter: 'aborted',
       awaiterSaw: 'nothing thrown in', // a halted body is returned, never thrown into
-      warnings: 1, // the cross-body wait is still reported
+      warnings: 0, // nothing is classified by awaiter any more
     });
     await expect(root.close()).resolves.toBeUndefined();
   });
@@ -2001,7 +1941,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     });
   });
 
-  it('A.4: transitional (lending): a void shield lends its owner only while the body runs: once the body has returned, a child’s generator failure handler may sleep and shield through the owner', async () => {
+  it('A.4: once the body has returned, while a shield run through then holds the owner open, a child’s generator failure handler may sleep and shield through the owner, which completes after both', async () => {
     const t = trace();
     const err = new Error('child failed');
     const gate = deferred();
@@ -2022,14 +1962,12 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
                   onFailure: function* () {
                     try {
                       yield* sleep(5);
-                      t.push('handler slept');
+                      t.push(`handler slept; owner ${String(current() === owner)}`);
                       t.push(
                         yield* shield(function* () {
                           return 'handler shielded';
                         }),
                       );
-                    } catch (e) {
-                      t.push(`handler: ${(e as Error).name}`);
                     } finally {
                       gate.resolve();
                     }
@@ -2038,10 +1976,12 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
               ),
             ),
           );
+          // The owner's release waits for every shield it ran before it releases any entry (D39, A.4), so the
+          // owned kid lives on, fails, and its handler runs, after the body has returned.
           void shield(function* () {
-            yield* wait(gate.promise); // outlives the body, and the handler
+            yield* wait(gate.promise);
             t.push('shield done');
-          });
+          }).then(() => {});
           return 'ok';
         },
         { name: 'owner', ...quiet },
@@ -2049,23 +1989,17 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     );
     const o = await within(ev.root.result(owner));
     const ownerId = impl(owner).id;
-    const lent = ev.of('node:lent').filter((e) => e.id === ownerId);
-    const returned = ev.of('node:returned').filter((e) => e.id === ownerId);
-    const shieldId = lent[0]?.childId;
     const settledBody = ev.of('node:settled').find((e) => e.id === ownerId);
-    const shieldComplete = ev.of('node:complete').find((e) => e.id === shieldId);
+    const ownerComplete = ev.of('node:complete').find((e) => e.id === ownerId);
+    t.push('complete');
     expect({
       outcome: o,
       log: t.log,
-      pairs: [lent.length, returned.length, returned[0]?.childId === shieldId],
-      returnedWithTheBody: returned[0] !== undefined && settledBody !== undefined && returned[0].seq > settledBody.seq,
-      beforeTheShieldCompleted: returned[0] !== undefined && shieldComplete !== undefined && returned[0].seq < shieldComplete.seq,
+      bodyFirst: settledBody !== undefined && ownerComplete !== undefined && settledBody.seq < ownerComplete.seq,
     }).toEqual({
       outcome: { status: 'success', value: 'ok' },
-      log: ['handler slept', 'handler shielded', 'shield done'],
-      pairs: [1, 1, true],
-      returnedWithTheBody: true,
-      beforeTheShieldCompleted: true,
+      log: ['handler slept; owner true', 'handler shielded', 'shield done', 'complete'],
+      bodyFirst: true,
     });
   });
 
@@ -2194,48 +2128,35 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     await expect(root.close()).resolves.toBeUndefined();
   });
 
-  it('A.4: transitional (lending): shield lends the current node while its body runs: an unyielded shield is a forgotten yield*, and the lending ends when the shield completes', async () => {
+  it('A.4, with lazy ops: a shield made in a body runs nothing until it is yielded, so the body forks freely meanwhile; yielded, its release fiber is made then, and is current in its body', async () => {
     const ev = events();
     roots.push(ev.root);
-    let refused: unknown;
     let shieldNode: Context | undefined;
-    let body: Context | undefined;
+    let beforeYield: string | undefined;
     const v = await within(
       ev.root.call(function* () {
-        body = current();
         const p = shield(function* () {
           shieldNode = current();
           yield* wait(tick());
           return 'shielded';
         });
-        try {
-          fork(function* () {
-            return 'too early';
-          });
-        } catch (e) {
-          refused = e;
-        }
-        const r = yield* p;
-        fork(function* () {
-          return 'after the shield'; // returned: no longer lent
+        const f = fork(function* () {
+          return 'forked meanwhile';
         });
-        return r;
+        beforeYield = `${String(shieldNode)}; ${yield* join(f)}`;
+        return yield* p;
       }),
     );
-    const bodyId = impl(body!).id;
-    const lending = ev.log.filter((e) => e.id === bodyId && (e.type === 'node:lent' || e.type === 'node:returned'));
     expect({
       value: v,
-      refused: refused instanceof UnawaitedCallError,
-      refusedNames: (refused as UnawaitedCallError | undefined)?.child === shieldNode,
+      beforeYield,
       shieldKind: shieldNode === undefined ? undefined : impl(shieldNode).kind,
-      lending: lending.map((e) => `${e.type} ${String((e as { childId: number }).childId === impl(shieldNode!).id)}`),
+      shieldMade: ev.of('node:created').filter((e) => e.name === 'shield:anonymous').length,
     }).toEqual({
       value: 'shielded',
-      refused: true,
-      refusedNames: true,
+      beforeYield: 'undefined; forked meanwhile',
       shieldKind: 'release',
-      lending: ['node:lent true', 'node:returned true'],
+      shieldMade: 1,
     });
   });
 
@@ -2358,6 +2279,60 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
       'owned join': ['lock', 'writing', 'unlock', 'wrote', 'complete', 'aborted'], // unsubscribed: not stopped by the delivery (I4)
     });
   });
+
+  it('A.2: the shape delivers a fork the delivery did not reach: below an observe child, a halted body’s join(f) aborts f with the body’s reason and returns the body once f has completed, while the observe child runs on', async () => {
+    const t = trace();
+    const reason = new Error('hang up');
+    const observerGate = deferred();
+    const forked = deferred();
+    const returned = deferred();
+    let f!: Fiber<void>;
+    let observer!: Fiber<void>;
+    const root = app();
+    const b = root.fork(
+      task(
+        function* () {
+          observer = fork(
+            task(
+              function* () {
+                f = fork(function* () {
+                  try {
+                    yield* never();
+                  } finally {
+                    t.push('f unwound');
+                  }
+                });
+                forked.resolve();
+                yield* wait(observerGate.promise); // an observe body: not halted, it runs on
+              },
+              { name: 'observer', interrupt: 'observe' },
+            ),
+          );
+          yield* wait(forked.promise);
+          try {
+            yield* join(f); // f is subscribed below this body, but the delivery stops at the observe child
+          } finally {
+            t.push('body returned');
+            returned.resolve();
+          }
+        },
+        { name: 'body', ...quiet },
+      ),
+    );
+    await tick();
+    b.abort(reason);
+    await within(returned.promise);
+    const fNode = impl(f);
+    expect({ log: t.log, f: fNode.outcome?.status, reason: fNode.abortReason === reason, observer: impl(observer).state }).toEqual({
+      log: ['f unwound', 'body returned'],
+      f: 'aborted',
+      reason: true,
+      observer: 'running',
+    });
+    observerGate.resolve();
+    expect((await within(root.result(b))).status).toBe('aborted');
+    await root.close();
+  });
 });
 
 describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)', () => {
@@ -2415,38 +2390,40 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
     });
   });
 
-  it('owner already interrupted: a hole made after a halted wait(p) resumed the body is skipped at once, its body never runs whatever its interrupt mode, it lends nothing, and its outcome is aborted with the owner’s reason', async () => {
+  it('owner already interrupted: a hole made in a shield its halted finally runs is skipped at once, its body never runs whatever its interrupt mode, and its outcome is aborted with the owner’s reason', async () => {
     const t = trace();
     const reason = new Error('hang up');
     const ran: string[] = [];
     let r: Outcome<string> | undefined;
     let observeHole: Outcome<string> | undefined;
-    let lentAfter: unknown = 'unread';
     const root = app();
     const owner = root.fork(
       task(
         function* () {
-          yield* wait(bare(20)); // halted meanwhile: p finishes and the body is resumed, its node interrupted
-          yield* shield(function* () {
-            const p = unshield(function* () {
-              ran.push('hole started');
-              yield* sleep(10_000);
-              ran.push('past its first yield*');
-              return 'ack';
+          try {
+            yield* never(); // halted here
+          } finally {
+            yield* shield(function* () {
+              // release work of the halted node: the shield's owner, whose interruption has come
+              const p = unshield(function* () {
+                ran.push('hole started');
+                yield* sleep(10_000);
+                ran.push('past its first yield*');
+                return 'ack';
+              });
+              r = yield* p;
+              observeHole = yield* unshield(
+                task(
+                  function* () {
+                    ran.push('observe hole started'); // an observe child is not born delivered, but it is not born at all
+                    return 'ack';
+                  },
+                  { name: 'observe hole', interrupt: 'observe' },
+                ),
+              );
+              t.push('shield goes on');
             });
-            lentAfter = impl(current()).lentTo; // a hole settled at birth lends nothing
-            r = yield* p;
-            observeHole = yield* unshield(
-              task(
-                function* () {
-                  ran.push('observe hole started'); // an observe child is not born delivered, but it is not born at all
-                  return 'ack';
-                },
-                { name: 'observe hole', interrupt: 'observe' },
-              ),
-            );
-            t.push('shield goes on');
-          });
+          }
         },
         { name: 'owner', ...quiet },
       ),
@@ -2455,11 +2432,10 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
     const done = completion(root, owner, t);
     owner.abort(reason);
     const o = await within(done);
-    expect({ ran, hole: r, observeHole, lentAfter, log: t.log, owner: o }).toEqual({
+    expect({ ran, hole: r, observeHole, log: t.log, owner: o }).toEqual({
       ran: [],
       hole: { status: 'aborted', reason },
       observeHole: { status: 'aborted', reason },
-      lentAfter: undefined,
       log: ['shield goes on', 'complete'],
       owner: { status: 'aborted', reason },
     });
@@ -2669,41 +2645,6 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
       thrown: ['body: TypeError', 'generator release: TypeError', 'entry release: TypeError', 'after a shield: TypeError'],
       ran: 0,
     });
-  });
-
-  it('transitional (lending): while an unyielded unshield is in flight, a second body-shaped operation throws UnawaitedCallError naming the hole; yielded, the lending ends', async () => {
-    let hole: Context | undefined;
-    let refused: unknown;
-    let after: number | undefined;
-    const root = app();
-    await within(
-      root.call(function* () {
-        yield* shield(function* () {
-          const p = unshield(function* () {
-            hole = current();
-            yield* sleep(5);
-            return 'ack';
-          });
-          try {
-            void call(function* () {
-              return 1;
-            });
-          } catch (e) {
-            refused = e;
-          }
-          yield* p;
-          after = yield* call(function* () {
-            return 2; // returned: no longer lent
-          });
-        });
-      }),
-    );
-    expect({
-      refused: refused instanceof UnawaitedCallError,
-      child: (refused as UnawaitedCallError | undefined)?.child === hole,
-      holeKind: hole === undefined ? undefined : impl(hole).kind,
-      after,
-    }).toEqual({ refused: true, child: true, holeKind: 'fiber', after: 2 });
   });
 
   it('the hole is a subscribed child of the current node: lookup through it resolves the owner’s providers', async () => {
@@ -3029,9 +2970,8 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
     });
   });
 
-  it('transitional (lending): a second unshield during an unyielded one names the fix that keeps the link, one hole around an all(), whose members the owner’s interruption reaches', async () => {
+  it('one hole around an all(), a body returning an op (decision 28): the owner’s interruption reaches its members, and the hole ends aborted with the owner’s reason', async () => {
     const reason = new Error('owner cut');
-    let hint = '';
     let r: Outcome<unknown> | undefined;
     const members: Context[] = [];
     const step = (name: string) =>
@@ -3047,19 +2987,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
       task(
         function* () {
           yield* shield(function* () {
-            const p = unshield(function* () {
-              yield* wait(Promise.resolve()); // in flight until a microtask: the hole is still lent the shield's node
-              return 'a';
-            });
-            try {
-              void unshield(function* () {
-                return 'b';
-              });
-            } catch (e) {
-              hint = e instanceof UnawaitedCallError ? e.message.slice(e.message.indexOf('the call was not awaited')) : String(e);
-            }
-            yield* p;
-            r = yield* unshield(() => all([step('a'), step('b')])); // the hint, followed: a body returning an op
+            r = yield* unshield(() => all([step('a'), step('b')])); // one hole: a body returning an op
           });
         },
         { name: 'owner', ...quiet },
@@ -3069,10 +2997,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
     expect(members.length).toBe(2);
     owner.abort(reason);
     await within(root.result(owner));
-    expect({ hint, hole: r, members: members.map((m) => m.outcome) }).toEqual({
-      hint:
-        'the call was not awaited (two concurrent unshields on one node? await each one, or make one hole: ' +
-        'unshield(() => all([...])))',
+    expect({ hole: r, members: members.map((m) => m.outcome) }).toEqual({
       hole: { status: 'aborted', reason },
       members: [
         { status: 'aborted', reason },

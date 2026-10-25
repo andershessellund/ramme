@@ -10,8 +10,7 @@
 // exist whether or not a receiver is provided; events exist only with a
 // receiver. FLIP marks a port whose expectation the redesign reversed.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
-import { call, current, fork, interrupted, join, never, own, release, result, signal } from './ambient.js';
+import { call, current, fork, interrupted, join, never, own, release, result, signal, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context } from './context.js';
 import { createRootContext } from './create-context.js';
@@ -57,10 +56,10 @@ describe('event sequences per operation', () => {
   it('fork: node:created → entry:registered → node:started → node:settled → node:releasing → node:complete', async () => {
     const ev = events();
     let id = -1;
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       const f = fork(
         task(
-          async () => {
+          function* () {
             own(() => {});
             return 1;
           },
@@ -68,7 +67,7 @@ describe('event sequences per operation', () => {
         ),
       );
       id = f.id;
-      expect(await join(f)).toBe(1);
+      expect(yield* join(f)).toBe(1);
     });
     expect(story(ev, id)).toEqual([
       'node:created',
@@ -86,34 +85,15 @@ describe('event sequences per operation', () => {
     await ev.root.close();
   });
 
-  it('call: the lender emits node:lent and node:returned naming the child', async () => {
-    const ev = events();
-    let outerId = -1;
-    let childId = -1;
-    await ev.root.call(async () => {
-      outerId = current().id;
-      await call(async () => {
-        childId = current().id;
-      });
-    });
-    const lent = ev.of('node:lent');
-    const returned = ev.of('node:returned');
-    expect(lent.map((e) => [e.id, e.childId])).toEqual([[outerId, childId]]);
-    expect(returned.map((e) => [e.id, e.childId])).toEqual([[outerId, childId]]);
-    expect(lent[0].seq).toBeLessThan(ev.of('node:started').find((e) => e.id === childId)!.seq);
-    expect(returned[0].seq).toBeLessThan(ev.of('node:complete').find((e) => e.id === childId)!.seq);
-    await ev.root.close();
-  });
-
-  it('join: join:enter and join:leave on the joiner; a rejected joiner emits no join:leave, and settles after it unwound', async () => {
+  it('join: join:enter and join:leave on the joiner; a halted joiner emits no join:leave, and settles after it unwound', async () => {
     const ev = events();
     let joinerId = -1;
     let joinedId = -1;
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       joinerId = current().id;
-      const f = fork(async () => 'v');
+      const f = fork(function* () { return 'v'; });
       joinedId = f.id;
-      await join(f);
+      yield* join(f);
     });
     expect(ev.of('join:enter').map((e) => [e.id, e.joinedId])).toEqual([[joinerId, joinedId]]);
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'success']]);
@@ -122,9 +102,9 @@ describe('event sequences per operation', () => {
     let rejectedId = -1;
     const joiner = ev.root.fork(
       task(
-        async () => {
-          const slow = fork(() => gate.promise);
-          await join(slow);
+        function* () {
+          const slow = fork(function* () { return yield* wait(gate.promise); });
+          yield* join(slow);
         },
         { onFailure: 'link' },
       ),
@@ -149,7 +129,7 @@ describe('event sequences per operation', () => {
       }
     }
     const ev = events({ providers: [valueProvider(Name, 'svc')] });
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       ev.root.get(Service);
     });
     const v = ev.of('node:created').find((e) => e.kind === 'value')!;
@@ -217,13 +197,13 @@ describe('event sequences per operation', () => {
   });
 });
 
-describe('delivery, rejection and stall events', () => {
-  it('node:delivered for every node of a delivery, then node:settled for a body rejected at its managed await', async () => {
+describe('delivery, halt and stall events', () => {
+  it('node:delivered for every node of a delivery, then node:settled for a body halted at its wait', async () => {
     const ev = events();
     const f = ev.root.fork(
       task(
-        async () => {
-          await never();
+        function* () {
+          yield* never();
         },
         { onFailure: 'link', name: 'sleeper' },
       ),
@@ -240,16 +220,16 @@ describe('delivery, rejection and stall events', () => {
     expect(Math.max(...deliveredSeqs)).toBeLessThan(settledSeq); // every signal fires before any body settles (I9)
   });
 
-  it('node:stalled for a delivered freeze body that never reaches a managed await, and for a delivered observe body that never settles', async () => {
+  it('node:stalled for a delivered freeze body whose wait(p) the halt lets finish and p never settles, and for a delivered observe body that never settles', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const ev = events({ stallWarningMs: 100 });
     const gate = deferred();
-    const stuck = ev.root.fork(task(() => gate.promise, { onFailure: 'link', name: 'stuck' }));
+    const stuck = ev.root.fork(task(function* () { return yield* wait(gate.promise); }, { onFailure: 'link', name: 'stuck' }));
     const watcher = ev.root.fork(
       task(
-        async () => {
-          await interrupted();
-          await gate.promise; // a shutdown that never finishes
+        function* () {
+          yield* interrupted();
+          yield* wait(gate.promise); // a shutdown that never finishes
         },
         { onFailure: 'link', interrupt: 'observe', name: 'watcher' },
       ),
@@ -275,9 +255,9 @@ describe('order pins (DESIGN.md §5)', () => {
     const outcome = await ev.root.result(
       ev.root.fork(
         task(
-          async () => {
+          function* () {
             current().abort('gone');
-            ids.push(fork(async () => {}).id, current().child().id);
+            ids.push(fork(function* () {}).id, current().child().id);
           },
           { onFailure: 'link' },
         ),
@@ -311,12 +291,12 @@ describe('order pins (DESIGN.md §5)', () => {
 
   it('node:created is every node’s first event and node:complete its last', async () => {
     const ev = events();
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       own(() => {});
-      await join(fork(async () => own(() => {})));
+      yield* join(fork(function* () { return own(() => {}); }));
       const c = current().child();
       c.own(() => {});
-      await c.close();
+      yield* c.close();
     });
     await ev.root.close();
     const ids = new Set(ev.of('node:created').map((e) => e.id));
@@ -331,14 +311,14 @@ describe('order pins (DESIGN.md §5)', () => {
 describe('fields', () => {
   it('kind, task, stack, subscribed, mode, parentId and a strictly increasing seq', async () => {
     const ev = events();
-    const work = task(async () => 'w', { name: 'work', interrupt: 'observe' });
+    const work = task(function* () { return 'w'; }, { name: 'work', interrupt: 'observe' });
     let callId = -1;
     let forkId = -1;
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       callId = current().id;
       const f = own(fork(work)); // unsubscribed after own()
       forkId = f.id;
-      await join(f);
+      yield* join(f);
       current().pool({ name: 'jobs', onFailure: () => {} });
     });
     await ev.root.close();
@@ -369,7 +349,7 @@ describe('no receiver, no cost (DESIGN.md §5)', () => {
     expect(impl(root).receiver).toBeUndefined(); // resolved by the root's own node:created: "none"
     const lookups = topicLookups(impl(root));
     const gate = deferred();
-    const f = root.fork(task(() => gate.promise, { onFailure: 'link' }));
+    const f = root.fork(task(function* () { return yield* wait(gate.promise); }, { onFailure: 'link' }));
     await tick();
     f.abort();
     expect(impl(f).stallTimer).toBeUndefined(); // nobody could hear node:stalled
@@ -393,8 +373,8 @@ describe('no receiver, no cost (DESIGN.md §5)', () => {
     });
     expect(typeof impl(root).receiver).toBe('function'); // resolved by the root's own node:created
     const lookups = topicLookups(impl(root));
-    await root.call(async () => {
-      for (let i = 0; i < 5; i++) await join(fork(async () => i));
+    await root.call(function* () {
+      for (let i = 0; i < 5; i++) yield* join(fork(function* () { return i; }));
     });
     await root.close();
     expect(lookups()).toBe(0); // not re-resolved per event (the factory count alone cannot tell: the cache keeps it at 1)
@@ -433,9 +413,9 @@ describe('no receiver, no cost (DESIGN.md §5)', () => {
         }),
       ],
     });
-    await root.call(async () => {
+    await root.call(function* () {
       own(() => {});
-      await join(fork(async () => 1));
+      yield* join(fork(function* () { return 1; }));
     });
     await root.close();
     expect(root.state).toBe('complete');
@@ -449,35 +429,31 @@ describe('ported lifecycle-events cases', () => {
     let main: Context | undefined;
     await ev.root.call(
       task(
-        async () => {
+        function* () {
           main = current();
-          const f = fork(task(async () => 'f', { name: 'child' }));
-          await call(task(async () => 'c', { name: 'inline' }));
-          await join(f);
+          const f = fork(task(function* () { return 'f'; }, { name: 'child' }));
+          yield* call(task(function* () { return 'c'; }, { name: 'inline' }));
+          yield* join(f);
         },
         { name: 'main' },
       ),
     );
     await ev.root.close();
     const mainId = main!.id;
-    const kinds = ev.log
-      .filter((e) => e.id === mainId && ['node:lent', 'node:returned', 'join:enter', 'join:leave'].includes(e.type))
-      .map((e) => e.type);
-    expect(kinds).toEqual(['node:lent', 'node:returned', 'join:enter', 'join:leave']);
+    const kinds = ev.log.filter((e) => e.id === mainId && ['join:enter', 'join:leave'].includes(e.type)).map((e) => e.type);
+    expect(kinds).toEqual(['join:enter', 'join:leave']); // a call emits no join event on its caller
     expect(ev.of('node:created').filter((e) => e.kind === 'fiber').map((e) => e.task)).toEqual(['main', 'child', 'inline']);
   });
 
-  it('a failing call: the child settles and completes with failure, and gives its lender back (ported "call:leave with error on failure")', async () => {
+  it('a failing call: the child settles and completes with failure, and the caller catches it (ported "call:leave with error on failure")', async () => {
     const ev = events();
-    let outerId = -1;
     let childId = -1;
     let caught: unknown;
-    await ev.root.call(async () => {
-      outerId = current().id;
+    await ev.root.call(function* () {
       try {
-        await call(
+        yield* call(
           task(
-            async () => {
+            function* () {
               childId = current().id;
               throw new Error('boom');
             },
@@ -493,7 +469,6 @@ describe('ported lifecycle-events cases', () => {
     expect(ev.of('node:created').find((e) => e.id === childId)?.task).toBe('fail-call');
     expect(ev.of('node:settled').find((e) => e.id === childId)?.outcome).toBe('failure');
     expect(ev.of('node:complete').find((e) => e.id === childId)?.outcome).toBe('failure');
-    expect(ev.of('node:returned').map((e) => [e.id, e.childId])).toEqual([[outerId, childId]]);
   });
 
   it('join:leave carries the failure outcome of a joined fiber that failed (ported "join:leave with error outcome on join failure")', async () => {
@@ -501,14 +476,14 @@ describe('ported lifecycle-events cases', () => {
     let joinerId = -1;
     let joinedId = -1;
     let caught: unknown;
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       joinerId = current().id;
-      const f = fork(async () => {
+      const f = fork(function* () {
         throw new Error('join-fail');
       });
       joinedId = f.id;
       try {
-        await join(f);
+        yield* join(f);
       } catch (e) {
         caught = e;
       }
@@ -519,19 +494,19 @@ describe('ported lifecycle-events cases', () => {
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'failure']]);
   });
 
-  it('result(f) emits join:enter and join:leave on the awaiter, and a rejected awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
+  it('result(f) emits join:enter and join:leave on the awaiter, and a halted awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
     const ev = events();
     let awaiterId = -1;
     const ids: number[] = [];
     const statuses: string[] = [];
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       awaiterId = current().id;
-      const ok = fork(async () => 'ok');
-      const bad = fork(async () => {
+      const ok = fork(function* () { return 'ok'; });
+      const bad = fork(function* () {
         throw new Error('bad');
       });
       ids.push(ok.id, bad.id);
-      statuses.push((await result(ok)).status, (await result(bad)).status);
+      statuses.push((yield* result(ok)).status, (yield* result(bad)).status);
     });
     expect(statuses).toEqual(['success', 'failure']);
     expect(ev.of('join:enter').map((e) => [e.id, e.joinedId])).toEqual([
@@ -547,10 +522,10 @@ describe('ported lifecycle-events cases', () => {
     let slowId = -1;
     const waiter = ev.root.fork(
       task(
-        async () => {
-          const slow = fork(() => gate.promise);
+        function* () {
+          const slow = fork(function* () { return yield* wait(gate.promise); });
           slowId = slow.id;
-          await result(slow);
+          yield* result(slow);
         },
         { onFailure: 'link' },
       ),
@@ -568,18 +543,14 @@ describe('ported lifecycle-events cases', () => {
     const ev = events();
     const other = ev.root.child({ name: 'other' });
     let bodyId = -1;
-    let lentChild = -1;
     const ids: number[] = [];
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       bodyId = current().id;
-      const a = fork(async () => 'a');
-      const b = fork(async () => 'b');
+      const a = fork(function* () { return 'a'; });
+      const b = fork(function* () { return 'b'; });
       ids.push(a.id, b.id);
-      expect(await other.join(a)).toBe('a');
-      expect((await other.result(b)).status).toBe('success');
-      await other.call(async () => {
-        lentChild = current().id;
-      });
+      expect(yield* other.join(a)).toBe('a');
+      expect((yield* other.result(b)).status).toBe('success');
     });
     expect(ev.of('join:enter').map((e) => [e.id, e.joinedId])).toEqual([
       [bodyId, ids[0]],
@@ -589,11 +560,9 @@ describe('ported lifecycle-events cases', () => {
       [bodyId, ids[0], 'success'],
       [bodyId, ids[1], 'success'],
     ]);
-    // the same node a call made there lends (DESIGN.md §4.9)
-    expect(ev.of('node:lent').map((e) => [e.id, e.childId])).toEqual([[bodyId, lentChild]]);
     expect(ev.typesOf(other.id).filter((t) => t.startsWith('join:'))).toEqual([]);
     // no body awaits at top level: the events name the receiver
-    const g = other.fork(task(async () => 'g', { onFailure: 'link' }));
+    const g = other.fork(task(function* () { return 'g'; }, { onFailure: 'link' }));
     expect(await other.join(g)).toBe('g');
     expect(ev.of('join:enter').filter((e) => e.joinedId === g.id).map((e) => e.id)).toEqual([other.id]);
     expect(ev.of('join:leave').filter((e) => e.joinedId === g.id).map((e) => e.id)).toEqual([other.id]);
@@ -622,7 +591,7 @@ describe('ported lifecycle-events cases', () => {
     let body: NodeImpl | undefined;
     let ran: { id: number; kind: string; parent: NodeImpl | undefined } | undefined;
     let releasedBeforeResume = -1;
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       body = impl(current());
       const x = own({
         [Symbol.dispose]() {
@@ -630,7 +599,7 @@ describe('ported lifecycle-events cases', () => {
           ran = { id: n.id, kind: n.kind, parent: n.parent };
         },
       });
-      await release(x);
+      yield* release(x);
       releasedBeforeResume = ev.of('entry:released').filter((e) => e.id === current().id).length;
     });
     await ev.root.close();

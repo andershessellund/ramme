@@ -1,24 +1,22 @@
-// sleep.test.ts — `sleep(ms)` and `ctx.sleep(ms)`, ramme's timer (D34, DESIGN.md §4.2).
+// sleep.test.ts — `sleep(ms)` and `ctx.sleep(ms)`, ramme's timer (D34 as D41 amends it, DESIGN.md §4.14).
 //
-// A managed await over a timer whose target is managed.ts `awaitTarget()` when the promise is made: a delivered
-// `freeze` or `restore` body awaiting it is rejected with `InterruptedError` (D39), and the target's delivery clears
-// the timer, whether the sleep is awaited or only stored. A target already applied arms no timer and rejects as soon
-// as it is awaited. Without a target (an `observe` body,
-// a release fiber, a failure handler, top level) it runs its full duration. A failure handler that awaits a sleep a
-// body made waits on a timer of its own, to that sleep's deadline. Body-shaped like `never`.
+// A lazy work op over a timer: making it arms nothing; the timer is armed when the op runs, at its `yield*` (or its
+// `then`). A delivered `freeze` or `restore` body waiting on it is halted at once, and the halt clears the timer: no
+// rejection, the body is returned. A body already delivered at the `yield*` does not run it, so arms no timer. Where
+// nothing halts the waiter (an `observe` body, a release fiber, a failure handler, top level) it runs its full
+// duration. Body-shaped like `never`.
 //
 // Fake timers fake only setTimeout, clearTimeout and Date: `tick()` and ramme's microtasks stay real.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber } from './context.js';
+import type { Context, Fiber, Op } from './context.js';
 import { currentFrame } from './context-storage.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { RequestScope } from './scope.js';
-import { call, current, fork, managed, never, own, signal, sleep } from './ambient.js';
-import { CreationViolationError, NoCurrentNodeError, PendingNodeError, UnawaitedCallError } from './resource.js';
-import { deferred, impl, tick, trace, within } from './test/util.js';
+import { current, fork, never, own, signal, sleep, wait } from './ambient.js';
+import { CreationViolationError, NoCurrentNodeError, PendingNodeError } from './resource.js';
+import { deferred, impl, start, tick, trace, within } from './test/util.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -37,11 +35,11 @@ describe('sleep resolves after ms (DESIGN.md §4.2)', () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
-    const done = app.call(async () => {
+    const done = start(app.call(function* () {
       t.push('before');
-      await sleep(100);
+      yield* sleep(100);
       t.push('after');
-    });
+    }));
     await tick();
     vi.advanceTimersByTime(99);
     await tick();
@@ -77,8 +75,8 @@ describe('sleep resolves after ms (DESIGN.md §4.2)', () => {
       return timer;
     }) as typeof setTimeout);
     const app = createRootContext();
-    await app.call(async () => {
-      await sleep(1); // a target: the body
+    await app.call(function* () {
+      yield* sleep(1); // a target: the body
     });
     await app.sleep(1); // no target: a plain delay, which must keep the process alive until it resolves
     expect(armed).toHaveLength(2);
@@ -88,20 +86,22 @@ describe('sleep resolves after ms (DESIGN.md §4.2)', () => {
   });
 });
 
-describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
-  it('a freeze fiber awaiting sleep is rejected at delivery, its timer cleared at once, and its node releases after the body unwinds, not after 10 s', async () => {
+describe('the halt clears the timer (DESIGN.md §4.14, D34)', () => {
+  it('a freeze fiber waiting on sleep is halted at delivery, its timer cleared at once, no catch run, and its node releases after the body unwinds, not after 10 s', async () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
     const f = app.fork(
-      task(async () => {
+      task(function* () {
         own(t.at('released'));
         try {
-          await sleep(10_000);
+          yield* sleep(10_000);
           t.push('resumed');
         } catch (e) {
-          t.push(`rejected: ${(e as Error).name}`);
+          t.push(`caught: ${(e as Error).name}`);
           throw e;
+        } finally {
+          t.push('finally');
         }
       }, quiet),
     );
@@ -109,13 +109,13 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     expect(vi.getTimerCount()).toBe(1);
     f.abort();
     expect(vi.getTimerCount()).toBe(0); // cleared inside abort(), with the delivery (D34)
-    expect(f.state).toBe('running'); // the rejection is a queued job (DESIGN.md §4.2)
+    expect(f.state).toBe('running'); // the return is a queued job (DESIGN.md §4.14)
     await tick();
     expect(f.state).toBe('complete');
     expect(f.outcome?.status).toBe('aborted');
     vi.advanceTimersByTime(10_000);
     await tick();
-    expect(t.log).toEqual(['rejected: InterruptedError', 'released']);
+    expect(t.log).toEqual(['finally', 'released']);
     await app.close();
   });
 
@@ -125,9 +125,9 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     const t = trace();
     const f = app.fork(
       task(
-        async () => {
+        function* () {
           own(t.at('released'));
-          await sleep(10_000);
+          yield* sleep(10_000);
           t.push('resumed');
         },
         { ...quiet, interrupt: 'restore' },
@@ -144,62 +144,64 @@ describe('interruption clears the timer (DESIGN.md §4.2, D34)', () => {
     await app.close();
   });
 
-  it('a stored, not-yet-awaited sleep in a freeze body is cleared at the body’s delivery', async () => {
+  it('a stored, never-yielded sleep arms no timer: a work op runs only when consumed (D41, decision 2)', async () => {
     fakeTimers();
     const app = createRootContext();
-    let stored: Promise<void> | undefined;
+    let stored: Op<void> | undefined;
     const f = app.fork(
-      task(async () => {
-        stored = sleep(10_000); // made, never awaited
-        await never();
+      task(function* () {
+        stored = sleep(10_000); // made, never yielded
+        yield* never();
       }, quiet),
     );
     await tick();
     expect(stored).toBeDefined();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     f.abort();
     expect(vi.getTimerCount()).toBe(0);
     expect((await within(app.result(f))).status).toBe('aborted');
     await app.close();
   });
 
-  it('a target already applied arms no timer: a fork born under a delivered freeze parent, and a body running plain code after its delivery (I8), are rejected at await sleep(1e6)', async () => {
+  it('a body already delivered arms no timer: a fork born under a delivered freeze parent, and a body running plain code after its delivery (I8), are returned at yield* sleep(1e6) without running it', async () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
     let born!: Fiber<void>;
-    const outcome = await app.attempt(async () => {
+    const outcome = await app.attempt(function* () {
       current().abort(); // delivered; this body is running plain code (I8)
-      born = fork(async () => {
+      born = fork(function* () {
         try {
-          await sleep(1e6); // born delivered (D12): its first managed await rejects (DESIGN.md §4.6)
+          yield* sleep(1e6); // born delivered (D12): returned at its first yield* of an op not yet started (decision 9)
           t.push('fork resumed');
         } catch (e) {
           t.push(`fork: ${(e as Error).name}`);
+        } finally {
+          t.push('fork finally');
         }
       });
-      await tick(2); // a bare await: the fork starts and reaches its sleep
+      yield* wait(tick(2)); // started before it was yielded: the halt lets it finish; the fork starts and is returned
       t.push(`timers after the fork's sleep: ${vi.getTimerCount()}`);
-      await sleep(1e6);
+      yield* sleep(1e6);
       t.push('body resumed');
     });
     expect(outcome.status).toBe('aborted');
-    expect(t.log).toEqual(['fork: InterruptedError', "timers after the fork's sleep: 0"]);
+    expect(t.log).toEqual(['fork finally', "timers after the fork's sleep: 0"]);
     expect(vi.getTimerCount()).toBe(0);
-    expect(born.outcome?.status).toBe('aborted'); // by state: it caught its interruption and returned (D24)
+    expect(born.outcome?.status).toBe('aborted'); // by state (D24)
     await app.close();
   });
 });
 
-describe('no target: the full duration (DESIGN.md §4.2, §4.7)', () => {
+describe('nothing halts the waiter: the full duration (DESIGN.md §4.14, §4.7)', () => {
   it('an observe body delivered mid-sleep resumes after the full ms', async () => {
     fakeTimers();
     const app = createRootContext();
     const t = trace();
     const f = app.fork(
       task(
-        async () => {
-          await sleep(100);
+        function* () {
+          yield* sleep(100);
           t.push(`resumed; signal aborted: ${signal().aborted}`);
           return 'shut down';
         },
@@ -225,9 +227,9 @@ describe('no target: the full duration (DESIGN.md §4.2, §4.7)', () => {
     const N = app.child();
     const t = trace();
     let slept = 0;
-    N.own(async function slowRelease() {
+    N.own(function* slowRelease() {
       const start = performance.now();
-      await sleep(30);
+      yield* sleep(30);
       slept = performance.now() - start;
       t.push(`slept; deadline fired: ${signal().aborted}`);
     });
@@ -241,24 +243,24 @@ describe('no target: the full duration (DESIGN.md §4.2, §4.7)', () => {
     const app = createRootContext();
     const t = trace();
     let P!: Context;
-    const parent = app.attempt(async () => {
+    const parent = start(app.attempt(function* () {
       P = current();
       fork(
         task(
-          async () => {
+          function* () {
             throw new Error('child failed');
           },
           {
-            onFailure: async () => {
+            onFailure: function* () {
               t.push('handler waits');
-              await sleep(20); // a handler's awaits are never rejected (DESIGN.md §4.7): the parent's delivery leaves it
+              yield* sleep(20); // a handler is never halted (DESIGN.md §4.7): the parent's delivery leaves its sleep
               t.push('handler resumed');
             },
           },
         ),
       );
-      await never();
-    });
+      yield* never();
+    }));
     await tick(2);
     expect(t.log).toEqual(['handler waits']);
     P.abort();
@@ -269,40 +271,39 @@ describe('no target: the full duration (DESIGN.md §4.2, §4.7)', () => {
   });
 });
 
-describe("a failure handler awaiting a sleep its parent's body made waits on a timer of its own (DESIGN.md §4.7, D34)", () => {
-  /** A fork onto the current body whose failure handler runs `onFailure`. */
-  function failingFork(onFailure: () => Promise<void>): void {
-    fork(
-      task(
-        async () => {
-          throw new Error('child failed');
-        },
-        { onFailure },
-      ),
-    );
-  }
-
-  it("already waiting when the parent is delivered: the delivery clears the body's timer, and the handler resumes at the sleep's deadline", async () => {
+describe("a failure handler yielding a sleep its parent's body made runs it afresh (DESIGN.md §4.7, D34)", () => {
+  it("on a timer of its own, armed at the handler's yield*, for the full ms, which the parent's delivery does not clear; the parent completes after it", async () => {
     fakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const app = createRootContext();
     const t = trace();
     let P!: Context;
-    const parent = app.attempt(async () => {
-      P = current();
-      const backoff = sleep(50); // stored by the body: its target is P
-      failingFork(async () => {
-        t.push('handler waits');
-        await backoff;
-        t.push('handler resumed');
-      });
-      await never();
-    });
+    const parent = start(
+      app.attempt(function* () {
+        P = current();
+        const backoff = sleep(50); // made by the body, its receiver P; never yielded by the body
+        fork(
+          task(
+            function* () {
+              throw new Error('child failed');
+            },
+            {
+              onFailure: function* () {
+                t.push('handler waits');
+                yield* backoff; // runs it now, for the handler: nothing halts a handler
+                t.push('handler resumed');
+              },
+            },
+          ),
+        );
+        yield* never();
+      }),
+    );
     await tick(2);
     expect(t.log).toEqual(['handler waits']);
-    expect(vi.getTimerCount()).toBe(2); // the body's timer and the handler's own
+    expect(vi.getTimerCount()).toBe(1); // the handler's: the body never ran its sleep
     P.abort();
-    expect(vi.getTimerCount()).toBe(1); // the body's is cleared (D34); the handler's is not the body's
+    expect(vi.getTimerCount()).toBe(1); // the parent's delivery does not touch the handler's wait
     vi.advanceTimersByTime(49);
     await tick();
     expect(t.log).toEqual(['handler waits']);
@@ -315,117 +316,9 @@ describe("a failure handler awaiting a sleep its parent's body made waits on a t
     expect(warn).not.toHaveBeenCalled();
     await app.close();
   });
-
-  it('first awaited after the delivery rejected the body’s await of it: the handler resumes at the sleep’s deadline, for the time left, unwarned', async () => {
-    fakeTimers();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const app = createRootContext();
-    const t = trace();
-    const gate = deferred();
-    const box: { s?: Promise<void> } = {};
-    let P!: Context;
-    const parent = app.attempt(async () => {
-      P = current();
-      box.s = sleep(50);
-      failingFork(async () => {
-        await gate.promise; // bare: the handler reaches the sleep only after the delivery
-        t.push('handler waits');
-        await box.s;
-        t.push('handler resumed');
-      });
-      await box.s; // the body is suspended on the sleep: the delivery rejects it
-    });
-    await tick(2);
-    vi.advanceTimersByTime(20);
-    P.abort();
-    expect(vi.getTimerCount()).toBe(0); // the body's timer is cleared (D34)
-    await tick();
-    expect(impl(P).bodyDone).toBe(true); // the body unwound; the handler holds P open
-    gate.resolve();
-    await tick();
-    expect(t.log).toEqual(['handler waits']);
-    expect(vi.getTimerCount()).toBe(1); // the handler's own, for the 30 ms left
-    vi.advanceTimersByTime(29);
-    await tick();
-    expect(t.log).toEqual(['handler waits']);
-    vi.advanceTimersByTime(1);
-    await tick();
-    expect(t.log).toEqual(['handler waits', 'handler resumed']);
-    expect(P.state).toBe('complete');
-    expect((await parent).status).toBe('aborted');
-    expect(warn).not.toHaveBeenCalled();
-    await app.close();
-  });
-
-  it('a wall clock set back does not stretch the handler’s wait past ms', async () => {
-    fakeTimers();
-    const app = createRootContext();
-    const t = trace();
-    const gate = deferred();
-    const box: { s?: Promise<void> } = {};
-    let P!: Context;
-    const parent = app.attempt(async () => {
-      P = current();
-      box.s = sleep(50);
-      failingFork(async () => {
-        await gate.promise;
-        await box.s;
-        t.push('handler resumed');
-      });
-      await never();
-    });
-    await tick(2);
-    P.abort();
-    vi.setSystemTime(Date.now() - 10_000); // the deadline now lies 10 050 ms ahead by the clock
-    gate.resolve();
-    await tick();
-    vi.advanceTimersByTime(49);
-    await tick();
-    expect(t.log).toEqual([]);
-    vi.advanceTimersByTime(1);
-    await tick();
-    expect(t.log).toEqual(['handler resumed']);
-    expect((await parent).status).toBe('aborted');
-    await app.close();
-  });
-
-  it('made by the body after its delivery, where no timer is armed (the applied path): the handler resumes at the sleep’s deadline', async () => {
-    fakeTimers();
-    const app = createRootContext();
-    const t = trace();
-    const gate = deferred();
-    const box: { s?: Promise<void> } = {};
-    let P!: Context;
-    const parent = app.attempt(async () => {
-      P = current();
-      failingFork(async () => {
-        await gate.promise;
-        await box.s;
-        t.push('handler resumed');
-      });
-      await tick(2); // bare: the fork fails and its handler waits on the gate
-      current().abort(); // delivered: this body runs plain code (I8)
-      box.s = sleep(50); // a target already applied: no timer (D34)
-      t.push(`timers after the body's sleep: ${vi.getTimerCount()}`);
-      gate.resolve();
-      await never();
-    });
-    await tick(4);
-    expect(t.log).toEqual(["timers after the body's sleep: 0"]);
-    expect(vi.getTimerCount()).toBe(1); // the handler's own
-    vi.advanceTimersByTime(49);
-    await tick();
-    expect(P.state).toBe('releasing'); // held open by the handler
-    vi.advanceTimersByTime(1);
-    await tick();
-    expect(t.log).toEqual(["timers after the body's sleep: 0", 'handler resumed']);
-    expect(P.state).toBe('complete');
-    expect((await parent).status).toBe('aborted');
-    await app.close();
-  });
 });
 
-describe('sleep is body-shaped, like never and managed (DESIGN.md §3.3, §3.5, §4.7, §4.9)', () => {
+describe('sleep is body-shaped, like never and wait (DESIGN.md §3.3, §3.5, §4.7)', () => {
   it('in creation it throws CreationViolationError, free or through the value’s live node', async () => {
     class Hoisted {
       constructor() {
@@ -468,71 +361,45 @@ describe('sleep is body-shaped, like never and managed (DESIGN.md §3.3, §3.5, 
     await app.close();
   });
 
-  it('sleep in a body whose node is lent throws UnawaitedCallError, and so does a failure handler through its lent parent', async () => {
-    const app = createRootContext();
-    let viaHandler: unknown;
-    await app.call(async () => {
-      const gate = deferred();
-      const pending = call(async () => {
-        await managed(gate.promise);
-      }); // not awaited: this body is lent (DESIGN.md §4.9)
-      expect(() => sleep(1)).toThrow(UnawaitedCallError);
-      gate.resolve();
-      await pending;
-
-      fork(
-        task(
-          async () => {
-            throw new Error('child failed');
-          },
-          {
-            onFailure: () => {
-              try {
-                void sleep(1); // HANDLER_MAY_WHILE_LENT has no sleep: a handler forks the wait instead
-              } catch (e) {
-                viaHandler = e;
-              }
-            },
-          },
-        ),
-      );
-      await call(async () => {
-        await tick(3); // the fork fails while this body is lent to the call
-      });
-    });
-    expect(viaHandler).toBeInstanceOf(UnawaitedCallError);
-    await app.close();
-  });
-
   it('NaN, negative, ±Infinity, 2 ** 31 and a non-number throw RangeError before a timer is armed; 0 and 2 ** 31 - 1 are accepted', async () => {
     fakeTimers();
     const app = createRootContext();
     const bad: unknown[] = [NaN, -1, Infinity, -Infinity, 2 ** 31, '10', undefined, null, 10n];
-    await app.call(async () => {
+    await app.call(function* () {
       for (const ms of bad) expect(() => sleep(ms as number), String(ms)).toThrow(RangeError);
       expect(() => sleep(NaN)).toThrow(/ms must be a number of milliseconds in \[0, 2147483647\] \(got NaN\); for an unbounded wait, use never\(\)/);
       expect(() => sleep('10' as unknown as number)).toThrow(/\(got "10"\)/);
     });
     for (const ms of bad) expect(() => app.sleep(ms as number)).toThrow(RangeError);
     expect(vi.getTimerCount()).toBe(0);
-    void app.sleep(2 ** 31 - 1);
-    void app.sleep(0);
+    void start(app.sleep(2 ** 31 - 1)); // armed when run: through its then here
+    void start(app.sleep(0));
     expect(vi.getTimerCount()).toBe(2);
     vi.clearAllTimers();
     await app.close();
   });
 
-  it("the target's onApplied does not grow across many completed sleeps", async () => {
+  it("a body's onApplied holds only its driver's halt hook while it waits, and nothing once it resumed: it does not grow across many completed sleeps", async () => {
     const app = createRootContext();
-    await app.call(async () => {
-      const me = impl(current());
-      for (let i = 0; i < 50; i++) await sleep(0);
-      expect(me.onApplied.size).toBe(0);
-      const s = sleep(1);
-      expect(me.onApplied.size).toBe(1); // the clear-only entry, while the timer is armed
-      await s;
-      expect(me.onApplied.size).toBe(0);
-    });
+    const gate = deferred();
+    const reached = deferred();
+    let me!: ReturnType<typeof impl>;
+    const sizes: number[] = [];
+    const f = app.fork(
+      task(function* () {
+        me = impl(current());
+        for (let i = 0; i < 50; i++) yield* sleep(0);
+        sizes.push(me.onApplied.size); // in a step: nothing is subscribed
+        reached.resolve();
+        yield* wait(gate.promise);
+        sizes.push(me.onApplied.size);
+      }, quiet),
+    );
+    await within(reached.promise);
+    sizes.push(me.onApplied.size); // suspended on the wait: its hook
+    gate.resolve();
+    await within(app.result(f));
+    expect(sizes).toEqual([0, 1, 0]);
     await app.close();
   });
 });
