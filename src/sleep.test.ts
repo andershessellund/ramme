@@ -240,6 +240,7 @@ describe('nothing halts the waiter: the full duration (DESIGN.md §4.2, §4.7)',
   });
 
   it("a fork's onFailure handler that does await sleep(20) while its parent is aborted still resumes, and the parent completes", async () => {
+    fakeTimers(); // the handler's 20 ms must not elapse during the ticks below under load; the clock is advanced by hand
     const app = createRootContext();
     const t = trace();
     let P!: Context;
@@ -264,6 +265,9 @@ describe('nothing halts the waiter: the full duration (DESIGN.md §4.2, §4.7)',
     await tick(2);
     expect(t.log).toEqual(['handler waits']);
     P.abort();
+    await tick();
+    expect(t.log).toEqual(['handler waits']); // the delivery leaves the handler's sleep armed
+    vi.advanceTimersByTime(20);
     expect((await within(parent)).status).toBe('aborted');
     expect(t.log).toEqual(['handler waits', 'handler resumed']);
     expect(P.state).toBe('complete');
