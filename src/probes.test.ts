@@ -86,7 +86,7 @@ describe('probes', () => {
         const f = fork(function* () {
           throw boom;
         });
-        expect((yield* result(f)).status).toBe('failure');
+        expect((yield* result(f)).status).toBe('defect');
       }
       expect(me.unconsumed.size).toBe(0);
       expect(me.subscribers.size).toBe(0);

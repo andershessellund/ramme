@@ -468,7 +468,7 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
         winner: 'a',
         outcomes: [
           { status: 'success', value: 'a' },
-          { status: 'failure', error: boom },
+          { status: 'defect', error: boom },
         ],
         loser: 'aborted',
       },
@@ -1171,7 +1171,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
       }),
     );
     const timedOut = (o: Outcome<number>): unknown => (o.status === 'aborted' ? `aborted: ${(o.reason as Error).name}` : o);
-    expect(outcomes.map(timedOut)).toEqual([{ status: 'success', value: 42 }, { status: 'failure', error: boom }, 'aborted: TimeoutError']);
+    expect(outcomes.map(timedOut)).toEqual([{ status: 'success', value: 42 }, { status: 'defect', error: boom }, 'aborted: TimeoutError']);
     await expect(root.close()).resolves.toBeUndefined(); // attempt's resume step consumed the failure
 
     const t = trace();
@@ -1249,7 +1249,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     function* probe() {
       expectTypeOf(call(byLength, 'x')).toEqualTypeOf<Op<string>>();
       expectTypeOf(yield* call(byLength, 'x')).toEqualTypeOf<string>();
-      expectTypeOf(yield* attempt(byLength, 'x')).toEqualTypeOf<Outcome<string>>();
+      expectTypeOf(yield* attempt(byLength, 'x')).toEqualTypeOf<Outcome<string, never>>(); // E = never: byLength yields no fail (D42)
       expectTypeOf(yield* all([byLength.bind('x'), asyncBody.bind(1)])).toEqualTypeOf<[string, number]>();
       expectTypeOf(yield* wait(Promise.resolve(1))).toEqualTypeOf<number>();
       expectTypeOf(yield* wait((s: AbortSignal) => Promise.resolve(String(s.aborted)))).toEqualTypeOf<string>();
@@ -1534,7 +1534,7 @@ describe('generator bodies: the amendments (D39 settled notes, re-expressed)', (
     f.abort(reason);
     const o = await within(root.result(f));
     expect({ outcome: o, fromRelease, failures }).toEqual({
-      outcome: { status: 'failure', error: rollbackError }, // aborted + the unconsumed release failure (D24)
+      outcome: { status: 'defect', error: rollbackError }, // aborted + the unconsumed release failure (D24)
       fromRelease: rollbackError,
       failures: [rollbackError],
     });
@@ -1829,7 +1829,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     );
     const o = await within(root.result(parent));
     expect({ outcome: o, failures, awaiter: awaiterOutcome?.status, awaiterSaw, warnings: rammeWarnings().length }).toEqual({
-      outcome: { status: 'failure', error: rollbackError }, // the record stayed with its holder (I11)
+      outcome: { status: 'defect', error: rollbackError }, // the record stayed with its holder (I11)
       failures: [rollbackError],
       awaiter: 'aborted',
       awaiterSaw: 'nothing thrown in', // a halted body is returned, never thrown into
@@ -1881,7 +1881,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     expect({ outcomes, failures }).toEqual({
       outcomes: [
         { status: 'aborted', reason }, // the shield handled it: consumed once, by the awaiter that could act on it
-        { status: 'failure', error: rollbackError }, // the shield's failure alone, not also the release record it consumed
+        { status: 'defect', error: rollbackError }, // the shield's failure alone, not also the release record it consumed
       ],
       failures: [rollbackError],
     });
@@ -2051,7 +2051,7 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     expect({ outcomes, fromShield, failures }).toEqual({
       outcomes: [
         { status: 'success', value: 'ok' },
-        { status: 'failure', error: shieldError }, // aborted + the shield's unconsumed failure (D24)
+        { status: 'defect', error: shieldError }, // aborted + the shield's unconsumed failure (D24)
       ],
       fromShield: shieldError,
       failures: [shieldError],
@@ -2118,9 +2118,9 @@ describe('generator bodies: the fixes of the implementation review, re-expressed
     const outcomes = await within(Promise.all([closeScope, disposeScope, disposeFiber].map((f) => root.result(f))));
     expect({ outcomes, handed, failures: [...failures].sort() }).toEqual({
       outcomes: [
-        { status: 'failure', error: releaseError },
-        { status: 'failure', error: releaseError },
-        { status: 'failure', error: bodyError },
+        { status: 'defect', error: releaseError },
+        { status: 'defect', error: releaseError },
+        { status: 'defect', error: bodyError },
       ],
       handed: ['close: release failed', 'dispose scope: release failed', 'dispose fiber: fiber body failed'],
       failures: ['close: release failed', 'dispose fiber: fiber body failed', 'dispose scope: release failed'],
@@ -2472,7 +2472,7 @@ describe('generator bodies: shield and unshield (unshield.test.ts, re-expressed)
     expect({ v, ok, bad, unconsumed, root: root.outcome }).toEqual({
       v: 'done',
       ok: { status: 'success', value: 42 },
-      bad: { status: 'failure', error: boom },
+      bad: { status: 'defect', error: boom },
       unconsumed: { shield: 0, body: 0 },
       root: { status: 'success', value: undefined },
     });

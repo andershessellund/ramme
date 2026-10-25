@@ -135,6 +135,10 @@ const signup = task(function* (user: User) {
 yielded (`const op = call(t);`, `[1, 2].map(() => sleep(1))`) is not flagged;
 a type-aware variant would see those. A free op at module level is not
 flagged: no node is current there, so it throws `NoCurrentNodeError` when made.
+`fail(e)` and `ramme/result`'s `$(r)` written without their `yield*` are not
+flagged either, though they are lazy too: neither is a work verb, and the body
+simply runs on past the statement, so the failure ends nothing and never joins
+the task's `E` (ramme's D42).
 Whether `x.call(…)` is ramme's is read from `x`'s declaration and the first
 argument: an import, a variable made by `task`, `bind`, `createRootContext`,
 `current`, `child` or `pool`, and a parameter typed `Task`, `Context` or
@@ -237,11 +241,13 @@ rule does not compare the node that owns `x` with the node that receives
 and their outcome discarded: `yield* attempt(t);` or `await attempt(t);` as an
 expression statement, under `void` too.
 
-**Why.** `attempt`, `settle` and `result` deliver a failure as a value and
-consume it (§4.5, §4.8, §4.12). An outcome nobody reads is a failure dropped
-silently, where `call`, `all` or `join` would have thrown it (D31). Use those,
-or read the outcome. The op alone (`attempt(t);`) runs nothing:
-`no-unused-op` reports that.
+**Why.** `attempt`, `settle` and `result` deliver the four-way outcome as a
+value and consume what it carries: an expected `failure` (a `yield* fail(e)`)
+or a `defect` (a throw) (§4.5, §4.8, §4.12). An outcome nobody reads is a
+failure or a defect dropped silently, where `call`, `all` or `join` would have
+propagated it: the expected failure re-yielded into the caller, the defect
+thrown (D31, D42). Use those, or read the outcome. The op alone
+(`attempt(t);`) runs nothing: `no-unused-op` reports that.
 
 **Approximations.** Any method named `attempt`, `settle` or `result` matches,
 ramme's or not. Not flagged: an outcome stored and never read

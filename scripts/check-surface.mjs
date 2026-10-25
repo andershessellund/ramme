@@ -10,16 +10,22 @@
 // no name removed by the redesign or since (`ProviderOptions`, D36; `managed`,
 // `InterruptedError`, `UnawaitedCallError` and the async-context registry, D41)
 // or internal to ramme. Then requires dist/result.d.ts, the `ramme/result`
-// subpath, to export exactly the `resultExpected` functions and nothing else,
-// and dist/result.js to import nothing: the subpath is a leaf that imports only
-// types (DESIGN.md §7). Also requires that stripInternal left no `@internal`
+// subpath, to export exactly the `resultExpected` functions and nothing else
+// (`gen` retired, D42), and dist/result.js to import nothing: the subpath is a
+// leaf that imports only types (DESIGN.md §7). Also requires that stripInternal left no `@internal`
 // declaration in any dist/*.d.ts, and that the adapters of the async-context
 // era (dist/node.js, dist/async-context.js) are not built: package.json exports
-// `.` and `./result` only (D41, decision 18). The type-level half is
-// src/test/surface.check.ts.
+// `.` and `./result` only (D41, decision 18). Last, compiles a consumer outside
+// the package with `declaration` (`consumerSource`): a library's unannotated
+// helpers generic over `E` must emit, and a task's `E` must emit as the plain
+// union (D42). The type-level half is src/test/surface.check.ts.
 // ---------------------------------------------------------------------------
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const dist = new URL('../dist/', import.meta.url);
 
@@ -30,6 +36,7 @@ const expected = new Map([
     'InterruptMode',
     'NodeOptions',
     'Instruction',
+    'Fail',
     'Operation',
     'Op',
     'Body',
@@ -78,6 +85,7 @@ const expected = new Map([
     'sleep',
     'wait',
     'promised',
+    'fail',
     'runSync',
   ].map((n) => [n, ['value', './ambient.js']]),
   ['inject', ['value', './inject.js']],
@@ -118,6 +126,8 @@ const coreNames = [
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
   // generator bodies (DESIGN.md §4.14, D41): the ops, what they yield, and the two verbs for foreign async code
   'Op', 'Operation', 'Instruction', 'wait', 'promised',
+  // expected failures (D42): the fourth exit, and the type a helper that fails is named by
+  'fail', 'Fail',
   // task options
   'FailureDestination', 'TaskOptions',
   // tasks, fibers, results, outcomes
@@ -130,10 +140,10 @@ const coreNames = [
   'PlacementError',
 ];
 
-/** The exact export list of dist/result.d.ts, the `ramme/result` subpath (DESIGN.md §4.13): functions only. */
+/** The exact export list of dist/result.d.ts, the `ramme/result` subpath (DESIGN.md §4.13): functions only, 13. */
 const resultExpected = [
   'success', 'failure', 'isSuccess', 'isFailure', 'map', 'mapFailure', 'andThen', 'orElse',
-  'unwrap', 'unwrapOr', 'fromThrowing', 'collect', 'gen', '$',
+  'unwrap', 'unwrapOr', 'fromThrowing', 'collect', '$',
 ];
 
 /** Names removed by the redesign or since, and names internal to ramme. */
@@ -148,6 +158,8 @@ const absent = [
   // removed with async bodies and the async context (D41): the bridge's names and the storage registry
   'managed', 'InterruptedError', 'UnawaitedCallError', 'registerContextStorage', 'ContextStorage', 'Frame',
   'requireCurrent', 'captureAutoScoped', 'NodeImpl', 'NO_NODE', 'runInFrame', 'currentFrame', 'WorkOp', 'LifecycleOp',
+  // retired with expected failures as a yielded channel (D42), and its internals
+  'gen', 'FailYield', 'Expected', 'failOp',
 ];
 
 const problems = [];
@@ -236,11 +248,89 @@ const subpaths = Object.keys(pkg.exports ?? {}).sort();
 if (JSON.stringify(subpaths) !== JSON.stringify(['.', './result']))
   problems.push(`package.json exports ${subpaths.join(', ')}; expected exactly . and ./result`);
 
+/**
+ * A library over ramme, compiled with `declaration` (PROPOSAL.md §6: annotations are optional). `orFail` and `retry`
+ * are generic over `E`, so their emitted types keep `Operation`'s distribution of `E` over `Fail`, which must be
+ * written out inline: a name from a module the package's "exports" do not expose fails the emit (TS2883). `charge`
+ * both calls a failing task and fails itself; its `E` must emit as the plain union, never wrapped (`NoInfer<…>`).
+ */
+const consumerSource = `import { call, fail, task } from 'ramme';
+import type { Result, Task } from 'ramme';
+import { $ } from 'ramme/result';
+
+export function* orFail<T, E>(x: T | undefined, e: E) {
+  if (x === undefined) return yield* fail(e);
+  return x;
+}
+export function* retry<T, E>(t: Task<[], T, E>) {
+  return yield* call(t);
+}
+export function* unwrapped<T, E>(r: Result<T, E>) {
+  return yield* $(r);
+}
+class NotFound extends Error {
+  readonly name = 'NotFound' as const;
+}
+class Declined extends Error {
+  readonly name = 'Declined' as const;
+}
+const find = task(function* (id: string) {
+  if (id === '') return yield* fail(new NotFound());
+  return id.length;
+});
+export const charge = task(function* (id: string) {
+  const n = yield* call(find, id);
+  if (n > 3) return yield* fail(new Declined());
+  return 'charged';
+});
+`;
+
+// Outside the package, resolving 'ramme' through node_modules as an installed copy does: inside it, the package's
+// self-reference would let the emit name any of its modules by a relative path.
+const consumer = mkdtempSync(join(tmpdir(), 'ramme-surface-consumer-'));
+try {
+  mkdirSync(join(consumer, 'node_modules'));
+  symlinkSync(fileURLToPath(new URL('..', import.meta.url)), join(consumer, 'node_modules', 'ramme'), 'dir');
+  writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'surface-consumer', private: true, type: 'module' }));
+  writeFileSync(join(consumer, 'library.ts'), consumerSource);
+  writeFileSync(
+    join(consumer, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        target: 'ES2022',
+        module: 'NodeNext',
+        moduleResolution: 'NodeNext',
+        lib: ['ES2024', 'ESNext.Disposable', 'DOM'],
+        types: [],
+        strict: true,
+        declaration: true,
+        emitDeclarationOnly: true,
+        rootDir: '.',
+        outDir: 'out',
+        skipLibCheck: true,
+      },
+      files: ['library.ts'],
+    }),
+  );
+  const tsc = fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url));
+  const run = spawnSync(process.execPath, [tsc, '-p', join(consumer, 'tsconfig.json')], { encoding: 'utf8' });
+  if (run.status !== 0)
+    problems.push(`a library's declaration emit fails against the build output:\n${`${run.stdout}${run.stderr}`.trim()}`);
+  else {
+    const emitted = readFileSync(join(consumer, 'out', 'library.d.ts'), 'utf8');
+    if (/NoInfer|internal-context/.test(emitted)) problems.push(`a library's emitted declarations name ramme's internals:\n${emitted}`);
+    if (!/charge: Task<\[id: string\], string, (NotFound \| Declined|Declined \| NotFound)>/.test(emitted))
+      problems.push(`a task's E does not emit as the plain union (charge: Task<[id: string], string, NotFound | Declined>):\n${emitted}`);
+  }
+} finally {
+  rmSync(consumer, { recursive: true, force: true });
+}
+
 if (problems.length > 0) {
   console.error(`check-surface: the build output does not match the expected surface:\n- ${problems.join('\n- ')}`);
   process.exit(1);
 }
 console.log(
   `check-surface: dist/index.d.ts exports exactly the ${expected.size} expected names, ` +
-    `and dist/result.d.ts exactly the ${resultExpected.length} ramme/result functions`,
+    `and dist/result.d.ts exactly the ${resultExpected.length} ramme/result functions; a library's declarations emit`,
 );

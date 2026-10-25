@@ -5,10 +5,53 @@
 // ---------------------------------------------------------------------------
 
 import type { InjectionKey } from './context-key.js';
-import type { Body, FailureDestination, NodeOptions, TaskOptions } from './context.js';
+import type { Body, Fail, FailureDestination, Instruction, NodeOptions, Task, TaskOptions } from './context.js';
 import type { NodeImpl } from './node-impl.js';
 import type { PoolState } from './pool.js';
 import type { Scope } from './scope.js';
+
+// --- The type machinery of expected failures (D42), shared by context.ts, fiber.ts and ambient.ts -----------------
+//
+// `Fails<E>`, the distribution of `E` over `Fail`, is not here: context.ts declares it unexported, so a consumer's
+// declaration emit writes it out inline instead of naming this module, which the package's `exports` do not expose.
+
+/** The expected failures a yield union carries: `E` of each `Fail<E>` member; `never` for `Instruction`. */
+export type FailedWith<Y> = Y extends Fail<infer E> ? E : never;
+
+/** A body's value that is no deferred thing: `never` for a thenable or an async iterator (D41, decision 5). */
+export type Plain<T> = T extends PromiseLike<unknown> | AsyncIterator<unknown, unknown, never> ? never : T;
+
+/** What a body's generator may yield: ops' instructions and its expected failures. */
+export type Yields = Instruction | Fail<unknown>;
+
+/**
+ * An op as the verbs infer a body that returns one: its iterator's yield union `Y`, an `Op<T, E>`'s `Instruction |
+ * Fail<E>`, read as a generator's is. One object type with `then`, so an array or a string, whose iterator would
+ * otherwise be read as an op's, is unrelated to it and infers as a plain value.
+ */
+export interface OpYielding<T, Y> extends PromiseLike<T> {
+  [Symbol.iterator](): Iterator<Y, T, unknown>;
+}
+
+/**
+ * `Body` as the verbs that take one infer it (D42): `Y` is the whole yield union of the generator, or of the op the
+ * body returns, and the verbs read `E` off it (`FailedWith<Y>`). One parameter for the union, as D38's helpers take the
+ * whole `Result`: an `E` read from `Generator<Instruction | Fail<E>, …>` takes one inference candidate and refuses a
+ * second failure type. `E` appears only under `FailedWith`, a conditional type, which inference from a contextual
+ * return type does not reach: a `task(…)` inside the array `all` takes keeps its body's `E` rather than inferring
+ * `unknown` from `Task<[], unknown, unknown>`. No `NoInfer` either: over an object type it stays in the type, so each
+ * level of propagation would wrap `E` once more, and the union would no longer be exact.
+ */
+export type BodyOf<T, A extends unknown[], Y> = (...args: A) => Generator<Y, T, unknown> | OpYielding<T, Y> | Plain<T>;
+
+/** Any task of no arguments, whatever its value and its expected failures: what `all`, `race` and `settle` take. */
+export type AnyTask = Task<[], unknown, unknown>;
+
+/** The value type of a task (each member of a union of tasks). */
+export type ValueOf<X> = X extends Task<[], infer V, unknown> ? V : never;
+
+/** The expected failures of a task (each member of a union of tasks): what `all` and `race` re-yield (D42). */
+export type ErrorOf<X> = X extends Task<[], unknown, infer E> ? E : never;
 
 /** `'value'`: a DI value's node (DESIGN.md §5, D10′). */
 export type NodeKind = 'context' | 'fiber' | 'pool' | 'release' | 'value';

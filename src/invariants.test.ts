@@ -156,7 +156,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const [all, closed] = await within(Promise.allSettled([releasing, M.close()]));
     expect(all).toEqual({ status: 'rejected', reason: E });
     expect(closed).toEqual({ status: 'fulfilled', value: undefined });
-    expect(M.outcome?.status).toBe('aborted'); // not 'failure': the error was the caller's
+    expect(M.outcome?.status).toBe('aborted'); // not 'defect': the error was the caller's
     expect(m).toEqual({ a: 1, b: 1 });
     expect(ev.of('entry:released').filter((e) => e.id === M.id).map((e) => e.entryName)).toEqual(['b', 'a']);
     expect(ev.of('node:complete').filter((e) => e.id === M.id)).toHaveLength(1);
@@ -183,7 +183,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const [all3, closed3] = await within(Promise.allSettled([M3.releaseAll(), M3.close()]));
     expect(all3).toEqual({ status: 'rejected', reason: E3 });
     expect(closed3).toEqual({ status: 'fulfilled', value: undefined });
-    expect(M3.outcome?.status).toBe('success'); // not 'failure': the error was the caller's
+    expect(M3.outcome?.status).toBe('success'); // not 'defect': the error was the caller's
     expect(ev.of('entry:released').filter((e) => e.id === M3.id).map((e) => e.entryName)).toEqual(['a3', 'b3']);
     await expect(ev.root.close()).resolves.toBeUndefined(); // neither error surfaces a second time
   });
@@ -586,7 +586,7 @@ describe('invariants (DESIGN.md §10)', () => {
         }),
       ); },
     );
-    expect(fake).toEqual({ status: 'failure', error: abortError }); // never inspected (DESIGN.md §4.12)
+    expect(fake).toEqual({ status: 'defect', error: abortError }); // never inspected (DESIGN.md §4.12)
     expect(warn.mock.calls.map((c) => /halt of .* was lost/.test(String(c[0])))).toEqual([true]);
     warn.mockRestore();
     await root.close();
@@ -951,7 +951,7 @@ describe('invariants (DESIGN.md §10)', () => {
     await tick(2);
     expect(kinds).toEqual(['release', 'release']);
     expect(handlerCurrent).toBe(root); // the one callback the design keeps runs with a node current (DESIGN.md §4.7)
-    expect(f.outcome?.status).toBe('failure');
+    expect(f.outcome?.status).toBe('defect');
     // A platform callback re-enters a node synchronously, and only for its synchronous part (DESIGN.md §6)
     let reentered: Context | undefined;
     let afterAwait: unknown;

@@ -1,34 +1,34 @@
 // ---------------------------------------------------------------------------
-// The `ramme/result` subpath (DESIGN.md §4.13, D38).
+// The `ramme/result` subpath (DESIGN.md §4.13, D38, D42).
 //
-// A failure a caller is meant to branch on is a return value, a `Result`; a
-// throw is a defect, translated at task boundaries (DESIGN.md §4.12). This
-// module is free functions over plain `Result` objects: no class, no methods,
-// no symbol-keyed members, so a hand-rolled `{ status, value | error }` object
-// of the same shape works with every one of them (D38).
-//
-// `gen` and `$` are the `?` operator: `yield* $(r)` evaluates to the success
-// value, or ends `gen`'s run with the failure as its result, as data, never as
-// an exception. `gen` infers the error union from the yields.
+// `Result` is the interchange type of expected failures: plain data a function
+// returns, a library hands over, or JSON carries. Inside a body an expected
+// failure is yielded instead (`yield* fail(e)`, D42), and `$` is the bridge
+// between the two: `yield* $(r)` is a `Result`'s success value, or ends the
+// body with its failure, which joins the task's `E`. This module is free
+// functions over plain `Result` objects: no class, no methods, no symbol-keyed
+// members, so a hand-rolled `{ status, value | error }` object of the same
+// shape works with every one of them (D38).
 //
 // A leaf: it imports only types from context.ts, never the core at runtime
-// (DESIGN.md §7). Every function over a `Result` takes the whole `Result` as
-// one type parameter and reads the value and error types off it (`SuccessOf`,
-// `ErrorOf`), as `gen` does. A `Result<T, E>` parameter would take one
-// inference candidate for `E`, so it would refuse `Failure<A> | Failure<B> |
-// Success<T>`, the inferred return type of an unannotated fallible function.
+// (DESIGN.md §7), so `$` makes the `Fail` record itself, under the registered
+// symbol the driver tests (managed.ts `FAIL`). Every function over a `Result`
+// takes the whole `Result` as one type parameter and reads the value and error
+// types off it (`SuccessOf`, `ErrorOf`). A `Result<T, E>` parameter would take
+// one inference candidate for `E`, so it would refuse `Failure<A> | Failure<B>
+// | Success<T>`, the inferred return type of an unannotated fallible function.
 // A `Success`-only argument has error `never`, and a `Failure`-only one value
 // `never`, never `unknown`, so one `yield* $(success(1))` does not widen a
-// `gen`'s error union (D38).
+// body's error union (D38).
 //
-// `SuccessOf`, `ErrorOf`, `Unwrap` and `Fenced` are deliberately unexported,
+// `SuccessOf`, `ErrorOf`, `Fails` and `Fenced` are deliberately unexported,
 // and never tagged internal: the published signatures name them, so
 // stripInternal must keep them in dist/result.d.ts. stripInternal drops a declaration whose
 // leading comment holds the tag in any comment form, so this header must not
 // spell it either: it leads the import below.
 // ---------------------------------------------------------------------------
 
-import type { Failure, Result, Success } from './context.js';
+import type { Fail, Failure, Result, Success } from './context.js';
 
 /** The value type of a `Result`'s success members; `never` for a `Failure`. */
 type SuccessOf<R> = R extends Success<infer T> ? T : never;
@@ -36,14 +36,14 @@ type SuccessOf<R> = R extends Success<infer T> ? T : never;
 /** The error type of a `Result`'s failure members; `never` for a `Success`. */
 type ErrorOf<R> = R extends Failure<infer E> ? E : never;
 
+/** `Fail<e>` for each error `e` (D42); `never` for none, so `$` over a `Success` yields nothing a body's `E` reads. */
+type Fails<E> = E extends unknown ? Fail<E> : never;
+
 /**
- * What `yield* $(x)` delegates to (DESIGN.md §4.13). Its iterator is typed as the global `AsyncIterator`, not
- * `AsyncIterable`, `AsyncIterableIterator` or `AsyncGenerator`: TypeScript types a `yield*` over those as
- * `Awaited<T>`, while the runtime evaluates to `T` itself (a promise or a fiber included).
+ * The run-time brand of a yielded `Fail` (D42): the registered symbol the core's driver tests, made here, since this
+ * module imports nothing at run time (DESIGN.md §7).
  */
-interface Unwrap<T, E> {
-  [Symbol.asyncIterator](): AsyncIterator<Failure<E>, T, unknown>;
-}
+const FAIL: unique symbol = Symbol.for('ramme.fail');
 
 /**
  * What `fromThrowing(f)` gives for a function whose return type is `T` and not a promise type (D38): the
@@ -56,8 +56,6 @@ type Fenced<T> = 0 extends 1 & T
   : [Extract<T, PromiseLike<unknown>>] extends [never]
     ? Result<T, unknown>
     : Result<Exclude<T, PromiseLike<unknown>>, unknown> | Promise<Result<Awaited<Extract<T, PromiseLike<unknown>>>, unknown>>;
-
-function noop(): void {}
 
 /**
  * `x != null && typeof x.then === 'function'`. A `then` that cannot be read is not a thenable: a fiber's getter
@@ -148,10 +146,10 @@ export function unwrapOr<R extends Result<unknown, unknown>, U>(r: R, fallback: 
  * promise itself gives a promise of the `Result`, which never rejects; a function whose return type may or may
  * not be a promise gives either, as its value turns out (`Fenced`). A returned fiber is a value: its `then` getter
  * throws (DESIGN.md §4.5), so it is not chained, and `fromThrowing(() => pool.fork(job))` is the fiber, or the
- * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps `aborted`: over an
- * op this runs it through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts, and reports its
- * child's abort as `failure(FiberAbortedError)` (DESIGN.md §4.13). The promise forms await at once, when
- * `fromThrowing` is called.
+ * intake's `PoolFullError` or `PoolClosedError`. Over ramme work use `attempt`, which keeps the four statuses: over
+ * an op this runs it through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts, and reports its
+ * child's expected failure, its defect and its abort alike, as `failure(error)` (`FiberAbortedError` for the abort;
+ * DESIGN.md §4.13). The promise forms await at once, when `fromThrowing` is called.
  */
 export function fromThrowing<T>(f: () => PromiseLike<T>): Promise<Result<Awaited<T>, unknown>>;
 export function fromThrowing<T>(f: () => T): Fenced<T>;
@@ -191,73 +189,25 @@ export function collect<R extends Result<unknown, unknown>>(rs: readonly R[]): R
 }
 
 /**
- * The `?` operator's step: inside a `gen` body, `yield* $(x)` evaluates to the success value of `x` (a `Result`
- * or a promise of one), or yields its failure, which ends the run with that failure as `gen`'s result
- * (DESIGN.md §4.13, D38).
+ * Unwrap a `Result` you hold, inside a body (DESIGN.md §4.13, D42): `yield* $(r)` evaluates to the success value, or
+ * yields `r`'s error as a `Fail`, which ends the body at once with the expected failure `failure(r.error)`, as
+ * `yield* fail(r.error)` does: no `catch` sees it, and its `finally` blocks run. So a `Result` that a function returned
+ * or a library handed over joins the body's task's `E`.
  *
- * A hand-written async iterator, not an `async function*`, whose `return` would await the value: a thenable
- * success value would be unwrapped, and a fiber's `then` throws (DESIGN.md §4.5). Its first `next()` awaits `x`
- * once, always, so a promise is handled and a settled `Result` costs one microtask; over an op that runs it
- * through its `then` (DESIGN.md §4.14), a promise awaiter that nothing halts. Then it resolves
- * `{ done: true, value }` for a success, without awaiting the value, or `{ done: false, value: failure }` for a
- * failure. A later `next()` never settles; `return()`
- * resolves `{ done: true, value: undefined }`.
- *
- * Typed by the argument as a whole, awaited: `$(charge(n))` over an unannotated function's
- * `Promise<Failure<A> | Failure<B> | Success<T>>`, and `$(c ? getUser(id) : getAdmin(id))` over a union of
- * promises, evaluate to the union of the values and yield the union of the errors.
+ * A generator helper: the success value is returned as it is, never awaited (a promise or a fiber included). It takes
+ * a `Result`, not a promise of one: wait for that first, `yield* $(yield* wait(p))`; anything that is no `Result` is a
+ * `TypeError` at the `yield*`. Typed by the argument as a whole: `$(charge(n))` over an unannotated function's
+ * `Failure<A> | Failure<B> | Success<T>` evaluates to `T` and adds both errors to the body's union, and a `Success`
+ * adds none.
  */
-export function $<X extends Result<unknown, unknown> | PromiseLike<Result<unknown, unknown>>>(
-  x: X,
-): Unwrap<SuccessOf<Awaited<X>>, ErrorOf<Awaited<X>>> {
-  let started = false;
-  const step: Unwrap<unknown, unknown> & AsyncIterator<Failure<unknown>, unknown, unknown> = {
-    [Symbol.asyncIterator]: () => step, // itself
-    next: (): Promise<IteratorResult<Failure<unknown>, unknown>> => {
-      if (started) return new Promise(noop); // the run already ended on the failure this step yielded
-      started = true;
-      return unwrapStep(x);
-    },
-    return: async (): Promise<IteratorResult<Failure<unknown>, unknown>> => ({ done: true, value: undefined }),
-  };
-  return step as Unwrap<SuccessOf<Awaited<X>>, ErrorOf<Awaited<X>>>;
-}
-
-/** `$`'s first `next()`: one `await` of the source, then the success value as the delegation's return value, unawaited. */
-async function unwrapStep(
-  x: Result<unknown, unknown> | PromiseLike<Result<unknown, unknown>>,
-): Promise<IteratorResult<Failure<unknown>, unknown>> {
-  const r = await x;
-  return r.status === 'success' ? { done: true, value: r.value } : { done: false, value: r };
-}
-
-/**
- * Drive a `gen` body: `yield* $(…)` per fallible step, and a `Result` returned (DESIGN.md §4.13, D38). A yielded
- * failure ends the run and is the result; otherwise the body's return value is. The error type is the union of
- * the errors of the yielded and the returned failures.
- *
- * An async function, plain async code: its promise rejects with whatever the body throws (a defect), so await
- * or return `gen(…)` at once. A dropped `gen(…)` whose body throws is an unhandled rejection, and a failure a
- * `call` inside `$` threw is consumed by that await, so the node does not surface it (DESIGN.md §4.13). Its body
- * has no current node after its first `await` (DESIGN.md §6), so a `$(call(t))` after one throws
- * `NoCurrentNodeError`; from a body, `yield* wait(gen(…))` makes its ops before the first `await`, or use
- * `attempt`. Stage 3 of D41 retires `gen`. On a yielded failure the generator is
- * left suspended, never resumed: `gen` does not call its `return()`, which would run the body's `finally`
- * blocks, which are not where a body's cleanup belongs (A7: what must hold after the body ends is an entry).
- * `gen(thisArg, body)` runs the body with `this` bound, for a generator in a method.
- */
-export function gen<Y extends Failure<unknown>, R extends Result<unknown, unknown>>(
-  body: () => AsyncGenerator<Y, R, unknown>,
-): Promise<Result<SuccessOf<R>, ErrorOf<Y> | ErrorOf<R>>>;
-export function gen<This, Y extends Failure<unknown>, R extends Result<unknown, unknown>>(
-  thisArg: This,
-  body: (this: This) => AsyncGenerator<Y, R, unknown>,
-): Promise<Result<SuccessOf<R>, ErrorOf<Y> | ErrorOf<R>>>;
-export async function gen(...args: unknown[]): Promise<Result<unknown, unknown>> {
-  const [thisArg, body] = args.length >= 2 ? args : [undefined, args[0]];
-  const it = (body as (this: unknown) => AsyncGenerator<Failure<unknown>, Result<unknown, unknown>, unknown>).call(thisArg);
-  // Every yield is a failure, and the first ends the run; so does the return. The generator runs in the
-  // caller's frame up to its first await, so the ops it makes there read the caller's node (DESIGN.md §6).
-  const step = await it.next();
-  return step.value;
+export function* $<R extends Result<unknown, unknown>>(r: R): Generator<Fails<ErrorOf<R>>, SuccessOf<R>, unknown> {
+  const x = r as Result<unknown, unknown> | null | undefined;
+  if (typeof x !== 'object' || x === null || (x.status !== 'success' && x.status !== 'failure'))
+    throw new TypeError(
+      '$(r): r must be a Result ({ status: "success", value } or { status: "failure", error }); ' +
+        'wait for a promise of one first: yield* $(yield* wait(p))',
+    );
+  if (x.status === 'success') return x.value as SuccessOf<R>;
+  yield { [FAIL]: x.error } as unknown as Fails<ErrorOf<R>>; // the driver ends the body here, and never resumes it
+  throw new TypeError('ramme/result: $ was resumed after its failure ended the body');
 }

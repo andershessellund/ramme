@@ -74,7 +74,7 @@ async function halt(body: () => Generator<Instruction, unknown, unknown>, opts: 
   await tick();
   f.abort(new Error('hang up'));
   const o = await within(root.result(f), 2000);
-  return o.status === 'failure' ? `failure: ${(o.error as Error).message}` : o.status;
+  return o.status === 'defect' ? `defect: ${(o.error as Error).message}` : o.status;
 }
 
 const failing = (name: string, ms = 1) =>
@@ -110,7 +110,7 @@ describe('U3: the halted finally, against the review probes', () => {
         }
       }),
     ];
-    expect(outcomes).toEqual(['aborted', 'failure: cleanup threw']);
+    expect(outcomes).toEqual(['aborted', 'defect: cleanup threw']);
   });
 
   it('p7: release(x) and releaseAll() in the halted finally address the node, so they find its entries and run now', async () => {
@@ -180,8 +180,8 @@ describe('U3: the halted finally, against the review probes', () => {
       }),
     ];
     expect({ outcomes, seen }).toEqual({
-      outcomes: ['failure: rollback failed', 'failure: rollback failed', 'failure: rollback failed', 'failure: audit failed'],
-      seen: 'failure',
+      outcomes: ['defect: rollback failed', 'defect: rollback failed', 'defect: rollback failed', 'defect: audit failed'],
+      seen: 'defect',
     });
   });
 
@@ -241,7 +241,7 @@ describe('U3: the halted finally, against the review probes', () => {
     }
     expect(logs).toEqual({
       ok: { o: 'aborted', log: ['BEGIN done', 'ROLLBACK done', 'entry released'] },
-      fails: { o: 'failure: rollback failed', log: ['BEGIN done', 'ROLLBACK done', 'caught', 'entry released'] },
+      fails: { o: 'defect: rollback failed', log: ['BEGIN done', 'ROLLBACK done', 'caught', 'entry released'] },
     });
   });
 
@@ -268,7 +268,7 @@ describe('U3: the halted finally, against the review probes', () => {
       { releaseTimeoutMs: 20 },
     );
     expect({ o, handedIsBody: handed === body, bodyAborted: body?.aborted, abortedWhenHanded, abortedAtEnd: handed?.aborted }).toEqual({
-      o: 'failure: The operation was aborted due to timeout',
+      o: 'defect: The operation was aborted due to timeout',
       handedIsBody: false,
       bodyAborted: true,
       abortedWhenHanded: false,
@@ -297,7 +297,7 @@ describe('U3: the halted finally, against the review probes', () => {
         }
       }),
     ];
-    expect(outcomes).toEqual(['failure: 2 of 2 tasks failed', 'failure: Errors during release']);
+    expect(outcomes).toEqual(['defect: 2 of 2 tasks failed', 'defect: Errors during release']);
   });
 
   it('a shield made in the halted finally runs on the node, not on the unwind fiber: its owner was interrupted, so a hole in it is skipped at once, as in PR #4’s cleanup path', async () => {
@@ -632,19 +632,19 @@ describe('the driver: returned ops, handlers, refusals', () => {
     const fiber = await root.attempt(function* () {
       return current().fork(function* () {}) as unknown as Fiber<void>;
     });
-    names.returnsFiber = fiber.status === 'failure' && fiber.error instanceof FiberNotAwaitableError ? 'FiberNotAwaitableError' : fiber.status;
+    names.returnsFiber = fiber.status === 'defect' && fiber.error instanceof FiberNotAwaitableError ? 'FiberNotAwaitableError' : fiber.status;
     const asyncGen = await root.attempt(task(async function* () {} as unknown as () => Generator<Instruction, void, unknown>));
     names.asyncGenerator =
-      asyncGen.status === 'failure' && asyncGen.error instanceof TypeError && /async generator/.test(asyncGen.error.message) ? 'TypeError' : asyncGen.status;
+      asyncGen.status === 'defect' && asyncGen.error instanceof TypeError && /async generator/.test(asyncGen.error.message) ? 'TypeError' : asyncGen.status;
     const notAPromise = await root.attempt(function* () {
       yield* wait(42 as unknown as Promise<number>);
     });
-    names.waitOfANumber = notAPromise.status === 'failure' && notAPromise.error instanceof TypeError ? 'TypeError' : notAPromise.status;
+    names.waitOfANumber = notAPromise.status === 'defect' && notAPromise.error instanceof TypeError ? 'TypeError' : notAPromise.status;
     const aFiber = await root.attempt(function* () {
       const f = fork(function* () {});
       yield* wait(f as unknown as Promise<void>); // never probes the fiber's `then` trap
     });
-    names.waitOfAFiber = aFiber.status === 'failure' ? (aFiber.error as Error).name : aFiber.status;
+    names.waitOfAFiber = aFiber.status === 'defect' ? (aFiber.error as Error).name : aFiber.status;
     try {
       root.run(function* () {} as unknown as () => void);
       names.runGenerator = 'nothing thrown';
@@ -684,9 +684,9 @@ describe('the driver: returned ops, handlers, refusals', () => {
     );
     expect({
       status: o.status,
-      error: o.status === 'failure' && o.error instanceof TypeError && /async generator/.test(o.error.message) && /function\*/.test(o.error.message),
+      error: o.status === 'defect' && o.error instanceof TypeError && /async generator/.test(o.error.message) && /function\*/.test(o.error.message),
       ran,
-    }).toEqual({ status: 'failure', error: true, ran: [] });
+    }).toEqual({ status: 'defect', error: true, ran: [] });
   });
 
   it('promised: a call after the captured node completed rejects with NodeCompletedError; ctx.wait at top level is a bare wait', async () => {
@@ -782,14 +782,14 @@ describe('the fixes of the PR 1 review', () => {
     );
     expect({ outcomes, self: await Promise.all(self), log, warned: rammeWarnings().map((w) => /waits for its own/.test(w)) }).toEqual({
       outcomes: {
-        'db.close(), wait': 'failure: db release failed',
-        'release(tx), wait': 'failure: rollback failed',
-        'db.close(), wait, caught': 'failure: db release failed',
-        'release(tx), wait, caught': 'failure: rollback failed',
-        'db.close(), abandon': 'failure: db release failed',
-        'release(tx), abandon': 'failure: rollback failed',
-        'db.close(), abandon, caught': 'failure: db release failed',
-        'release(tx), abandon, caught': 'failure: rollback failed',
+        'db.close(), wait': 'defect: db release failed',
+        'release(tx), wait': 'defect: rollback failed',
+        'db.close(), wait, caught': 'defect: db release failed',
+        'release(tx), wait, caught': 'defect: rollback failed',
+        'db.close(), abandon': 'defect: db release failed',
+        'release(tx), abandon': 'defect: rollback failed',
+        'db.close(), abandon, caught': 'defect: db release failed',
+        'release(tx), abandon, caught': 'defect: rollback failed',
       },
       self: ['aborted', 'aborted'],
       log: [],
@@ -842,7 +842,7 @@ describe('the fixes of the PR 1 review', () => {
         yield* wait(lib.transaction(cb));
       }
     });
-    expect(o).toMatch(/^failure: .* was aborted$/);
+    expect(o).toMatch(/^defect: .* was aborted$/);
   });
 
   it('promised leaves a halted callback’s failure unconsumed while its node is halted: a failed ROLLBACK in the callback’s finally, rethrown by the library into the node’s halted wait(p), is still the node’s failure, as under yield* call(body)', async () => {
@@ -872,8 +872,8 @@ describe('the fixes of the PR 1 review', () => {
       yield* call(body, 'tx');
     });
     expect({ viaPromised, viaCall }).toEqual({
-      viaPromised: 'failure: ROLLBACK failed: connection reset',
-      viaCall: 'failure: ROLLBACK failed: connection reset',
+      viaPromised: 'defect: ROLLBACK failed: connection reset',
+      viaCall: 'defect: ROLLBACK failed: connection reset',
     });
   });
 
@@ -1015,7 +1015,7 @@ describe('the fixes of the stage 2 review', () => {
         'Promise.all': 'aborted',
         'async helper': 'aborted',
         'yield* all': 'aborted',
-        'a failing cleanup': 'failure: f failed', // once: the then consumed it, and the wait(p) recorded it
+        'a failing cleanup': 'defect: f failed', // once: the then consumed it, and the wait(p) recorded it
         'wait(fn) through then': 'aborted',
       },
       log: ['a cleaned', 'b cleaned', 'c cleaned', 'd cleaned', 'e cleaned', 'g cleaned'],
@@ -1035,7 +1035,7 @@ describe('the fixes of the stage 2 review', () => {
       f.abort(new Error('hang up'));
       const o = await within(root.result(f));
       await within(root.close());
-      return { outcome: o.status === 'failure' ? `failure: ${(o.error as Error).message}` : o.status, handled, log };
+      return { outcome: o.status === 'defect' ? `defect: ${(o.error as Error).message}` : o.status, handled, log };
     };
     const child = task(
       function* () {
@@ -1103,11 +1103,11 @@ describe('the fixes of the stage 2 review', () => {
       }),
     };
     expect(cases).toEqual({
-      call: { outcome: 'failure: rollback failed', handled: ['rollback failed'], log: [] },
-      release: { outcome: 'failure: rollback failed', handled: ['rollback failed'], log: [] },
-      shield: { outcome: 'failure: rollback failed', handled: ['rollback failed'], log: [] },
-      'yield* all': { outcome: 'failure: rollback failed', handled: ['rollback failed'], log: [] },
-      'a fork’s then of its live parent’s release(x)': { outcome: 'failure: rollback failed', handled: ['rollback failed'], log: [] },
+      call: { outcome: 'defect: rollback failed', handled: ['rollback failed'], log: [] },
+      release: { outcome: 'defect: rollback failed', handled: ['rollback failed'], log: [] },
+      shield: { outcome: 'defect: rollback failed', handled: ['rollback failed'], log: [] },
+      'yield* all': { outcome: 'defect: rollback failed', handled: ['rollback failed'], log: [] },
+      'a fork’s then of its live parent’s release(x)': { outcome: 'defect: rollback failed', handled: ['rollback failed'], log: [] },
       'a shield’s then of its halted body’s release(x)': { outcome: 'aborted', handled: [], log: ['shield handled: rollback failed'] },
     });
   });
@@ -1280,7 +1280,7 @@ describe('the fixes of the stage 2 review', () => {
     );
     expect({
       caught,
-      uncaught: uncaught.status === 'failure' ? (uncaught.error as Error).message : uncaught.status,
+      uncaught: uncaught.status === 'defect' ? (uncaught.error as Error).message : uncaught.status,
       haltedOutcome,
       log,
       inHaltedFinally,
@@ -1290,7 +1290,7 @@ describe('the fixes of the stage 2 review', () => {
       uncaught: 'hostile then',
       haltedOutcome: 'aborted',
       log: ['finally'],
-      inHaltedFinally: 'failure: hostile then',
+      inHaltedFinally: 'defect: hostile then',
       handlerClose: 'rejected: hostile then', // a handler's failure is collected with its parent's release failures (§4.7)
     });
   });
@@ -1334,7 +1334,7 @@ describe('the fixes of the stage 2 review', () => {
         ),
       );
     const types = ev.typesOf(outerId);
-    expect({ outer: outer.status === 'failure' ? outer.error : outer.status, later, last: types[types.length - 1] }).toEqual({
+    expect({ outer: outer.status === 'defect' ? outer.error : outer.status, later, last: types[types.length - 1] }).toEqual({
       outer: boom, // surfaced once, from the receiver's completion (I11)
       later: { join: 'NodeCompletedError', result: 'NodeCompletedError', call: 'NodeCompletedError' },
       last: 'node:complete',

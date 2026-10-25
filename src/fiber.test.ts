@@ -249,7 +249,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
         throw err;
       });
       yield* wait(tick());
-      expect(f.outcome).toEqual({ status: 'failure', error: err }); // held, nothing thrown yet
+      expect(f.outcome).toEqual({ status: 'defect', error: err }); // held, nothing thrown yet
       expect(yield* wait(rejection(join(f)))).toBe(err);
     });
     // Not joined: the call fiber's own completion surfaces it, once.
@@ -374,7 +374,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
       const err = await rejection(closing);
       expect(err).toBeInstanceOf(AggregateError);
       expect((err as Error).cause).toBe(handlerError);
-      expect(p.outcome).toEqual({ status: 'failure', error: err });
+      expect(p.outcome).toEqual({ status: 'defect', error: err }); // a handler exception amends the pool's outcome: a defect
     });
 
     it("a generator handler is never halted by the parent's delivery: interrupted() there resumes with the parent's abort reason, and the parent completes", async () => {
@@ -486,7 +486,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
       const fail = function* () {
         throw new Error('fatal');
       };
-      type Handler = (error: unknown, fiber: Fiber<unknown>) => void; // a task's and a pool's onFailure
+      type Handler = (error: unknown, fiber: Fiber<unknown, unknown>) => void; // a task's and a pool's onFailure
       const closers: [string, (app: Context) => Handler][] = [
         ['() => app.close()', (app) => () => app.close()],
         ['function* () { yield* app.close() }', (app) => function* () {
@@ -566,7 +566,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
             }, link),
           );
           await within(impl(Y).completion);
-          expect(Y.outcome?.status).not.toBe('failure');
+          expect(['failure', 'defect']).not.toContain(Y.outcome?.status);
           await within(root.close());
         });
     });
@@ -665,7 +665,7 @@ describe('join and result (DESIGN.md §4.5, §4.7)', () => {
     expect(shutdown.outcome).toEqual({ status: 'success', value: 'drained' });
   });
 
-  it('result never rejects: success, failure and aborted are values, and a failure it delivers is consumed', async () => {
+  it('result never rejects: success, a defect and aborted are values, and a defect it delivers is consumed', async () => {
     const err = new Error('r');
     const root = createRootContext();
     await root.call(function* () {
@@ -681,7 +681,7 @@ describe('join and result (DESIGN.md §4.5, §4.7)', () => {
       const outcomes: Outcome<unknown>[] = [yield* result(ok), yield* result(bad), yield* result(gone)];
       expect(outcomes).toEqual([
         { status: 'success', value: 'v' },
-        { status: 'failure', error: err },
+        { status: 'defect', error: err },
         { status: 'aborted', reason: 'reason' },
       ]);
     });
@@ -710,9 +710,9 @@ describe('join and result (DESIGN.md §4.5, §4.7)', () => {
       const asyncF = fork(function* () { return fork(inner); });
       const callErr = yield* wait(rejection(call(() => fork(inner))));
       const [o1, o2] = [yield* result(syncF), yield* result(asyncF)];
-      expect(o1.status).toBe('failure');
+      expect(o1.status).toBe('defect');
       expect((o1 as { error: unknown }).error).toBeInstanceOf(FiberNotAwaitableError);
-      expect(o2.status).toBe('failure');
+      expect(o2.status).toBe('defect');
       expect((o2 as { error: unknown }).error).toBeInstanceOf(FiberNotAwaitableError);
       expect(callErr).toBeInstanceOf(FiberNotAwaitableError);
     });
@@ -1667,7 +1667,7 @@ describe('ported: join, result, all', () => {
     await ctx.close();
   });
 
-  it('result returns a failure outcome without throwing', async () => {
+  it('result returns a defect outcome without throwing', async () => {
     const ctx = createRootContext();
     const o = await ctx.call(
       function* () { return yield* result(
@@ -1676,7 +1676,7 @@ describe('ported: join, result, all', () => {
           }),
         ); },
     );
-    expect(o.status).toBe('failure');
+    expect(o.status).toBe('defect');
     expect((o as { error: Error }).error).toBeInstanceOf(Error);
     expect((o as { error: Error }).error.message).toBe('result-boom');
     await ctx.close();

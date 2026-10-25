@@ -479,7 +479,7 @@ describe('stage 2: the thenable (decisions 4, 16)', () => {
       slowIsChildOfHost: slowNode?.parent !== undefined && slowNode.parent === slowHost,
       rejection: rejection instanceof Error ? rejection.name : rejection,
       rejectionReason: named((rejection as { reason?: unknown }).reason),
-      outcomes: outcomes.map((o) => (o.status === 'failure' ? `failure: ${String(named(o.error))}` : o.status)),
+      outcomes: outcomes.map((o) => (o.status === 'defect' ? `defect: ${String(named(o.error))}` : o.status)),
     }).toEqual({
       ranBeforeThen: [],
       value: 'w',
@@ -528,13 +528,13 @@ describe('stage 2: async bodies are refused (decision 5)', () => {
         }
         try {
           const o = yield* attempt(asyncBody);
-          seen.attempt = o.status === 'failure' ? refusal(o.error) : o.status;
+          seen.attempt = o.status === 'defect' ? refusal(o.error) : o.status;
         } catch (e) {
           seen.attempt = refusal(e);
         }
         try {
           const o = yield* result(fork(asyncBody));
-          seen.fork = o.status === 'failure' ? refusal(o.error) : o.status;
+          seen.fork = o.status === 'defect' ? refusal(o.error) : o.status;
         } catch (e) {
           seen.fork = refusal(e);
         }
@@ -546,14 +546,14 @@ describe('stage 2: async bodies are refused (decision 5)', () => {
         seen.unshield = yield* shield(function* () {
           try {
             const o = yield* unshield(asyncBody);
-            return o.status === 'failure' ? refusal(o.error) : o.status;
+            return o.status === 'defect' ? refusal(o.error) : o.status;
           } catch (e) {
             return refusal(e);
           }
         });
         try {
           const [o] = yield* settle([task(asyncBody)]);
-          seen['settle member'] = o.status === 'failure' ? refusal(o.error) : o.status;
+          seen['settle member'] = o.status === 'defect' ? refusal(o.error) : o.status;
         } catch (e) {
           seen['settle member'] = refusal(e);
         }

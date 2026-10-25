@@ -1396,9 +1396,10 @@ library call an adapter and every `await` a `yield*`.
 
 *Provisional: this entry records a decision that lands in stages, and is
 completed when the last stage lands, when D40 becomes its rejected
-alternative and D9′, D13 and D39 are superseded. Stages 1 and 2 have landed:
+alternative and D9′, D13 and D39 are superseded. Stages 1 to 3 have landed:
 the driver and ops, then the removal of async bodies, the async context, the
-bridge machinery and lending. The full record (the alternatives, the costs,
+bridge machinery and lending, then expected failures as a yielded, typed
+channel (D42). The full record (the alternatives, the costs,
 the probes and the review) is PROPOSAL.md at the repository root while the
 stages land; the last stage deletes it and completes this entry.*
 
@@ -1435,14 +1436,15 @@ after `t` has stopped) and D40's interop through one generic wrapper,
    (DESIGN.md §4.14). Each step runs in the node's frame through today's
    `runInFrame`, so a generator body still needs `ramme/node` or
    `ramme/async-context`, as an async one does.
-2. *Removal* (landed, this release): async bodies refused; `ramme/node`,
+2. *Removal* (landed): async bodies refused; `ramme/node`,
    `ramme/async-context`, the storage registry, sticky rejection,
    `InterruptedError`, `managed` and lending deleted; work ops lazy,
    construction reading the slot; the halt rows in the driver; a codemod
    (scripts/codemod-generator-bodies.mjs); the four async-only lint rules
    deleted, `no-async-body` and `no-unused-op` added.
-3. *Expected failures*: `yield* fail(e)`, `E` inferred on tasks, a four-way
-   `Outcome`; `gen` retired.
+3. *Expected failures* (landed, D42): `yield* fail(e)`, `E` inferred on
+   tasks, a four-way `Outcome`; `gen` retired, `$` a generator helper over a
+   held `Result`.
 4. *`ramme/platform`*: `fetch`, `listen`, `nextFrame`, `each`; a browser
    smoke test.
 5. *Documents and benchmark*: DESIGN.md and DECISIONS.md rewritten around
@@ -1598,6 +1600,164 @@ after `t` has stopped) and D40's interop through one generic wrapper,
 - *`Body`'s guard refuses an `async function*` in the types*, as PROPOSAL.md
   §6's `Plain<T>` does: its last member is `never` for an async iterator as
   well as for a thenable.
+### D42. An expected failure is yielded: `fail`, `E` on tasks, a four-way `Outcome`
+
+An expected failure, one a caller is meant to branch on, is a fourth way for
+a body to end, beside `return v`, `throw e` and the halt: `yield* fail(e)`
+ends the body at once with the outcome `failure(e)`. The failure is yielded,
+as a `Fail<E>` under a brand disjoint from `Instruction`'s, so it enters the
+generator's yield union, and `task` reads `E` off that union: `Task<A, T,
+E>`, `Fiber<T, E>` and `Outcome<T, E>` carry it, inferred, never declared,
+`never` for a body with no `fail`. Propagation is `yield*`: `yield* call(t)`,
+a helper's `yield*`, `join`, `shield` and `wait(op)` re-yield a callee's
+expected failure into the caller's union; `all` and `race` fail on it as on
+a defect and re-yield the union of their members'; `attempt`, `result`,
+`unshield` and `settle` return `Outcome<T, E>`, four-way: `success(T) |
+failure(E) | defect(unknown) | aborted`. A thrown error is a `defect`. `gen`
+is retired, since a body is the scope; `$` stays in `ramme/result` as the
+bridge from a `Result` you hold (`yield* $(r)` is the value, or ends the
+body with `failure(r.error)`), `fromThrowing` as the fence, and the
+data-only `Result` as the interchange type, `Outcome` minus `defect` and
+`aborted`. This is PROPOSAL.md's decision 15, option (b′), decided.
+
+**Why.** Under D38 a failure a caller branches on was a returned `Result`,
+typed at its function and untyped at the task boundary, where `gen` and `$`
+supplied `?` inside an async generator that never called `return()` (A7),
+and a task's failure stayed `unknown`. A generator body is already the scope
+`gen` was: what a body yields the driver sees, so a yielded failure can end
+the body without unwinding as an exception through every `catch`, and its
+type can be read off the yield union as D38 reads a `Result`'s members,
+with nothing declared. That is Effect's typed `E` without `R` (DI is ambient)
+or the wrapper (a body is a plain generator function), and Rust's `?` with
+inferred unions. The split DESIGN.md §4.12 stated in prose, an expected
+failure as data and a throw as a defect, becomes a status, so `attempt` on a
+body that failed as designed no longer reports what a crash reports.
+
+**An unjoined fork's expected failure is routed as a defect is** (D14,
+D23): held for a joiner, whose `join` re-yields it; handed to a handler,
+whose `error` parameter is `E | unknown`, which is `unknown`, and which reads
+what it got from `fiber.outcome.status`; to a pool's `onFailure` for a
+pooled fiber. With `'link'` it aborts the parent at once and surfaces from
+the parent's completion as the parent's **`defect`**, carrying `e`: a parent
+cannot be given a typed failure it did not declare. Its `E` is what its own
+body yields, and a linked child is never `yield*`ed, so a `failure(e)` on
+the parent would carry a type its signature does not have. The same holds
+for every failure that surfaces from a completion unconsumed (an unjoined
+`'join'` fork's, a `settle` member's that an interrupted caller never
+received): the holder reports it as its defect. A release failure likewise
+amends an outcome always to a `defect` (D24): `success`, bodiless or
+`aborted` plus release failures `R` → `defect(R)`; `failure(e)` or
+`defect(d)` plus release failures → `defect(SuppressedError(R, e or d))`,
+release-primary.
+
+**Rejected.** (a) `gen` as the explicit scope with the task boundary untyped
+(D38 as it stood): Effect's syntax without its main type benefit, and a
+second scope concept beside the body. (b) A body that may `yield* $(r)`,
+typed `Task<A, Result<T, E>>`: a `$` in a helper ends the whole task, so
+`gen` is still needed for a helper's own scope, and the value is wrapped.
+Also rejected: a declared or separately inferred `E` (`task<E>(…)`, or `E`
+read from `Generator<Instruction | Fail<E>, …>`), which takes one inference
+candidate and refuses a second failure type, D38's lesson, so the task reads
+the whole yield union; a `Fail` that is structurally an `Instruction`, which
+an ordinary op's instruction absorbs, so `E` would infer `never` in any body
+that also waits; `failure` as a linked child's failure on its parent
+(above); keeping `gen` beside `fail`.
+
+**Cost.** `Task`, `Fiber` and `Outcome` gain a parameter, visible in hovers
+and in written signatures; deep graphs accumulate unions, which a module
+boundary narrows with `mapFailure` over the outcome's error, and tagged error
+classes become the convention (TypeScript compares classes by structure, so
+an error class needs a distinguishing member to stay a member of a union, as
+under D38). `Outcome`'s shape change is breaking, cheapest now: every check of
+a thrown error as `failure` reads `defect`; and since `Fiber`'s `E` defaults
+to `never`, a failure handler annotated `(error: unknown, fiber:
+Fiber<unknown>)`, as a task's `onFailure` or a pool's, no longer compiles and
+is written `Fiber<unknown, unknown>`. `Fail` is one more exported type,
+which a library's generator helper needs for its declaration emit, as it
+needs `Instruction`. An op whose type carries no `E` cannot re-yield one, so
+a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
+`yield*`. DESIGN.md §4.5, §4.7, §4.8, §4.12, §4.13, §4.14.
+
+**Settled while implementing it.**
+
+- *The `finally` a fail runs is release work.* The driver returns the
+  generator as at a halt, with the halt's sentinel and an unwind fiber (U3):
+  its `finally` blocks may wait, a delivery does not halt them, and the
+  outcome is fixed at the fail, so a delivery while they run changes
+  nothing. What fails there (a failed wait, a second `fail`, a throw) is a
+  release failure, reported beside the fail: `defect(SuppressedError(release,
+  e))`. A halted `finally` discards a throw (D24) because an interruption may
+  have caused it; nothing interrupted a fail's, so its throw is reported, as
+  JavaScript reports a `finally`'s throw over the `return` it replaces. A
+  `fail` in a halted `finally` is a release failure, and the generator is
+  returned again there, which ends that `finally`. A delivered body not yet
+  halted (resumed by release work) is halted at its `fail`, the error
+  discarded as its throw would be. Dev mode's lost-halt report covers a lost
+  return after a fail, naming it.
+- *`all`, and `race` with no success, re-yield a lone expected failure, and
+  report two or more as a defect*, PROPOSAL.md having read "fail fast … as on
+  a defect" as D28's behaviour, which waits for every member and reports
+  every failure. One `Fail` can be yielded, so it is re-yielded only when it
+  is the one failure; with two failures or more, or a defect among them, the
+  `AggregateError` of every real failure, expected ones included, in task
+  order, is thrown, as D28 throws it for defects. Re-yielding the first and
+  consuming the others would drop them, which D28's *Why* rejects; a body
+  that branches on each member's typed failure uses `settle`.
+- *The run-time `Fail` is a record under a registered symbol*
+  (`Symbol.for('ramme.fail')`), not an instance of a private class:
+  `ramme/result` imports nothing at run time (DESIGN.md §7), so `$` makes the
+  record itself. The type's brand is declared only, as `Instruction`'s is.
+  Two copies of ramme read each other's `Fail`s, which is harmless.
+- *`Fail` is exported*, the core gaining two names (`fail`, `Fail`) where one
+  was preferred: a probe compiling a library's generator helper with
+  `declaration` emitted `import("…/node_modules/ramme/dist/context.js")
+  .Fail<NotFound>` for a private `Fail`, a path the package's `exports`
+  refuses, so it is public for the reason PROPOSAL.md §6 gives for
+  `Instruction`.
+- *The verbs read `E` off the yield union only*, as `FailedWith<Y>`, a
+  conditional type, with `Y` the whole yield union of the body's generator
+  or of the op it returns: a `task(…)` written inside the array `all` takes
+  would otherwise infer `E = unknown` from the array's contextual type,
+  `Task<[], unknown, unknown>`, and inference from a contextual return type
+  does not reach into a conditional type. Not `NoInfer`, which an earlier
+  draft used: over an object type it stays in the type, so each level of
+  propagation wrapped `E` once more (`NoInfer<C | NoInfer<B | NoInfer<A>>>`),
+  which is not `Equal` to `A | B | C`, defeats `Exclude` and `Extract`, and
+  shows in a library's emitted declarations. `join` and `result` default `E`
+  to `never`, so a written `join<number>(f)` is a fiber with no expected
+  failure.
+- *The distribution of `E` over `Fail`* (`Fails<E>`, in `Operation`'s
+  iterator) is a module-local type of context.ts, as `ramme/result`'s helper
+  types are: a library's unannotated helper generic over `E` (`function*
+  orFail<T, E>(x: T | undefined, e: E)`) emits it inline, where a name from a
+  module the package's `exports` do not expose fails the emit (TS2883).
+  `check:surface` compiles such a library outside the package.
+- *`Fiber`'s `E` defaults to `never`*, as `Task`'s does, so `t.fork()` is
+  `Fiber<T, E>` with the task's `E` and `Fiber<T>` is the fiber of a
+  `Task<A, T>`; a failure handler is handed `Fiber<unknown, unknown>`.
+  `Outcome`'s defaults to `unknown`, the outcome of any node.
+- *A release takes any `E`*: `Release<T>` may return `Operation<void,
+  unknown>`, since a release's expected failure, its own or a callee's
+  re-yielded, is its owner's release failure, a defect there.
+- *`$` takes a `Result`, not a promise of one*: a generator helper over a
+  value; a promise is waited for first, `yield* $(yield* wait(p))`, and
+  anything that is no `Result` is a `TypeError` at the `yield*`.
+- *A failure handler's generator that fails* (its own `fail`, or a callee's
+  re-yielded) is returned, its `finally` blocks run as the rest of the
+  handler, and the handler rejects with the error, a handler exception.
+  What fails in those blocks, a second `fail` (a callee's re-yielded one
+  included, which the handler's `yield*` has consumed) or a throw, is
+  reported beside it, as a body's release work is: the handler rejects with
+  `SuppressedError(later, e)`, so neither error is lost.
+- *`fail` reads no node*: it only makes the record, so it may be made
+  anywhere, a module-level `const notFound = fail(e)` included, and each
+  `yield*` yields afresh, as an op's description does (D41, decision 3).
+  What it returns is an instance of a private class, recognized as decision
+  28 recognizes an op, so a release, a failure handler or a body that
+  returns `fail(e)` rather than yielding it is driven as its `yield*`, and
+  fails as one that yields it: `own(v, () => fail(e))` is the owner's
+  release failure, never a dropped value.
+
 ### D34. `sleep(ms)`: ramme's timer is a managed await
 
 *Amended by D41 (stage 2): `sleep` is a lazy work op, its timer armed when it
@@ -1761,6 +1921,12 @@ differ. DESIGN.md §4.8.
 
 ### D31. Outcomes as values: `attempt` and `settle`
 
+*Amended by D42: the outcome is four-way, `success`, `failure` (an expected
+failure the child yielded, typed `E` on its task), `defect` (what it threw)
+and `aborted`, so `attempt` returns `Outcome<T, E>`, as `result` and each
+`settle` member do; `call` and `all` re-yield an expected failure rather than
+throw it. Below, a "failure" a caller branches on is either kind.*
+
 `attempt(t, …args)` (also `ctx.attempt`, `t.attempt`) is `call` with
 `result`'s resume step: the same child, started synchronously, the current
 node lent until it completes, and a managed await that rejects an
@@ -1838,6 +2004,16 @@ more names in tier 1; `attempt` emits `join:enter`/`join:leave`, which
 `call` does not. DESIGN.md §4.5, §4.8, §4.12.
 
 ### D38. `Result` is `Outcome` minus `aborted`; data only; `gen` and `$` are the `?` operator
+
+*Amended by D42: inside a body an expected failure is yielded, `yield* fail(e)`,
+typed `E` on the task, which reverses the "typed `E` on tasks" rejected
+below; `gen` is retired, since a body is the scope. `Result` stays, as the
+interchange type, `Outcome` minus `defect` and `aborted`; `$` stays as the
+bridge from a `Result` you hold, a generator helper whose `yield* $(r)` is
+the value or ends the body with `failure(r.error)`; the other helpers,
+their typing and `fromThrowing` are unchanged, and `ramme/result` has
+thirteen functions. What follows records the decision as it stood, with
+`gen`.*
 
 A failure a caller is meant to branch on is a return value, typed:
 `Result<T, E> = Success<T> | Failure<E>`, that is `{ readonly status:
@@ -2155,10 +2331,13 @@ threw, including when it caught its `InterruptedError` and returned
 normally (amended by D39: an interrupted body unwinds and settles, where
 under freeze it never did); an `observe` node's outcome is
 its body's result; a bodiless node is `success` on `close()` and `aborted`
-on `abort()`. The release phase amends it once: a body `failure` plus
-release failures becomes `SuppressedError(releaseError, bodyError)`; a
-`success`, bodiless or `aborted` outcome plus release failures becomes
-`failure`.
+on `abort()`. A body's throw is a `defect` and its yielded `fail(e)` a
+`failure`, fixed at the fail (amended by D42). The release phase amends the
+outcome once, always to a `defect`: a body `failure` or `defect` plus
+release failures becomes `defect(SuppressedError(releaseError, bodyError))`;
+a `success`, bodiless or `aborted` outcome plus release failures becomes
+`defect(releaseError)`, since a release failure is a thrown-class thing,
+never the task's typed `E`.
 
 **Why.** An error cannot tell whether its body was interrupted. A body
 stopped mid-`fetch` may surface the fetch's `AbortError`, a `TimeoutError`,

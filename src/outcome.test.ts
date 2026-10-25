@@ -122,7 +122,7 @@ describe('classification by state (DESIGN.md §4.12, I13)', () => {
 
 // ---------------------------------------------------------------------------
 describe('body and release errors (DESIGN.md §4.12)', () => {
-  it('body failure + release failure → SuppressedError(releaseError, bodyError)', async () => {
+  it('body defect + release failure → defect(SuppressedError(releaseError, bodyError))', async () => {
     const app = createRootContext();
     const releaseError = new Error('release');
     const bodyError = new Error('body');
@@ -144,7 +144,7 @@ describe('body and release errors (DESIGN.md §4.12)', () => {
     await app.close();
   });
 
-  it('body success + two release failures → failure with an AggregateError (release order)', async () => {
+  it('body success + two release failures → defect with an AggregateError (release order)', async () => {
     const app = createRootContext();
     const e1 = new Error('first owned');
     const e2 = new Error('second owned');
@@ -167,7 +167,7 @@ describe('body and release errors (DESIGN.md §4.12)', () => {
     await app.close();
   });
 
-  it('aborted body + release failure → failure', async () => {
+  it('aborted body + release failure → defect', async () => {
     const app = createRootContext();
     const releaseError = new Error('release');
     let B!: NodeImpl;
@@ -181,7 +181,7 @@ describe('body and release errors (DESIGN.md §4.12)', () => {
     await tick();
     B.abort();
     await expect(p).rejects.toBe(releaseError);
-    expect(B.outcome).toEqual({ status: 'failure', error: releaseError });
+    expect(B.outcome).toEqual({ status: 'defect', error: releaseError });
     await app.close();
   });
 });
@@ -201,7 +201,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
       return 'parent ok';
     }));
     await expect(p).rejects.toBe(err);
-    expect(P.outcome).toEqual({ status: 'failure', error: err });
+    expect(P.outcome).toEqual({ status: 'defect', error: err });
     await expect(app.close()).resolves.toBeUndefined(); // delivered to the caller of call: not again
   });
 
@@ -242,7 +242,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     expect(app.signal.aborted).toBe(true);
     expect(parentAbortedAtRelease).toBe(true);
     await expect(app.close()).rejects.toBe(err);
-    expect(app.outcome).toEqual({ status: 'failure', error: err });
+    expect(app.outcome).toEqual({ status: 'defect', error: err });
   });
 
   it("'link' interrupts a parent that is closing: its siblings are delivered and close() settles (DESIGN.md §4.7)", async () => {
@@ -301,7 +301,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     await tick();
     expect(O.state).toBe('releasing');
     gate.resolve();
-    await expect(app.result(O)).resolves.toEqual({ status: 'failure', error: err });
+    await expect(app.result(O)).resolves.toEqual({ status: 'defect', error: err });
     expect(siblingHeard).toBe(err);
     await expect(app.close()).rejects.toBe(err); // 'link': O's failure surfaces from its parent too
   });
@@ -332,7 +332,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     await tick();
     expect(S.state).toBe('releasing'); // the body returned; S waits for both children
     gate.resolve();
-    await expect(app.result(S)).resolves.toEqual({ status: 'failure', error: err });
+    await expect(app.result(S)).resolves.toEqual({ status: 'defect', error: err });
     expect(worker.outcome).toEqual({ status: 'aborted', reason: err }); // delivered, halted at never()
     await expect(app.close()).rejects.toBe(err);
   });
@@ -348,7 +348,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     });
     await tick();
     expect(app.state).toBe('complete'); // aborted by the escalation, and completed inside it
-    expect(app.outcome).toEqual({ status: 'failure', error: boom });
+    expect(app.outcome).toEqual({ status: 'defect', error: boom });
     await expect(app.close()).rejects.toBe(boom);
     expect(impl(app).unconsumed.size).toBe(0);
     const fEvents = ev.typesOf(f.id);
@@ -371,7 +371,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     );
     await tick();
     expect(owner.state).toBe('complete');
-    expect(owner.outcome).toEqual({ status: 'failure', error: boom });
+    expect(owner.outcome).toEqual({ status: 'defect', error: boom });
     await expect(app.close()).rejects.toBe(boom); // the owner's failure is routed to app (D16)
   });
 
@@ -391,7 +391,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     });
     await tick();
     expect(pool.state).toBe('complete');
-    expect(pool.outcome).toEqual({ status: 'failure', error: handlerError });
+    expect(pool.outcome).toEqual({ status: 'defect', error: handlerError });
     await expect(app.close()).rejects.toBe(handlerError);
   });
 
@@ -511,7 +511,7 @@ describe('halted waiters consume nothing (D13, D16, D39)', () => {
     await expect(p).rejects.toBe(err);
     expect(caught).toBe('no catch ran');
     expect(reason).toBe(err); // C5 aborts the owner with the owned fiber's failure
-    expect(O.outcome).toEqual({ status: 'failure', error: err });
+    expect(O.outcome).toEqual({ status: 'defect', error: err });
     expect(f.failure?.consumed).toBe(true);
     await expect(app.close()).resolves.toBeUndefined(); // exactly once
   });
@@ -549,7 +549,7 @@ describe('halted waiters consume nothing (D13, D16, D39)', () => {
     expect(P.bodyDone).toBe(false); // call-shaped: not returned while the child has not stopped
     await expect(p).rejects.toBe(err);
     expect({ atCatch, atFinally }).toEqual({ atCatch: undefined, atFinally: 'child complete' });
-    expect(P.outcome).toEqual({ status: 'failure', error: err });
+    expect(P.outcome).toEqual({ status: 'defect', error: err });
     await app.close();
   });
 
@@ -646,7 +646,7 @@ describe('halted waiters consume nothing (D13, D16, D39)', () => {
     gate.resolve();
     await expect(p).rejects.toBe(err);
     expect(caught).toBe('no catch ran'); // returned at the failure, never thrown into
-    expect(P.outcome).toEqual({ status: 'failure', error: err }); // aborted + the unconsumed release failure (D24)
+    expect(P.outcome).toEqual({ status: 'defect', error: err }); // aborted + the unconsumed release failure (D24)
     await app.close();
   });
 
@@ -758,7 +758,7 @@ describe('halted waiters consume nothing (D13, D16, D39)', () => {
     });
     void N.release(y);
     await expect(within(N.close())).rejects.toBe(E3);
-    expect(N.outcome).toEqual({ status: 'failure', error: E3 });
+    expect(N.outcome).toEqual({ status: 'defect', error: E3 });
     expect(impl(N).earlyAwaits.size).toBe(0);
     await expect(app.close()).resolves.toBeUndefined();
   });
@@ -867,8 +867,8 @@ describe('I13 converse: the error is never inspected', () => {
         throw fiberAborted;
       }, { onFailure: () => {} }),
     );
-    expect(r1).toEqual({ status: 'failure', error: abortError });
-    expect(r2).toEqual({ status: 'failure', error: fiberAborted });
+    expect(r1).toEqual({ status: 'defect', error: abortError });
+    expect(r2).toEqual({ status: 'defect', error: fiberAborted });
     await app.close();
   });
 
@@ -885,7 +885,7 @@ describe('I13 converse: the error is never inspected', () => {
     );
     await tick();
     f.abort();
-    expect(await app.result(f)).toEqual({ status: 'failure', error: err });
+    expect(await app.result(f)).toEqual({ status: 'defect', error: err });
     await app.close();
   });
 
@@ -1015,7 +1015,7 @@ describe('all and race outcomes (DESIGN.md §4.8, D13)', () => {
     expect(group.unconsumed.size).toBe(1); // the failed member waits for the whole group
     P.abort();
     await expect(p).rejects.toBe(err);
-    expect(group.outcome).toEqual({ status: 'failure', error: err }); // aborted by state + the member's unconsumed failure
+    expect(group.outcome).toEqual({ status: 'defect', error: err }); // aborted by state + the member's unconsumed failure
     await expect(app.close()).resolves.toBeUndefined();
   });
 });

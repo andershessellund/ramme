@@ -53,17 +53,31 @@
 // `return` in a `finally`, and so did one that uses the sentinel, which that
 // helper's `yield*` gave it; dev mode reports either (decision 29).
 //
+// An expected failure is the fourth exit (D42): a yielded `Fail`, from
+// `yield* fail(e)`, `$` over a failed `Result`, or a callee's failure re-yielded
+// (a resume step found its child ended `failure(e)`), ends the body at once. The
+// driver fixes the outcome as `failure(e)` and returns the generator as a halt
+// does: its `finally` blocks run under an unwind fiber as release work, and may
+// wait; a delivery after the fail changes nothing. A `Fail` yielded once the
+// body has been halted, or after its own fail, is a release failure of the node
+// (it cannot change `aborted`), and the generator is returned again there, which
+// ends that `finally`; a delivered body that has not been halted yet is halted at
+// its `Fail`, the error discarded as its throw would be (D24).
+//
 // A failure handler's generator is driven in the handler's frame and never
 // halted; each op it yields is reported to its run first, so one that waits
-// for its parent's completion holds nothing (DESIGN.md §4.7).
+// for its parent's completion holds nothing (DESIGN.md §4.7). A `Fail` there
+// returns its generator, and the handler's promise rejects with the error, or
+// with a `SuppressedError` of what failed after it in the `finally` it ran.
 // ---------------------------------------------------------------------------
 
 import { runDetached, runInFrame } from './context-storage.js';
 import type { Frame } from './context-storage.js';
 import { describeNode } from './inject.js';
-import { Sub, consumesNothing, isInstruction } from './managed.js';
+import { Sub, consumesNothing, heldFailYield, isInstruction, readFail } from './managed.js';
 import type { Run, WaitsFor } from './managed.js';
 import type { NodeImpl } from './node-impl.js';
+import { SuppressedErrorCtor } from './resource.js';
 
 /** The private sentinel the driver halts a generator with: a body that keeps the halt finishes with it (D41, decision 29). */
 const HALT: unique symbol = Symbol('ramme.halt');
@@ -95,8 +109,11 @@ function lostHaltSentinel(report: () => void): object {
   });
 }
 
-/** How a generator body ended, for the node's classification (DESIGN.md §4.12). */
-export type DriverExit = { kind: 'returned'; value: unknown } | { kind: 'threw'; error: unknown };
+/**
+ * How a generator body ended, for the node's classification (DESIGN.md §4.12): `failed` is the fourth exit, a yielded
+ * `Fail` (D42), its outcome fixed at the fail.
+ */
+export type DriverExit = { kind: 'returned'; value: unknown } | { kind: 'threw'; error: unknown } | { kind: 'failed'; error: unknown };
 
 /** One run of a failure handler (DESIGN.md §4.7): told of every op it waits on, before the op runs. */
 export interface HandlerRun {
@@ -145,6 +162,15 @@ function returnWith(sentinel: unknown): Resume {
   return (it) => (typeof it.return === 'function' ? it.return(sentinel) : { done: true, value: sentinel });
 }
 
+/**
+ * A callee's expected failure re-yielded (D42): the step sees a `Fail` at the `yield*` that waited, as if the op's
+ * iterator had yielded it, without resuming the generator. It is marked held: the callee's own record, which its holder
+ * still reports, so in a halted `finally` it is not recorded a second time.
+ */
+function yieldFail(error: unknown): Resume {
+  return () => ({ done: false, value: heldFailYield(error) });
+}
+
 /** The wait a driven body is suspended on: its subscription, and the halt hook in its node's `onApplied`. */
 interface Waiting {
   readonly sub: Sub;
@@ -166,6 +192,8 @@ class BodyDriver {
   #unwind: { readonly fiber: NodeImpl; readonly done: () => void } | undefined = undefined;
   /** From the halt on: its sentinel (HALT, or dev mode's reporting one) and the once-only report of its loss. */
   #halted: { readonly sentinel: unknown; readonly report: () => void } | undefined = undefined;
+  /** The fourth exit (D42): the error of the `Fail` that ended the body, which fixes its outcome as `failure`. */
+  #failed: { readonly error: unknown } | undefined = undefined;
 
   constructor(node: NodeImpl, it: Driven, frame: Frame) {
     this.#node = node;
@@ -196,6 +224,13 @@ class BodyDriver {
       if (r.done === true) return this.#exit({ kind: 'returned', value: r.value });
       const ins = r.value;
       if (!isInstruction(ins)) {
+        const f = readFail(ins);
+        if (f !== undefined) {
+          const then = this.#onFail(f.error, f.held);
+          if (then === undefined) return;
+          resume = then;
+          continue;
+        }
         resume = throwInto(notAnOp(`the body of ${describeNode(this.#node)}`, ins));
         continue;
       }
@@ -293,8 +328,34 @@ class BodyDriver {
       // Row 3: release work or wait(p) failed after the halt: returned, the failure unconsumed (or discarded: p's own).
       if (this.#halts()) return this.#halt();
       if (unwind !== undefined && r.user) unwind.extraErrors.push(r.error); // p's own failure in the halted finally
-      this.step(throwInto(r.error));
+      this.step(r.failed === true ? yieldFail(r.error) : throwInto(r.error)); // a callee's fail is re-yielded (D42)
     });
+  }
+
+  /**
+   * A yielded `Fail` (D42): the resume that follows, or `undefined` when the body stops stepping here.
+   *
+   * - In a halted `finally`, or in the `finally` of the body's own fail: a release failure of the node, recorded on the
+   *   unwind fiber (a callee's re-yielded one is already its holder's to report), and the generator is returned again,
+   *   which ends that `finally`; the outcome stays what the halt or the first fail made it.
+   * - A delivered body not yet halted (resumed by release work): halted here, as at an op not yet started; the error is
+   *   discarded, as its throw would be (D24).
+   * - Otherwise the fourth exit: the outcome is fixed as `failure(e)` now, and the generator is returned under an unwind
+   *   fiber, as at a halt, so its `finally` blocks run as release work and may wait.
+   */
+  #onFail(error: unknown, held: boolean): Resume | undefined {
+    const unwind = this.#unwind;
+    if (unwind !== undefined) {
+      if (!held) unwind.fiber.extraErrors.push(error);
+      return this.#returnHalt();
+    }
+    if (this.#halts()) {
+      this.#queueHalt();
+      return undefined;
+    }
+    this.#failed = { error };
+    this.#beginUnwind('fail');
+    return this.#returnHalt();
   }
 
   /** A return as a job under no frame: never inside a delivery nor inside the step that found the node applied. */
@@ -307,12 +368,17 @@ class BodyDriver {
   /** `return(sentinel)` at the `yield*` that waited; the `finally` blocks run from here on under the unwind fiber (U3). */
   #halt(): void {
     if (this.#it === undefined || this.#unwind !== undefined) return;
+    this.#beginUnwind('halt');
+    this.step(this.#returnHalt());
+  }
+
+  /** The unwind fiber, the frame that names it, and the sentinel of the return a halt or a fail makes (U3, D42). */
+  #beginUnwind(cause: 'halt' | 'fail'): void {
     const unwind = this.#node.makeUnwindFiber();
     this.#unwind = unwind;
     this.#frame = { node: this.#node, creation: undefined, unwind: unwind.fiber };
-    const report = lostHaltReport(describeNode(this.#node));
+    const report = lostHaltReport(describeNode(this.#node), cause);
     this.#halted = { sentinel: dev() ? lostHaltSentinel(report) : HALT, report };
-    this.step(this.#returnHalt());
   }
 
   /** The resume that halts: `return()` with this halt's sentinel. */
@@ -324,10 +390,17 @@ class BodyDriver {
     this.#it = undefined;
     const unwind = this.#unwind;
     if (unwind !== undefined) {
+      const failed = this.#failed;
       if (r.kind === 'returned') {
         const halted = this.#halted;
         if (halted !== undefined && r.value !== halted.sentinel) halted.report(); // the identity test touches no sentinel
-        r = { kind: 'returned', value: undefined }; // the value is discarded: the outcome is aborted by state (D24)
+        // The value is discarded: the outcome is aborted by state (D24), or the fail's (D42).
+        r = failed !== undefined ? { kind: 'failed', error: failed.error } : { kind: 'returned', value: undefined };
+      } else if (failed !== undefined && r.kind === 'threw') {
+        // A throw from the finally a fail ran: a release failure, reported beside the fail, which still decides (D42).
+        // A halted body's throw is discarded instead (D24): an interruption may have caused it.
+        unwind.fiber.extraErrors.push(r.error);
+        r = { kind: 'failed', error: failed.error };
       }
       unwind.done(); // the unwind fiber completes after its last op; the node's release loop waits for it
     }
@@ -335,17 +408,22 @@ class BodyDriver {
   }
 }
 
-/** Dev mode's report of a lost halt (decision 29), once per halt; it holds the body's description, never its node (A2). */
-function lostHaltReport(body: string): () => void {
+/**
+ * Dev mode's report of a lost halt (decision 29), or of a lost fail's return (D42), once per halt or fail; it holds the
+ * body's description, never its node (A2).
+ */
+function lostHaltReport(body: string, cause: 'halt' | 'fail'): () => void {
   let reported = false;
   return () => {
     if (reported || !dev()) return;
     reported = true;
+    const what = cause === 'halt' ? 'halt' : 'return after a fail';
+    const outcome = cause === 'halt' ? 'aborted' : 'failure(e)';
     console.warn(
-      `ramme: the halt of ${body} was lost: its generator went on after the driver returned it, and finished with a ` +
+      `ramme: the ${what} of ${body} was lost: its generator went on after the driver returned it, and finished with a ` +
         'value or used the one a yield* gave it. A yield* in the finally of a helper it called (or a return in a ' +
         'finally) resumes the body past the halt; wait in the body’s own finally, in an entry (own(value, function* …)), ' +
-        'or run the helper as yield* call(helper). The node is aborted all the same',
+        `or run the helper as yield* call(helper). The node is ${outcome} all the same`,
     );
   };
 }
@@ -359,21 +437,35 @@ export function driveBody(node: NodeImpl, it: Driven, frame: Frame): void {
  * Drive a failure handler's generator in its frame (DESIGN.md §4.7, §4.14): nothing halts it, each op it yields runs
  * for no awaiter (its failures consumed on resume, a sleep its full duration) after being reported to `run`, so a
  * wait for the parent's completion holds nothing. The first step runs now. The promise settles when the generator
- * ends, rejected with its throw; the parent holds it as a returned promise.
+ * ends, rejected with its throw; the parent holds it as a returned promise. A `Fail` (its own `yield* fail(e)`, or a
+ * callee's re-yielded) returns the generator, its `finally` blocks run as the rest of the handler, and the promise
+ * rejects with the error (D42): a handler exception, as a throw is. What fails in those `finally` blocks (a second
+ * `Fail`, a callee's re-yielded one included, or a throw) is reported beside it, as a body's driver reports it: the
+ * promise rejects with `SuppressedError(later, e)`, so no failure is lost (I11), the callee's already consumed.
  */
 export function driveHandler(it: Driven, frame: Frame, run: HandlerRun): Promise<void> {
   const { promise, resolve, reject } = Promise.withResolvers<void>();
+  let failed: { readonly error: unknown } | undefined;
+  /** A failure after the fail, in the `finally` it runs: reported beside the fail's error (D42). */
+  const beside = (later: unknown): { readonly error: unknown } =>
+    failed === undefined ? { error: later } : { error: new SuppressedErrorCtor(later, failed.error, 'A failure handler failed in the finally its fail ran') };
   const step = (resume: Resume): void => {
     for (;;) {
       let r: IteratorResult<unknown, unknown>;
       try {
         r = runInFrame(frame, () => resume(it));
       } catch (e) {
-        return reject(e);
+        return reject(beside(e).error);
       }
-      if (r.done === true) return resolve();
+      if (r.done === true) return failed !== undefined ? reject(failed.error) : resolve();
       const ins = r.value;
       if (!isInstruction(ins)) {
+        const f = readFail(ins);
+        if (f !== undefined) {
+          failed = beside(f.error); // a later fail ends its finally, reported beside the first
+          resume = returnWith(undefined);
+          continue;
+        }
         resume = throwInto(notAnOp('a failure handler', ins));
         continue;
       }
@@ -391,7 +483,11 @@ export function driveHandler(it: Driven, frame: Frame, run: HandlerRun): Promise
       if (waitsFor === undefined && src.waitsFor !== undefined) run.awaits(src.waitsFor);
       let sub: Sub;
       try {
-        sub = new Sub(src, (ok, x) => sub.resume(ok, x, false, (res) => step(res.ok ? next(res.value) : throwInto(res.error))));
+        sub = new Sub(src, (ok, x) =>
+          sub.resume(ok, x, false, (res) =>
+            step(res.ok ? next(res.value) : res.failed === true ? yieldFail(res.error) : throwInto(res.error)),
+          ),
+        );
       } catch (e) {
         resume = throwInto(e); // the source's `then` threw: the handler's failed wait (I10)
         continue;

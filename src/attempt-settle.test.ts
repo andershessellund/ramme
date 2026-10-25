@@ -63,7 +63,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await root.close();
   });
 
-  it("failure: the error is delivered as a value, never thrown, and consumed: the caller and the root complete with nothing unconsumed; the task's own destination does not apply", async () => {
+  it("defect: the thrown error is delivered as a value (a defect: D42), never thrown, and consumed: the caller and the root complete with nothing unconsumed; the task's own destination does not apply", async () => {
     const err = new Error('boom');
     const handler = vi.fn();
     const root = createRootContext();
@@ -80,7 +80,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
       const handled = yield* attempt(task(function* () { return yield* wait(Promise.reject(err)); }, { onFailure: handler }));
       return [plain, linked, handled];
     });
-    const failed = { status: 'failure', error: err };
+    const failed = { status: 'defect', error: err };
     expect(out).toEqual([failed, failed, failed]);
     expect(handler).not.toHaveBeenCalled();
     expect(child.outcome).toEqual(failed);
@@ -220,7 +220,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     // The documented idiom, in a plain function: it shares the caller's node.
     const prices = async (sku: string): Promise<string> => {
       const r = await attempt(fetchPrices.with({ timeoutMs: 5 }), sku);
-      if (r.status === 'failure') throw r.error;
+      if (r.status === 'defect') throw r.error; // a real failure stays one (fetchPrices fails with no expected failure)
       return r.status === 'success' ? r.value : 'cached';
     };
     const root = createRootContext();
@@ -231,7 +231,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
       return yield* wait(prices('bad'));
     }));
     await expect(p).rejects.toBe(bug); // not also surfaced as an unconsumed child failure
-    expect(caller.outcome).toEqual({ status: 'failure', error: bug });
+    expect(caller.outcome).toEqual({ status: 'defect', error: bug });
     await expect(root.close()).resolves.toBeUndefined();
   });
 
@@ -261,8 +261,8 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
     await tick();
     P.abort();
     await expect(p).rejects.toBe(err);
-    expect(seen).toBe('nothing'); // halted: not { status: 'failure', error: err }, and no catch
-    expect(P.outcome).toEqual({ status: 'failure', error: err });
+    expect(seen).toBe('nothing'); // halted: not { status: 'defect', error: err }, and no catch
+    expect(P.outcome).toEqual({ status: 'defect', error: err }); // aborted + the surfaced failure → defect (DESIGN.md §4.12)
     await expect(root.close()).resolves.toBeUndefined();
   });
 
@@ -342,7 +342,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
       [me.id, children[1].id],
     ]);
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([
-      [me.id, children[0].id, 'failure'],
+      [me.id, children[0].id, 'defect'],
       [me.id, children[1].id, 'success'],
     ]);
 
@@ -398,7 +398,7 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     );
     expect(out).toEqual([
       { status: 'success', value: 'first' },
-      { status: 'failure', error: err },
+      { status: 'defect', error: err },
       { status: 'success', value: 'slow' },
     ]);
     expect(rejected).toBeInstanceOf(AggregateError);
@@ -433,7 +433,7 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     expect(done).toEqual(['c', 'b', 'a']);
     expect(out).toEqual([
       { status: 'success', value: 'a' },
-      { status: 'failure', error: errB },
+      { status: 'defect', error: errB },
       { status: 'success', value: 'c' },
     ]);
     await root.close();
@@ -482,9 +482,9 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
         return r;
       }),
     );
-    expect(out.map((o) => o.status)).toEqual(['aborted', 'aborted', 'failure', 'success']);
+    expect(out.map((o) => o.status)).toEqual(['aborted', 'aborted', 'defect', 'success']);
     for (const o of out.slice(0, 2)) expect(((o as { reason: unknown }).reason as DOMException).name).toBe('TimeoutError');
-    expect(out[2]).toEqual({ status: 'failure', error: err });
+    expect(out[2]).toEqual({ status: 'defect', error: err });
     expect(out[3]).toEqual({ status: 'success', value: 'clean after TimeoutError' });
     expect([...t.log].sort()).toEqual(['a released', 'b released', 'caller resumed', 'd shut down']);
     expect(t.log.at(-1)).toBe('caller resumed');
@@ -541,8 +541,8 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
       ]);
     });
     expect(out).toEqual([
-      { status: 'failure', error: err1 },
-      { status: 'failure', error: err2 },
+      { status: 'defect', error: err1 },
+      { status: 'defect', error: err2 },
       { status: 'success', value: 'survivor' },
     ]);
     expect(handler).not.toHaveBeenCalled();
@@ -582,7 +582,7 @@ describe('settle (DESIGN.md §4.8, D31)', () => {
     P.abort();
     await expect(p).rejects.toBe(err);
     expect(caught).toBe('no catch ran');
-    expect(P.outcome).toEqual({ status: 'failure', error: err });
+    expect(P.outcome).toEqual({ status: 'defect', error: err }); // aborted + the surfaced member failure → defect
     expect(group.outcome?.status).toBe('aborted');
     expect(t.log).toEqual([]);
     await expect(root.close()).resolves.toBeUndefined();

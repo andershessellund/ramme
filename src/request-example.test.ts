@@ -331,7 +331,7 @@ describe('a request, end to end', () => {
         const r = server.request('/a');
         res = r.res;
         const o = yield* result(r.fiber);
-        expect(o).toEqual({ status: 'failure', error: boom });
+        expect(o).toEqual({ status: 'defect', error: boom });
       });
       await expect(app.close()).resolves.toBeUndefined(); // the handler consumed it
       expect(w.failures).toHaveLength(1);

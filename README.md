@@ -227,13 +227,14 @@ await using test = createRootContext({
 const report = task(function* (id: string) {
   const audit = fork(writeAudit, id);       // concurrent, in its own node
   const data = yield* call(buildReport, id);
-  yield* join(audit);                       // its value, or its failure thrown here
+  yield* join(audit);                       // its value, or its failure passed on here
   return data;
 });
 ```
 
 A fiber is not a promise: `await audit` throws. Use `join(f)` for the value
-or `result(f)` for the outcome (`success` / `failure` / `aborted`). A fork
+or `result(f)` for the outcome (`success` / `failure` / `defect` /
+`aborted`, below). A fork
 you never join is interrupted when its parent's body returns, and its
 failure, if any, surfaces from the parent. It is never an unhandled
 rejection.
@@ -385,14 +386,15 @@ cancels the others when one fails):
 
 ```ts
 const r = yield* attempt(fetchPrices.with({ timeoutMs: 500 }), sku);
-if (r.status === 'failure') throw r.error;                             // a real failure stays a failure
+if (r.status === 'defect') throw r.error;                              // a real failure stays a failure
+if (r.status === 'failure') return yield* fail(r.error);               // and an expected one stays expected
 const prices = r.status === 'success' ? r.value : cachedPrices(sku);   // 'aborted': the 500 ms ran out
 
 const [user, orders] = yield* settle([fetchUser.bind(id), fetchOrders.bind(id)]);
-if (orders.status === 'failure') log(orders.error);                    // all would have thrown; user is still here
+if (orders.status === 'defect') log(orders.error);                     // all would have thrown; user is still here
 
 let quote = yield* attempt(fetchQuote, sku);
-for (let i = 0; quote.status === 'failure' && i < 3; i++) {
+for (let i = 0; quote.status === 'defect' && i < 3; i++) {
   yield* sleep(100 * 2 ** i);                                          // back off; an interrupted caller is halted here
   quote = yield* attempt(fetchQuote, sku);
 }
@@ -417,43 +419,70 @@ why `call` stays the default.
 ## Expected failures
 
 A failure the caller is meant to branch on (no such user, a declined card)
-is a return value, not a throw: a `Result`, `{ status: 'success', value }`
-or `{ status: 'failure', error }`, in the words an outcome uses. Anything
-thrown is a defect: let it fail the task, and translate it where the work
-is handed over (`attempt`, `onFailure`), not in the middle of the domain
-code. `ramme/result` is optional, and any `{ status, value | error }`
-object of the shape works with it. Its `gen` and `$` are the `?` operator:
+is yielded, not thrown: `yield* fail(e)` ends the task at once with it, and
+the task's type says so. Anything thrown is a defect: let it fail the task,
+and translate it where the work is handed over (`attempt`, `onFailure`), not
+in the middle of the domain code.
 
 ```ts
-import type { Result } from 'ramme';
-import { $, gen, success } from 'ramme/result';
+import { attempt, call, fail, task, wait } from 'ramme';
 
 class UserNotFound extends Error { readonly name = 'UserNotFound' as const; }
 class OrderNotFound extends Error { readonly name = 'OrderNotFound' as const; }
 
-// getUser(id): Promise<Result<User, UserNotFound>>; getOrder(user): Promise<Result<Order, OrderNotFound>>
-const r = await gen(async function* () {
-  const user = yield* $(getUser(id));       // the user, or the run ends here with the failure as its result
-  const order = yield* $(getOrder(user));
-  return success(order);
+const getUser = task(function* (id: string) {
+  const user = yield* wait(db.findUser(id));
+  if (user === undefined) return yield* fail(new UserNotFound(id));
+  return user;
+});                                               // Task<[id: string], User, UserNotFound>
+
+const getOrder = task(function* (id: string) {
+  const user = yield* call(getUser, id);          // the user, or this task ends here with UserNotFound
+  const order = yield* wait(db.findOrder(user));
+  if (order === undefined) return yield* fail(new OrderNotFound(id));
+  return order;
+});                                               // Task<[id: string], Order, UserNotFound | OrderNotFound>
+
+const handle = task(function* (req: Request) {
+  const r = yield* attempt(getOrder, req.params.id);
+  if (r.status === 'success') return json(r.value);
+  if (r.status === 'failure') return notFound(r.error);   // r.error: UserNotFound | OrderNotFound
+  if (r.status === 'defect') throw r.error;               // a bug stays a bug
+  return unavailable();                                   // 'aborted': interrupted
 });
-// r: Result<Order, UserNotFound | OrderNotFound>
-if (r.status === 'failure') return notFound(r.error);
 ```
 
-TypeScript compares types by structure, so error classes need a
-distinguishing member, like the literal `name` above, to stay separate in
-the inferred union. `unwrap(r)` is the named conversion to a defect: the
-value, or the error thrown. In a body, wait for it with `yield* wait(gen(…))`;
-elsewhere await or return it at once: it is an ordinary async function, so a
-dropped `gen(…)` whose body throws is an unhandled rejection.
-`@typescript-eslint/no-floating-promises`, which needs
-type-aware linting (`recommendedTypeChecked`, or
-`parserOptions.projectService`), flags a bare `gen(…)` statement, but not
-`void gen(…)` or an awaited `gen` whose `Result` is discarded. The other
-helpers (`map`, `andThen`, `orElse`, `collect`, `fromThrowing`, …) are in
-[DESIGN.md §4.13](DESIGN.md#413-results-and-gen-d38). A later release
-replaces `gen` with `yield* fail(e)` in the body itself.
+No `catch` sees a `fail`, and the task's `finally` blocks still run. Write
+it as `return yield* fail(e)`: TypeScript does not narrow after a `yield*`,
+so `return` is what tells it that `user` is defined below the check.
+`call`, `join`, `all` and `race` pass a child's expected failure on to the
+caller, and its type joins the caller's (two or more failures in one `all`
+are reported together, as a defect); `attempt`, `result` and `settle`
+hand it over as an outcome, one of four: `success`, `failure`, `defect` (a
+throw) and `aborted`. A fork nobody joins hands its failure to its parent,
+which reports it as its own defect, as it does a thrown one. TypeScript
+compares types by structure, so error classes need a distinguishing member,
+like the literal `name` above, to stay separate in the inferred union.
+
+Where an expected failure crosses a boundary a task does not (a function's
+return value, a library, JSON), it is a `Result`: `{ status: 'success',
+value }` or `{ status: 'failure', error }`, in the words an outcome uses.
+`ramme/result` is optional, and any object of the shape works with it. Its
+`$` turns a `Result` you hold back into the task's failure:
+
+```ts
+import { $ } from 'ramme/result';
+
+const charge = task(function* (card: Card, amount: number) {
+  const auth = yield* $(yield* wait(gateway.authorize(card, amount)));  // Result<Auth, Declined>: the value, or Declined
+  return yield* wait(gateway.capture(auth));
+});                                               // Task<[card: Card, amount: number], Receipt, Declined>
+```
+
+`unwrap(r)` is the named conversion to a defect: the value, or the error
+thrown. The other helpers (`map`, `andThen`, `orElse`, `collect`,
+`fromThrowing`, …) are in
+[DESIGN.md §4.13](DESIGN.md#413-expected-failures-result-and--d38-d42).
 
 ## Lint
 

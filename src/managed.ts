@@ -29,9 +29,16 @@
 // The reactions ramme registers on a source hold only a `Sub`, which a
 // settlement or a drop empties, so a halted body's generator and node are not
 // retained by a source that stays pending (A2).
+//
+// An expected failure (D42) is the other thing a body yields: `yield* fail(e)`
+// yields a `Fail` record, which the driver tells apart from an instruction and
+// ends the body with. A resume step that finds a child ended `failure(e)` throws
+// `Expected(e)`, which a consumer turns back into that `Fail`: the driver ends
+// the waiting body with it (the re-yield of `yield* call(t)`), and a `then`
+// rejects with `e`.
 // ---------------------------------------------------------------------------
 
-import type { Instruction, Op } from './context.js';
+import type { Instruction, Op, Operation } from './context.js';
 import { currentCreation, currentFrame, runDetached } from './context-storage.js';
 import type { Frame } from './context-storage.js';
 import type { NodeImpl } from './node-impl.js';
@@ -82,8 +89,111 @@ export interface Run<S = unknown, T = unknown> {
   readonly cancel?: () => void;
 }
 
-/** What a resumed consumer gets. */
-export type Resumed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown; readonly user: boolean };
+/**
+ * What a resumed consumer gets. `failed`: the error is a child's expected failure, which a body re-yields as its own
+ * `Fail` (D42), and a `then` rejects with.
+ */
+export type Resumed<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: unknown; readonly user: boolean; readonly failed?: boolean };
+
+/**
+ * The run-time brand of a yielded `Fail` (D42, DESIGN.md §4.13): a registered symbol, so `ramme/result`'s `$`, a leaf
+ * that imports nothing at run time (DESIGN.md §7), makes the same record without importing this module. The record is
+ * `{ [FAIL]: error }`, the shape `Fail<E>` declares under its declared-only brand.
+ */
+export const FAIL: unique symbol = Symbol.for('ramme.fail');
+
+/** @internal A yielded expected failure: what `fail(e)` and `$` yield, and what the driver ends a body with (D42). */
+export interface FailYield {
+  readonly [FAIL]: unknown;
+}
+
+/** A re-yielded `Fail` (D42): the callee's failure record still holds the error (D13), so a halted `finally` records nothing. */
+const HELD: unique symbol = Symbol('ramme.held');
+
+/**
+ * @internal The brand test the driver makes after the instruction test, an own property under the registered symbol,
+ * and the error under it; `held` for a callee's failure re-yielded (`heldFailYield`). Never throws: a proxy whose trap
+ * throws is no fail, and the driver throws its `TypeError` back.
+ */
+export function readFail(x: unknown): { readonly error: unknown; readonly held: boolean } | undefined {
+  if (typeof x !== 'object' || x === null) return undefined;
+  try {
+    if (!Object.prototype.hasOwnProperty.call(x, FAIL)) return undefined;
+    return { error: (x as FailYield)[FAIL], held: Object.prototype.hasOwnProperty.call(x, HELD) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** @internal The record a `yield* fail(error)` yields. */
+export function failYield(error: unknown): FailYield {
+  return { [FAIL]: error };
+}
+
+/**
+ * @internal A callee's expected failure as the driver re-yields it (D42): a `Fail` marked as still held by the callee's
+ * failure record, which its holder reports, so a halted `finally` does not record it a second time.
+ */
+export function heldFailYield(error: unknown): FailYield {
+  return { [FAIL]: error, [HELD]: true } as FailYield;
+}
+
+/** `fail(e)`'s iterator: yields its `Fail` once; resumed, which no driver does, it throws. */
+function* failSteps(error: unknown): Generator<FailYield, never, unknown> {
+  yield failYield(error);
+  throw new TypeError('ramme: a fail was resumed: yield* fail(e) ends the body, and nothing resumes it');
+}
+
+/**
+ * What `fail(error)` makes (D42): an operation whose iterator yields one `Fail` record and never returns. An instance
+ * of this module's class, so a body, a release or a failure handler that returns `fail(e)` instead of yielding it is
+ * driven as its own `yield*` of it, as a returned op is (decision 28, `isFailOp`): it ends with `failure(e)` there.
+ */
+class FailOp {
+  readonly #error: unknown;
+
+  constructor(error: unknown) {
+    this.#error = error;
+  }
+
+  [Symbol.iterator](): Generator<FailYield, never, unknown> {
+    return failSteps(this.#error);
+  }
+}
+
+/**
+ * `fail(error)` (D42): an operation whose iterator yields one `Fail` record, branded disjointly from an instruction,
+ * and never returns. Pure: it reads no node, so it may be made anywhere, and each `yield*` yields afresh, as a
+ * description (decision 3).
+ */
+export function failOp<E>(error: E): Operation<never, E> {
+  return new FailOp(error) as unknown as Operation<never, E>;
+}
+
+/**
+ * @internal A `fail(e)` returned rather than yielded (D42): what a body, a release or a failure handler returned that
+ * the driver steps as its own `yield*` of it, as it does a returned op (decision 28). Recognized by what it is, never
+ * by `Symbol.iterator`.
+ */
+export function isFailOp(x: unknown): x is Iterable<unknown> {
+  return x instanceof FailOp;
+}
+
+/**
+ * @internal What a resume step throws for a child that ended `failure(e)` (D42): not an error a body sees, since
+ * `Sub.resume` turns it into a `Resumed` with `failed`, which the driver re-yields as the body's own `Fail` and a
+ * `then` rejects with `e`. `unwrapExpected` gives a direct caller the error itself.
+ */
+export class Expected {
+  constructor(readonly error: unknown) {}
+}
+
+/** The error a resume step threw, an expected failure's own included. */
+export function unwrapExpected(e: unknown): unknown {
+  return e instanceof Expected ? e.error : e;
+}
 
 type OnFulfilled = ((value: any) => unknown) | null | undefined;
 type OnRejected = ((reason: any) => unknown) | null | undefined;
@@ -182,7 +292,8 @@ export class Sub<S = unknown, T = unknown> {
       try {
         r = { ok: true, value: run.deliver !== undefined ? run.deliver(x as S, applied) : (x as T) }; // DELIVERY: the only place a failure is consumed (D13)
       } catch (e) {
-        r = { ok: false, error: e, user: false };
+        // A child's expected failure is re-yielded by a body, and rejects a `then` with its error (D42).
+        r = e instanceof Expected ? { ok: false, error: e.error, user: false, failed: true } : { ok: false, error: e, user: false };
       }
     try {
       use(r);

@@ -1,13 +1,12 @@
-// result.test.ts — `ramme/result`: expected failures as plain `Result` values, and `gen`/`$`, the `?`
-// operator (DESIGN.md §4.12, §4.13, D38). The helpers are free functions over any object of the shape; `$`
-// is a hand-written async iterator whose `yield*` evaluates to the success value itself, unawaited, or
-// yields the failure, which ends `gen`'s run as its result. `gen` is plain async code, which a body waits for
-// with `yield* wait(gen(…))`; the await in `$` runs an op through its `then` (DESIGN.md §4.14). Stage 3 of D41
-// retires `gen`. The type-level half is src/test/surface.check.ts.
+// result.test.ts — `ramme/result`: `Result`, the interchange type of expected failures, as plain values, and `$`,
+// which unwraps one inside a body (DESIGN.md §4.12, §4.13, D38, D42). The helpers are free functions over any object
+// of the shape; `$` is a generator helper whose `yield*` evaluates to the success value itself, unawaited, or yields
+// the failure's error as a `Fail`, which ends the body with that expected failure, as `yield* fail(e)` does. `gen`,
+// the async `?` operator of D38, is retired: a body is the scope (D42). The type-level half is
+// src/test/surface.check.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MockInstance } from 'vitest';
-import { call, fork, join, own, pool, sleep, wait } from './ambient.js';
-import type { Context, Failure, Fiber, Result } from './context.js';
+import { call, fail, fork, join, never, pool, sleep, wait } from './ambient.js';
+import type { Failure, Result } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { PoolFullError } from './resource.js';
@@ -17,7 +16,6 @@ import {
   collect,
   failure,
   fromThrowing,
-  gen,
   isFailure,
   isSuccess,
   map,
@@ -27,8 +25,7 @@ import {
   unwrap,
   unwrapOr,
 } from './result.js';
-import { deferred, neverSettles, tick, unhandledRejectionGuard, within } from './test/util.js';
-import type { UnhandledRejectionGuard } from './test/util.js';
+import { deferred, tick, within } from './test/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -52,7 +49,7 @@ interface Order {
 
 const users = new Map<string, User>([
   ['42', { id: '42' }],
-  ['5', { id: '5' }], // a short id, so a gen body's returned failure is reachable; it has no orders
+  ['5', { id: '5' }], // a short id, so a task's returned failure is reachable; it has no orders
 ]);
 
 async function getUser(id: string): Promise<Result<User, UserNotFound>> {
@@ -62,13 +59,6 @@ async function getUser(id: string): Promise<Result<User, UserNotFound>> {
 
 async function getOrder(user: User): Promise<Result<Order, OrderNotFound>> {
   return user.id === '42' ? success({ user, total: 7 }) : failure(new OrderNotFound(user.id));
-}
-
-/** The setup file's unhandled-rejection guard (src/test/setup.ts). */
-function guard(): UnhandledRejectionGuard {
-  const g = unhandledRejectionGuard();
-  if (g === undefined) throw new Error('src/test/setup.ts is not installed (vitest.config.ts setupFiles)');
-  return g;
 }
 
 describe('Result values (DESIGN.md §4.12, D38)', () => {
@@ -230,366 +220,235 @@ describe('Result values (DESIGN.md §4.12, D38)', () => {
     expect(andThen(s, (v) => success(v * 2))).toEqual(success(6));
     expect(orElse(f, () => success(0))).toEqual(success(0));
     expect(collect([s, f])).toBe(f);
-    const r = await gen(async function* () {
-      const v = yield* $(s);
-      yield* $(Promise.resolve(f));
-      return success(v);
-    });
-    expect(r).toBe(f);
+    const app = createRootContext();
+    const seen: number[] = [];
+    const o = await within(
+      app.attempt(function* () {
+        seen.push(yield* $(s));
+        yield* $(f);
+        return 'unreached';
+      }),
+    );
+    expect({ o, seen }).toEqual({ o: { status: 'failure', error: 'e' }, seen: [3] });
+    await app.close();
   });
 });
 
-describe('gen and $: the ? operator (DESIGN.md §4.13, D38)', () => {
-  it('yield* $(…) evaluates to the success value; the body returns a Result', async () => {
-    const r = await gen(async function* () {
-      const user = yield* $(getUser('42'));
-      const order = yield* $(getOrder(user));
-      return success(order);
-    });
-    expect(r).toEqual(success({ user: { id: '42' }, total: 7 }));
+// ---------------------------------------------------------------------------
+// `$` unwraps a `Result` you hold, inside a body (DESIGN.md §4.13, D42): the success value, or the failure's error
+// yielded as a `Fail`, which ends the body with the expected failure, as `yield* fail(e)` does. `Result` is the
+// interchange type: a function or a task returns one as data, a body's `$` turns it back into its `E`.
+// ---------------------------------------------------------------------------
+
+describe('$: a Result unwrapped in a body (DESIGN.md §4.13, D42)', () => {
+  it('yield* $(r) evaluates to the success value, so a body unwraps the Results its fallible steps return', async () => {
+    const app = createRootContext();
+    const order = await within(
+      app.call(function* () {
+        const user = yield* $(yield* wait(getUser('42')));
+        return yield* $(yield* wait(getOrder(user)));
+      }),
+    );
+    expect(order).toEqual({ user: { id: '42' }, total: 7 });
+    await app.close();
   });
 
-  it('a yielded failure ends the run as data and is the result itself; nothing after it runs, and no catch sees it', async () => {
-    let after = false;
-    let caught = false;
-    const r = await gen(async function* () {
+  it('a failure ends the body at once with failure(error), the same object: nothing after it runs, no catch sees it, its finally runs; call re-yields it into the caller', async () => {
+    const app = createRootContext();
+    const log: string[] = [];
+    const lookUp = task(function* (id: string) {
       try {
-        const user = yield* $(getUser('nobody'));
-        after = true;
-        return success(user);
+        const user = yield* $(yield* wait(getUser(id)));
+        log.push('after $');
+        return user;
       } catch {
-        caught = true;
-        return failure(new Error('caught'));
+        log.push('caught');
+        return { id: 'caught' };
+      } finally {
+        log.push('finally');
       }
     });
-    expect(r.status).toBe('failure');
-    expect(r.status === 'failure' && r.error).toBeInstanceOf(UserNotFound);
-    expect([after, caught]).toEqual([false, false]);
-    const known = failure(new OrderNotFound('x'));
-    expect(
-      await gen(async function* () {
-        yield* $(known);
-        return success(1);
+    const direct = await within(app.attempt(lookUp, 'nobody'));
+    const viaCall = await within(
+      app.attempt(function* () {
+        const user = yield* call(lookUp, 'nobody');
+        log.push('caller after call');
+        return user;
       }),
-    ).toBe(known);
+    );
+    const known = failure(new OrderNotFound('x'));
+    const same = await within(
+      app.attempt(function* () {
+        yield* $(known);
+      }),
+    );
+    expect({
+      direct: direct.status === 'failure' && direct.error instanceof UserNotFound,
+      viaCall: viaCall.status === 'failure' && viaCall.error instanceof UserNotFound,
+      same: same.status === 'failure' && same.error === known.error,
+      log,
+    }).toEqual({ direct: true, viaCall: true, same: true, log: ['finally', 'finally'] });
+    await app.close(); // every attempt consumed its failure
   });
 
-  it('a body may return failure(e) beside yield*, and gens nest: the inner gen is a Result the outer $ consumes', async () => {
+  it('Result is the interchange type: a task returns one as data, which is its success, and the caller’s $ turns it into the caller’s own failure', async () => {
+    const app = createRootContext();
     const tooShort = failure('too short' as const);
-    const tooLong = failure(new OrderNotFound('42'));
-    const inner = (id: string) =>
-      gen(async function* () {
-        const user = yield* $(getUser(id));
-        if (user.id.length < 2) return tooShort; // returned beside the yield*
-        return success(user.id.length);
-      });
-    const outer = (id: string, max: number) =>
-      gen(async function* () {
-        const n = yield* $(inner(id));
-        if (n > max) return tooLong;
-        return success(n * 100);
-      });
-    expect(await outer('42', 2)).toEqual(success(200));
-    expect(await outer('42', 1)).toBe(tooLong); // the body's returned failure is gen's result itself
-    expect(await outer('5', 2)).toBe(tooShort); // the inner body's returned failure, yielded by the outer $
-    const missing = await outer('7', 2);
-    expect(missing.status === 'failure' && missing.error).toBeInstanceOf(UserNotFound);
+    const inner = task(function* (id: string) {
+      const user = yield* $(yield* wait(getUser(id)));
+      if (user.id.length < 2) return tooShort; // returned as data: the task succeeds with a Result
+      return success(user.id.length);
+    });
+    const outer = task(function* (id: string) {
+      const n = yield* $(yield* call(inner, id));
+      return n * 100;
+    });
+    const outcomes = await within(
+      Promise.all([app.result(app.fork(inner.with({ onFailure: () => {} }), '5')), app.attempt(outer, '42'), app.attempt(outer, '5'), app.attempt(outer, '7')]),
+    );
+    expect({
+      innerData: outcomes[0],
+      ok: outcomes[1],
+      short: outcomes[2],
+      missing: outcomes[3].status === 'failure' && outcomes[3].error instanceof UserNotFound,
+    }).toEqual({
+      innerData: { status: 'success', value: tooShort },
+      ok: { status: 'success', value: 200 },
+      short: { status: 'failure', error: 'too short' },
+      missing: true,
+    });
+    await app.close();
   });
 
   it('yield* $(success(p)) evaluates to the promise p itself, never awaited', async () => {
-    const p = deferred<number>().promise; // never settles: an awaited value would hang the run
-    const r = await within(
-      gen(async function* () {
-        const got = yield* $(success(p));
-        return success({ got });
+    const app = createRootContext();
+    const p = deferred<number>().promise; // never settles: an awaited value would hang the body
+    const got = await within(
+      app.call(function* () {
+        return { got: yield* $(success(p)) };
       }),
     );
-    expect(r.status === 'success' && r.value.got).toBe(p);
+    expect(got.got).toBe(p);
+    await app.close();
   });
 
   it('yield* $(success(fiber)) evaluates to the fiber, whose then trap is never reached', async () => {
     const app = createRootContext();
     const got = await app.call(function* () {
       const fb = fork(function* () { return 7; });
-      const r = yield* wait(gen(async function* () {
-        const f = yield* $(success(fb));
-        return success({ f });
-      }));
-      expect(r.status === 'success' && r.value.f).toBe(fb);
-      return yield* join(fb);
+      const f = yield* $(success(fb));
+      expect(f).toBe(fb);
+      return yield* join(f);
     });
     expect(got).toBe(7);
     await app.close();
   });
 
-  it('$ is its own async iterator: the first next() unwraps once, a later one never settles, return() is done', async () => {
-    const f = failure('e');
-    const s = $(success(1));
-    const it = s[Symbol.asyncIterator]();
-    expect(it).toBe(s);
-    expect(await it.next()).toEqual({ done: true, value: 1 });
-    await neverSettles(it.next());
-    expect(await it.return!()).toEqual({ done: true, value: undefined });
-    const fi = $(Promise.resolve(f))[Symbol.asyncIterator]();
-    const step = await fi.next();
-    expect(step).toEqual({ done: false, value: f });
-    expect(step.value).toBe(f);
+  it('$ is a generator helper: a success is its return value, a failure is yielded once as a Fail record under the registered brand, a resumed one throws, and anything that is no Result is a TypeError', () => {
+    const err = new Error('e');
+    const ok = $(success(1)).next();
+    const it = $(failure(err));
+    const yielded = it.next();
+    const brand = Symbol.for('ramme.fail');
+    let resumed: unknown;
+    try {
+      it.next();
+    } catch (e) {
+      resumed = e;
+    }
+    let notAResult: unknown;
+    try {
+      $(Promise.resolve(success(1)) as unknown as Result<number, never>).next();
+    } catch (e) {
+      notAResult = e;
+    }
+    expect({
+      ok,
+      done: yielded.done,
+      carries: (yielded.value as unknown as Record<symbol, unknown>)[brand] === err,
+      own: Object.getOwnPropertySymbols(yielded.value as object).includes(brand),
+      resumed: resumed instanceof TypeError,
+      notAResult: notAResult instanceof TypeError && /must be a Result/.test(notAResult.message),
+    }).toEqual({ ok: { done: true, value: 1 }, done: false, carries: true, own: true, resumed: true, notAResult: true });
   });
 
-  it('gen does not call return() on the suspended generator: a finally in the body never runs', async () => {
-    let finallyRan = false;
-    const r = await gen(async function* () {
-      try {
-        yield* $(failure('stop'));
-        return success(1);
-      } finally {
-        finallyRan = true; // banned in ramme bodies (A7); here it shows the generator is never resumed
-      }
-    });
-    await tick();
-    expect(r).toEqual(failure('stop'));
-    expect(finallyRan).toBe(false);
-  });
-
-  it('gen rejects at once with what the body throws: a defect is not a Result', async () => {
-    const defect = new TypeError('a bug');
-    await expect(
-      gen(async function* () {
-        yield* $(success(1));
-        throw defect;
-      }),
-    ).rejects.toBe(defect);
+  it('a throw beside $ is a defect, not a failure, and so is a rejection the body waited for', async () => {
+    const app = createRootContext();
+    const bug = new TypeError('a bug');
     const rejecting = new Error('rejected source');
-    await expect(
-      gen(async function* () {
-        yield* $(Promise.reject<Result<number, never>>(rejecting));
-        return success(1);
+    const thrown = await within(
+      app.attempt(function* () {
+        yield* $(success(1));
+        throw bug;
       }),
-    ).rejects.toBe(rejecting);
+    );
+    const rejected = await within(
+      app.attempt(function* () {
+        return yield* $(yield* wait(Promise.reject<Result<number, never>>(rejecting)));
+      }),
+    );
+    expect({ thrown, rejected }).toEqual({ thrown: { status: 'defect', error: bug }, rejected: { status: 'defect', error: rejecting } });
+    await app.close();
   });
 
-  it('gen(thisArg, body) runs a generator in a method with this bound', async () => {
+  it('a generator method helper keeps its this, and its $ ends the body that yield*s it', async () => {
     class Repo {
       readonly #prefix = '4';
       readonly name = 'repo';
-      load(rest: string): Promise<Result<string, UserNotFound>> {
-        return gen(this, async function* () {
-          const user = yield* $(getUser(this.#prefix + rest));
-          return success(`${this.name}:${user.id}`);
-        });
+      *load(rest: string) {
+        const user = yield* $(yield* wait(getUser(this.#prefix + rest)));
+        return `${this.name}:${user.id}`;
       }
     }
-    expect(await new Repo().load('2')).toEqual(success('repo:42'));
-    const missing = await new Repo().load('3');
-    expect(missing.status === 'failure' && missing.error).toBeInstanceOf(UserNotFound);
+    const app = createRootContext();
+    const repo = new Repo();
+    const found = await within(app.call(function* () { return yield* repo.load('2'); }));
+    const missing = await within(app.attempt(function* () { return yield* repo.load('3'); }));
+    expect({ found, missing: missing.status === 'failure' && missing.error instanceof UserNotFound }).toEqual({ found: 'repo:42', missing: true });
+    await app.close();
   });
 
-  // gen is an async function (DESIGN.md §4.13, D38's cost): its promise rejects with whatever the body throws, and a
-  // failure thrown by a `call` inside `$` was consumed by `$`'s await, its resume step (D13).
-  it('a dropped gen(…) over $(call(t)) where t throws is an unhandled rejection, and the body’s node does not surface it', async () => {
-    const err = new Error('t threw');
-    const t = task(function* () {
-      throw err;
-    });
+  it('a $ failure in a halted finally is a release failure: the body stays aborted by state and its outcome is amended to defect(error)', async () => {
     const app = createRootContext();
-    const failures: unknown[] = [];
-    const gate = deferred();
+    const err = new OrderNotFound('in the halted finally');
+    const log: string[] = [];
     const f = app.fork(
       task(
         function* () {
-          void gen(async function* () {
-            const v = yield* $(call(t));
-            return success(v);
-          });
-          yield* wait(gate.promise); // bare: the dropped gen is reported meanwhile
-          return 'done';
+          try {
+            yield* never();
+          } finally {
+            log.push('finally');
+            yield* $(failure(err));
+            log.push('after $');
+          }
         },
-        { onFailure: (e) => void failures.push(e) },
+        { onFailure: () => {} },
       ),
     );
-    await tick(2);
-    const seen = guard().seen;
-    expect(seen).toContain(err);
-    seen.splice(seen.indexOf(err), 1); // consumed here, so the after-each check passes
-    gate.resolve();
-    expect(await within(app.result(f))).toEqual({ status: 'success', value: 'done' });
-    expect(failures).toEqual([]);
+    await tick();
+    f.abort('stop');
+    const o = await within(app.result(f));
+    expect({ o, log }).toEqual({ o: { status: 'defect', error: err }, log: ['finally'] });
     await app.close();
   });
 });
 
-// ---------------------------------------------------------------------------
-// The interplay with interruption (DESIGN.md §4.13, §4.14): `gen` is plain async code, which a body waits for with
-// `yield* wait(gen(…))`. The generator runs in the body's step until its first `await`, so a `$(call(t))` there
-// makes its op for the body's node, and `$`'s `await` runs it through its `then`: a child of the node, which nothing
-// halts but its own delivery. The body's `wait(p)` lets `p` finish (row 3): the child, a subscriber of the node, is
-// delivered and halted, `gen` rejects with its `FiberAbortedError`, and the body is returned there, the failure
-// discarded, never thrown into a `catch`.
-// ---------------------------------------------------------------------------
-
-/** Waits on a sleep, so a delivery halts it at once and its caller's release does not wait on a bare promise. */
-const slowResultTask = task(
-  function* () {
-    yield* sleep(10_000);
-    return success(1);
-  },
-  { name: 'slowResultTask' },
-);
-
-type GenBody = (resumed: () => void) => AsyncGenerator<Failure<unknown>, Result<unknown, unknown>, unknown>;
-
-interface Run {
-  readonly app: Context;
-  readonly f: Fiber<unknown>;
-  readonly released: () => boolean;
-  readonly resumed: () => boolean;
-  /** What `await gen(…)` threw in the body. */
-  readonly caught: unknown[];
-  readonly failures: unknown[];
-  readonly warn: MockInstance<typeof console.warn>;
-}
-
-/** A fiber that owns a resource and runs `await gen(body)`; `resumed` is set after the gen and by the body's own flag. */
-function runGen(mode: 'freeze' | 'restore' | 'observe', body: GenBody): Run {
-  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  const app = createRootContext();
-  const failures: unknown[] = [];
-  const caught: unknown[] = [];
-  let released = false;
-  let resumed = false;
-  const mark = (): void => {
-    resumed = true;
-  };
-  const f = app.fork(
-    task(
-      function* () {
-        own(() => {
-          released = true;
-        });
-        try {
-          const r = yield* wait(gen(() => body(mark)));
-          mark();
-          return r;
-        } catch (e) {
-          caught.push(e);
-          throw e;
-        }
-      },
-      { interrupt: mode, onFailure: (e) => void failures.push(e) },
-    ),
-  );
-  return { app, f, released: () => released, resumed: () => resumed, caught, failures, warn };
-}
-
-describe('gen and $ under interruption (DESIGN.md §4.13, §4.14)', () => {
-  for (const mode of ['freeze', 'restore'] as const)
-    it(`${mode}: a body waiting on gen over an in-flight $(call(t)) is returned once gen settles: the call's child, delivered with the body, is halted, gen rejects with its FiberAbortedError, and no catch runs; aborted, released, never resumed past the wait`, async () => {
-      const run = runGen(mode, async function* (resumed) {
-        const v = yield* $(call(slowResultTask));
-        resumed();
-        return success(v);
-      });
-      await tick(); // the body is waiting on gen, gen on $'s await of the call
-      run.f.abort();
-      expect(run.f.state).toBe('running'); // release-shaped: the body waits for gen to settle
-      expect(await within(run.app.result(run.f), 1000)).toEqual({ status: 'aborted', reason: expect.any(DOMException) });
-      expect({ caught: run.caught, released: run.released(), resumed: run.resumed(), failures: run.failures }).toEqual({
-        caught: [], // the halt discards gen's rejection: no catch sees it
-        released: true,
-        resumed: false,
-        failures: [],
-      });
-      expect(run.warn).not.toHaveBeenCalled();
-      await run.app.close();
-    });
-
-  it('observe: the body is not rejected; its call child is not delivered, runs its full duration, and gen’s Result is the outcome', async () => {
-    const brief = task(function* () {
-      yield* sleep(30);
-      return success(21);
-    });
-    let after = false;
-    const run = runGen('observe', async function* () {
-      const v = yield* $(call(brief));
-      after = true;
-      return success(v * 2);
-    });
-    await tick();
-    run.f.abort();
-    expect(await within(run.app.result(run.f), 1000)).toEqual({ status: 'success', value: success(42) });
-    expect([after, run.released()]).toEqual([true, true]);
-    expect(run.caught).toEqual([]);
-    expect(run.failures).toEqual([]);
-    expect(run.warn).not.toHaveBeenCalled();
-    await run.app.close();
-  });
-
-  // The "(6)" convention: a shape whose hazard is documented (DESIGN.md §4.4, §4.13), pinned. gen is plain async code:
-  // its `$` runs the op through its `then` at once, so a stored gen's op runs before the body waits for it.
-  it('(6) hazard (DESIGN.md §4.4): a stored gen(…) runs the op inside $ at once; a delivery while the body waits on something else halts the call’s child, so the stored gen rejects with FiberAbortedError, unhandled until the body’s yield* wait(p) handles it late, and the node completes aborted after the body, no catch run', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const lateHandled: Promise<unknown>[] = [];
-    // A listener stands in for Node's PromiseRejectionHandledWarning, which it prints only when nothing listens.
-    const onHandled = (p: Promise<unknown>): void => void lateHandled.push(p);
-    process.on('rejectionHandled', onHandled);
-    try {
-      const app = createRootContext();
-      const plain = deferred();
-      let stored: Promise<unknown> | undefined;
-      let released = false;
-      let reached = false;
-      let resumed = false;
-      let caught: unknown = 'nothing caught';
-      const f = app.fork(
-        task(
-          function* () {
-            own(() => {
-              released = true;
-            });
-            const p = gen(async function* () {
-              const v = yield* $(call(slowResultTask)); // runs the call now, a child of this body's node
-              reached = true;
-              return success(v);
-            });
-            stored = p;
-            yield* wait(plain.promise); // the body waits here, not on p
-            resumed = true;
-            try {
-              return yield* wait(p);
-            } catch (e) {
-              caught = e;
-              throw e;
-            }
-          },
-          { onFailure: () => {} },
-        ),
-      );
-      await tick();
-      f.abort();
-      await tick(3); // the call's child was delivered with the body and halted; $'s await rejected, and p with it
-      const unhandled = unhandledRejectionGuard()!.seen.splice(0); // what the setup hook would fail this test with
-      expect({ unhandled: unhandled.map((e) => (e as Error).name), state: f.state, released, resumed }).toEqual({
-        unhandled: ['FiberAbortedError'],
-        state: 'running', // row 3: the halt lets the wait on the plain promise finish
-        released: false,
-        resumed: false,
-      });
-      plain.resolve();
-      expect(await within(app.result(f), 1000)).toEqual({ status: 'aborted', reason: expect.any(DOMException) });
-      await tick();
-      expect({ released, resumed, reached, caught, lateHandled: lateHandled.length, isStored: lateHandled[0] === stored }).toEqual({
-        released: true,
-        resumed: true, // resumed by the plain promise, then returned at the wait(p), its rejection discarded
-        reached: false,
-        caught: 'nothing caught',
-        lateHandled: 1,
-        isStored: true,
-      });
-      expect(warn).not.toHaveBeenCalled();
-      await app.close();
-    } finally {
-      process.off('rejectionHandled', onHandled);
-    }
+describe('fromThrowing over ramme work (DESIGN.md §4.13, §4.14)', () => {
+  it('over an op, an expected failure and a defect are alike a failure of the Result: the op’s then rejects with the error (D42)', async () => {
+    const app = createRootContext();
+    const expected = new UserNotFound('7');
+    const bug = new TypeError('a bug');
+    const failed = await fromThrowing(app.call(function* () {
+      yield* sleep(0);
+      yield* fail(expected);
+    }));
+    const threw = await fromThrowing(app.call(function* () {
+      yield* sleep(0);
+      throw bug;
+    }));
+    expect({ failed, threw }).toEqual({ failed: failure(expected), threw: failure(bug) });
+    await app.close(); // each then consumed its failure
   });
 
   // fromThrowing's promise form is an async function whose `await` calls an op's `then` a job after fromThrowing is
@@ -622,7 +481,7 @@ describe('gen and $ under interruption (DESIGN.md §4.13, §4.14)', () => {
       f.abort();
       const outcome = await within(app.result(f), 1000);
       if (shape === 'stored join(f), supported') {
-        expect(outcome).toEqual({ status: 'failure', error: err }); // surfaced from the parent (I11)
+        expect(outcome).toEqual({ status: 'defect', error: err }); // surfaced from the parent (I11): a defect (D42)
         expect(failures).toEqual([err]);
       } else {
         expect(outcome).toEqual({ status: 'aborted', reason: expect.any(DOMException) });

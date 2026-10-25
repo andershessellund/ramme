@@ -473,7 +473,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
   });
 
   it('should pass the fiber to onFailure', async () => {
-    let capturedFiber: Fiber<unknown> | undefined;
+    let capturedFiber: Fiber<unknown, unknown> | undefined; // a handler is handed any fiber, whatever its E (D42)
 
     class Worker {
       readonly pool = here().pool({

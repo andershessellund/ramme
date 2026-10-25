@@ -445,7 +445,7 @@ describe('ported lifecycle-events cases', () => {
     expect(ev.of('node:created').filter((e) => e.kind === 'fiber').map((e) => e.task)).toEqual(['main', 'child', 'inline']);
   });
 
-  it('a failing call: the child settles and completes with failure, and the caller catches it (ported "call:leave with error on failure")', async () => {
+  it('a failing call: the child settles and completes with defect, and the caller catches it (ported "call:leave with error on failure")', async () => {
     const ev = events();
     let childId = -1;
     let caught: unknown;
@@ -467,11 +467,11 @@ describe('ported lifecycle-events cases', () => {
     await ev.root.close();
     expect((caught as Error).message).toBe('boom');
     expect(ev.of('node:created').find((e) => e.id === childId)?.task).toBe('fail-call');
-    expect(ev.of('node:settled').find((e) => e.id === childId)?.outcome).toBe('failure');
-    expect(ev.of('node:complete').find((e) => e.id === childId)?.outcome).toBe('failure');
+    expect(ev.of('node:settled').find((e) => e.id === childId)?.outcome).toBe('defect');
+    expect(ev.of('node:complete').find((e) => e.id === childId)?.outcome).toBe('defect');
   });
 
-  it('join:leave carries the failure outcome of a joined fiber that failed (ported "join:leave with error outcome on join failure")', async () => {
+  it('join:leave carries the defect outcome of a joined fiber that threw (ported "join:leave with error outcome on join failure")', async () => {
     const ev = events();
     let joinerId = -1;
     let joinedId = -1;
@@ -491,7 +491,7 @@ describe('ported lifecycle-events cases', () => {
     await ev.root.close();
     expect((caught as Error).message).toBe('join-fail');
     expect(ev.of('join:enter').map((e) => [e.id, e.joinedId])).toEqual([[joinerId, joinedId]]);
-    expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'failure']]);
+    expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([[joinerId, joinedId, 'defect']]);
   });
 
   it('result(f) emits join:enter and join:leave on the awaiter, and a halted awaiter no join:leave (ported "join:enter and join:leave for Fiber.result")', async () => {
@@ -508,14 +508,14 @@ describe('ported lifecycle-events cases', () => {
       ids.push(ok.id, bad.id);
       statuses.push((yield* result(ok)).status, (yield* result(bad)).status);
     });
-    expect(statuses).toEqual(['success', 'failure']);
+    expect(statuses).toEqual(['success', 'defect']);
     expect(ev.of('join:enter').map((e) => [e.id, e.joinedId])).toEqual([
       [awaiterId, ids[0]],
       [awaiterId, ids[1]],
     ]);
     expect(ev.of('join:leave').map((e) => [e.id, e.joinedId, e.outcome])).toEqual([
       [awaiterId, ids[0], 'success'],
-      [awaiterId, ids[1], 'failure'],
+      [awaiterId, ids[1], 'defect'],
     ]);
 
     const gate = deferred();

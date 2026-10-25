@@ -572,7 +572,7 @@ describe('the halt (DESIGN.md §4.14, D39, D41)', () => {
         seen = yield* wait(Promise.allSettled([here().join(f1 as unknown as Fiber<unknown>), here().join(f2)]));
       }));
       await tick();
-      expect(f1.outcome?.status).toBe('failure');
+      expect(f1.outcome?.status).toBe('defect');
       B.abort('stop');
       await expect(p).rejects.toBeInstanceOf(FiberAbortedError);
       expect(B.outcome?.status).toBe('aborted');
@@ -964,7 +964,7 @@ describe('release errors that String() cannot convert (DESIGN.md §2.4, I2, I10)
           expect(() => c.abort()).not.toThrow();
           await tick();
           expect(c.state).toBe('complete');
-          expect(c.outcome?.status).toBe('failure');
+          expect(c.outcome?.status).toBe('defect');
           expect((c.outcome as { error: unknown }).error).toBe(bad);
           if (ev !== undefined) expect(ev.of('entry:released').find((e) => e.id === c.id)?.error).toBe('[object Object]');
           await expect(app.close()).rejects.toBe(bad);
