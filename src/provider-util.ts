@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// The provider helpers (DESIGN.md §3.1).
+// The provider functions (DESIGN.md §3.1).
 //
 // - A provider's value is stored on the node it is registered on, whatever the
 //   key or the implementation class declares as its scope: scope places only a

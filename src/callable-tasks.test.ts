@@ -10,6 +10,9 @@
 // `createKeyFor` token is made with `impl`'s declared dependencies and scoped as `impl` is at each read; a task is no
 // key with a provider either (its registration, an alias to it, `setScope` and `setDependencies` on it refused).
 //
+// And README's unit of work: a release that returns a bound task's call (`return this.commit()`) runs it as release
+// work, in a node of its own under the release fiber, to its end before the entries below it are released.
+//
 // Each test compares one observation object.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -40,7 +43,7 @@ import { task } from './fiber.js';
 import { isTask } from './internal-context.js';
 import { fetch, nextFrame } from './platform.js';
 import { aliasProvider, factoryProvider, valueProvider } from './provider-util.js';
-import { createScope } from './scope.js';
+import { RequestScope, createScope } from './scope.js';
 import type { Scope } from './scope.js';
 import { events, impl, within } from './test/util.js';
 import type { EventLog } from './test/util.js';
@@ -376,5 +379,82 @@ describe('a task is no injection key, with a provider either (D44, decision 7)',
     };
     const refused = { cls: 'TypeError', names: true };
     expect(seen).toEqual({ child: refused, addProvider: refused, alias: refused, setScope: refused, setDependencies: refused, lookup: refused });
+  });
+});
+
+describe('README’s UnitOfWork: a release that returns a bound task’s call runs it as release work (DESIGN.md §2.6, §4.5)', () => {
+  it('the commit, or the rollback for a failed or an interrupted request, runs in its own node under the release fiber, with the unit as this, to its end before the lease is returned', async () => {
+    const log: string[] = [];
+    class Lease implements Disposable {
+      open = true;
+      [Symbol.dispose](): void {
+        this.open = false;
+        log.push('lease returned');
+      }
+    }
+    class UnitOfWork {
+      static readonly scope = RequestScope;
+      readonly #node = current();
+      readonly #lease = own(new Lease()); // owned by this value's node, below the entry that commits (LIFO)
+      constructor() {
+        own(this, () => {
+          const o = this.#node.parent!.outcome; // the request's outcome
+          if (o === undefined) return this.#node.signal.aborted ? this.rollback() : this.commit();
+          return o.status === 'success' ? this.commit() : this.rollback();
+        });
+      }
+      readonly commit = task(this, function* commit() {
+        yield* sleep(1);
+        log.push(`commit ${this.#where()}`);
+      });
+      readonly rollback = task(this, function* rollback() {
+        yield* sleep(1);
+        log.push(`rollback ${this.#where()}`);
+      });
+      #where(): string {
+        const n = current();
+        return `in ${impl(n).kind} ${n.name} under ${n.parent!.name}, this ${this instanceof UnitOfWork}, lease open ${this.#lease.open}`;
+      }
+    }
+    const ok = task(function* ok() {
+      lookup(UnitOfWork);
+      yield* sleep(1);
+    }, { scopes: [RequestScope] });
+    const boom = task(function* boom() {
+      lookup(UnitOfWork);
+      yield* sleep(1);
+      throw new Error('boom');
+    }, { scopes: [RequestScope] });
+    const hung = task(function* hung() {
+      lookup(UnitOfWork);
+      yield* never();
+    }, { scopes: [RequestScope] });
+    const seen = await within(
+      app().call(function* () {
+        yield* ok();
+        log.push('--');
+        const failed = yield* attempt(boom());
+        log.push('--');
+        const h = fork(hung());
+        yield* sleep(1);
+        h.abort('hung up');
+        return { failed: failed.status, hung: (yield* result(h)).status };
+      }),
+      2000,
+    );
+    const where = 'in fiber %s under release:UnitOfWork, this true, lease open true';
+    expect({ seen, log }).toEqual({
+      seen: { failed: 'defect', hung: 'aborted' },
+      log: [
+        `commit ${where.replace('%s', 'commit')}`,
+        'lease returned',
+        '--',
+        `rollback ${where.replace('%s', 'rollback')}`,
+        'lease returned',
+        '--',
+        `rollback ${where.replace('%s', 'rollback')}`,
+        'lease returned',
+      ],
+    });
   });
 });

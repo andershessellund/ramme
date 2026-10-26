@@ -59,7 +59,8 @@ class DbPool {
 /**
  * DESIGN.md §2.6's idiom, adapted from README's `UnitOfWork`: `commit` and `rollback` are async here (a tick, then a
  * log line), so a test sees whether the lease is still held when a real asynchronous commit ends (LIFO), and `query`
- * is synchronous; README's generator `commit` and `rollback` are pinned in src/generator-pin.test.ts.
+ * is synchronous; README's `commit` and `rollback`, bound tasks a release returns the call of, are pinned in
+ * src/callable-tasks.test.ts.
  */
 class UnitOfWork {
   static readonly scope = RequestScope;

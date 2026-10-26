@@ -52,7 +52,7 @@
 // `finally` did (D24). A generator that ends with any value other than the
 // halt's sentinel lost the halt, through a `yield*` in a helper's `finally` or a
 // `return` in a `finally`, and so did one that uses the sentinel, which that
-// helper's `yield*` gave it; dev mode reports either (decision 29).
+// helper's `yield*` gave it; dev mode reports either (decision 29; DESIGN.md §4.4).
 //
 // An expected failure is the fourth exit (D42): a yielded `Fail`, from
 // `yield* fail(e)`, `$` over a failed `Result`, or a callee's failure re-yielded

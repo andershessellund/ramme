@@ -17,8 +17,10 @@
 // `this.once = v`, are data), in ramme code only (decision 26): lexically inside
 // a generator function (a body, a helper, a generator method; nested callbacks
 // included) or anywhere in a class that uses ramme (one with a generator
-// method, or a free call of `inject`, `lookup`, `own`, `current`, `signal`,
-// `fork`, `child`, `pool` or `listen` anywhere in it). Top-level code is not
+// method, or a free call of `task`, `inject`, `lookup`, `own`, `current`,
+// `signal`, `fork`, `child`, `pool` or `listen` anywhere in it; `task` marks a
+// service in the canonical style, whose operations are `task(this, …)` fields
+// and which has no generator method, D44). Top-level code is not
 // flagged: the README's `server.on('request', (req) => app.fork(…))` names its
 // node.
 
@@ -29,8 +31,8 @@ import { docsUrl } from '../docs.js';
 /** The emitter methods that register a listener. */
 const EMITTER_METHODS = new Set(['on', 'once', 'addListener']);
 
-/** The free calls that mark a class as built under a node: the synchronous verbs a service uses. */
-const RAMME_CALLS = new Set(['inject', 'lookup', 'own', 'current', 'signal', 'fork', 'child', 'pool', 'listen']);
+/** The free calls that mark a class as built under a node: `task` (a `task(this, …)` field) and the synchronous verbs a service uses. */
+const RAMME_CALLS = new Set(['task', 'inject', 'lookup', 'own', 'current', 'signal', 'fork', 'child', 'pool', 'listen']);
 
 /** An `on<event>` handler property: `on` and a lower-case event name, as the platform's are (`onclick`, `onmessage`). */
 const HANDLER_PROPERTY = /^on[a-z]+$/;

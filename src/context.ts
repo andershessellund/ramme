@@ -25,7 +25,8 @@ declare const INSTRUCTION: unique symbol;
 /**
  * What an op yields to the driver that steps a generator body (DESIGN.md §4.2, D41): an opaque record, never the op
  * itself, so `yield op` without the star is a type error in a body and a `TypeError` thrown back at run time. Exported
- * so that a library's generator helper can name its type (`Generator<Instruction, T, unknown>`).
+ * so that a body can be annotated (`Generator<Instruction, T, unknown>`), and a declaration that spells a generator's
+ * type emitted (DESIGN.md §8).
  */
 export interface Instruction {
   readonly [INSTRUCTION]: true;
@@ -37,8 +38,8 @@ declare const FAIL: unique symbol;
 /**
  * What `yield* fail(e)` yields to the driver (D42, DESIGN.md §4.13): an expected failure, the fourth way a body ends,
  * under a brand disjoint from `Instruction`'s, so `task` reads `E` off a body's yield union and an ordinary op adds
- * nothing to it. Exported so that a library's generator helper can name its type
- * (`Generator<Instruction | Fail<NotFound>, T, unknown>`), which its declaration emit needs as it needs `Instruction`.
+ * nothing to it. Exported so that an annotated body can name it
+ * (`Generator<Instruction | Fail<NotFound>, T, unknown>`), and a declaration emit that spells it can, as `Instruction`.
  */
 export interface Fail<E> {
   readonly [FAIL]: E;
@@ -54,11 +55,11 @@ export interface Fail<E> {
 type Fails<E> = E extends unknown ? Fail<E> : never;
 
 /**
- * Anything a generator body runs with `yield*` to get a `T` (DESIGN.md §4.2): an op, or a generator helper, since a
- * `Generator<Instruction, T, unknown>` is an `Operation<T>`. `E` is what it may end the body with, re-yielded as
- * `Fail<E>` (D42): `yield* t(…)` is `t`'s value, or ends the caller with `t`'s expected failure. The type to annotate
- * a helper that is only `yield*`ed with. `Body` has no `Operation<T>` arm (D41), so a helper a body returns
- * (`task(() => helper(x))`), and a body that needs an annotation, is typed `Generator<Instruction | Fail<E>, T, unknown>`.
+ * The type of what a generator body may run with `yield*` to get a `T` (DESIGN.md §1.3, §4.2): an op, and `fail(e)`
+ * and `$(r)`. `E` is what it may end the body with, re-yielded as `Fail<E>` (D42): `yield* t(…)` is `t`'s value, or
+ * ends the caller with `t`'s expected failure. A `Generator<Instruction, T, unknown>` is one too, which the runtime
+ * drives though ramme has no helpers (D44, decision 5). `Body` has no `Operation<T>` arm (D41), so a body that needs an
+ * annotation is typed `Generator<Instruction | Fail<E>, T, unknown>`.
  */
 export interface Operation<T, E = never> {
   [Symbol.iterator](): Iterator<Instruction | Fails<E>, T, unknown>;
@@ -176,7 +177,7 @@ export type Failure<E = unknown> = { readonly status: 'failure'; readonly error:
 
 /**
  * An expected failure as a return value: a plain object, never a class, so any `{ status, value | error }` of
- * this shape is one (DESIGN.md §4.12, D38). The helpers are in `ramme/result`.
+ * this shape is one (DESIGN.md §4.12, D38). The functions over it are in `ramme/result`.
  */
 export type Result<T, E = unknown> = Success<T> | Failure<E>;
 

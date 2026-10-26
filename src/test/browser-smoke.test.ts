@@ -112,7 +112,7 @@ describe('the browser is a target: the core and ramme/platform through their pub
     });
     const shown: unknown[] = [];
     const errors: unknown[] = [];
-    const search = task(function* (q: string) {
+    const search = task(function* search(q: string) {
       yield* sleep(20); // debounce: a newer keystroke halts this run here
       const res = yield* fetch(`/search?q=${encodeURIComponent(q)}`); // a halt aborts the request
       shown.push(yield* wait(res.json()));
@@ -128,7 +128,7 @@ describe('the browser is a target: the core and ramme/platform through their pub
     box.run(() =>
       listen(input, 'input', () => {
         latest?.abort(); // the previous run stops at its sleep or its fetch
-        latest = fork(search.with({ onFailure: (e) => void errors.push(e) }), input.value); // box is bodiless: a handler
+        latest = fork(search.with({ onFailure: (e) => void errors.push(e) })(input.value)); // box is bodiless: a handler
       }),
     );
     type('a');

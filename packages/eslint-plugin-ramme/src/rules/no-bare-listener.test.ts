@@ -82,5 +82,12 @@ ruleTester.run('no-bare-listener', noBareListener, {
       code: "class Feed {\n  constructor(el) { el.onscroll = () => this.more(); }\n  *more() { yield* load(); }\n}",
       errors: [{ messageId: 'bare', data: { form: 'onscroll =' }, line: 2 }],
     },
+    {
+      name: 'a service in the canonical style: a class whose only ramme is its task(this, …) fields is built under a node',
+      code:
+        "class Socket {\n  readonly #ws = new WebSocket(url);\n  constructor() {\n    this.#ws.addEventListener('message', (e) => this.#got(e));\n  }\n" +
+        '  readonly send = task(this, function* send(s: string) { yield* flush(this.#ws, s); });\n}',
+      errors: [{ messageId: 'bare', data: { form: 'addEventListener' }, line: 4 }],
+    },
   ],
 });

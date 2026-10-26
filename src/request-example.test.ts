@@ -1,9 +1,11 @@
 // request-example.test.ts — the request of README.md 'A request', end to
 // end. The handler is the README's request handler verbatim (its unused `res`
-// parameter is spelled `_res` for the lint rule); `Pool` is a class key whose
-// default factory has an owned reaper; `work(req)` is a generator helper that
-// `lookup`s `Conn`; a fake server delivers its request callback to the listener
-// and its other callbacks in a later job, with no current node, and the one
+// parameter is spelled `_res` for the lint rule, and its pool is `Pool`);
+// `Pool` is a class key whose default factory has an owned reaper; `Orders` is
+// a service whose `place`, a bound task (`task(this, …)`), runs the work the
+// test sets, which `lookup`s `Conn`; a fake server delivers its request
+// callback to the listener and its other callbacks in a later job, with no
+// current node, and the one
 // place a node is named is `app.fork(...)` there (line 4). Each root is created
 // under `await using` and each test body runs as a top-level
 // `await app.call(main)`.
@@ -166,16 +168,18 @@ function world() {
     const conn = lookup(Conn); // a borrow for the call's node
     return yield* wait(conn.query(req.url, signal()));
   };
-  /** A generator helper: the body of the call of line 3, so it runs in the call's node. */
-  function* work(req: Req): Generator<Instruction, string, unknown> {
-    return yield* workImpl(req);
+  /** README's `Orders`: `place` is the call of line 3, so the work runs in its node, a child of the handler's. */
+  class Orders {
+    readonly place = task(this, function* place(req: Req) {
+      return yield* workImpl(req);
+    });
   }
 
   // The README's request handler, verbatim.
-  const handle = task(function* (req: Req, _res: Res) {
+  const handle = task(function* handle(req: Req, _res: Res) {
     const pool = lookup(Pool); // 1
     const lease = own(yield* wait(pool.acquire())); // 2
-    return yield* task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] })(); // 3
+    return yield* lookup(Orders).place.with({ providers: [valueProvider(Conn, lease.conn)] })(req); // 3
   });
 
   function respond500(res: Res, e: unknown): void {

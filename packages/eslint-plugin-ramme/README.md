@@ -6,8 +6,8 @@ A ramme body is a generator function that the runtime steps: every wait is a
 `yield*` where it waits. Most mistakes are type errors already; these rules
 flag what types do not see, or say it better: an `async` function passed as a
 body, a work op made and never yielded (it runs nothing), an outcome thrown
-away, a platform timer, a generator helper (ramme has none: a generator
-function is a task body), a few wiring errors visible in the syntax, and the
+away, a platform timer, a generator function not written inline as a body
+(every function that waits is a task), a few wiring errors visible in the syntax, and the
 platform's bare waits and callbacks that `ramme/platform` spells: a listener,
 `fetch`, `for await`. A [`style`](#style) preset adds the canonical style's
 two rules.
@@ -62,8 +62,8 @@ export default [{ plugins: { ramme }, rules: { 'ramme/no-unused-op': 'error', 'r
 
 Recommended alongside, both type-aware: `@typescript-eslint/no-floating-promises`,
 for a forgotten `await` on a plain promise in top-level and test code, and
-`@typescript-eslint/await-thenable`, for `await helper()` on a generator helper
-there, which resolves to the generator object (ramme's DESIGN.md §9).
+`@typescript-eslint/await-thenable`, for an `await` there of what is no
+thenable, a generator object among them (ramme's DESIGN.md §9).
 
 ## Rules
 
@@ -71,7 +71,7 @@ there, which resolves to the generator object (ramme's DESIGN.md §9).
 | --- | --- | --- |
 | [`no-async-body`](#no-async-body) | error | an `async` function where a body is expected |
 | [`no-unused-op`](#no-unused-op) | error | a work op (`sleep(…)`, `app.call(…)`, …; with type information a task's call `t(…)`) as a statement, never yielded |
-| [`no-generator-helper`](#no-generator-helper) | error | a generator function that is no task body, `promised` body or release |
+| [`no-generator-helper`](#no-generator-helper) | error | a generator declaration or method, or a generator expression outside a body's place (`task`, `promised`, a release, a failure handler, …) |
 | [`no-unused-outcome`](#no-unused-outcome) | error | `yield* attempt(…)`, `settle(…)` or `result(f)` whose outcome is discarded |
 | [`no-timers`](#no-timers) | error | `setTimeout`, `setInterval`, `setImmediate`, `requestAnimationFrame` |
 | [`no-stored-borrow`](#no-stored-borrow) | error | a `lookup(…)` result stored in a field, on `this` or in a module variable |
@@ -104,7 +104,7 @@ with a `TypeError` naming `function*`. Write it as a generator, run every op
 with `yield*`, and wait for a foreign promise with `yield* wait(p)` (§4.2, §4.5):
 
 ```ts
-const handle = task(function* (req: Request) {   // instead of task(async (req) => …)
+const handle = task(function* handle(req: Request) {   // instead of task(async (req) => …)
   const user = yield* loadUser(req.id);
   return yield* wait(render(user));
 });
@@ -158,7 +158,7 @@ sends nothing. A forgotten `yield*` is missing work, silent at run
 time; this rule is its report (§4.2, §4.4).
 
 ```ts
-const signup = task(function* (user: User) {
+const signup = task(function* signup(user: User) {
   yield* sendEmail(user);   // instead of sendEmail(user);
 });
 ```
@@ -182,7 +182,7 @@ parameter `n`, with an `x` that is none of those, is not flagged, and
 
 ### no-generator-helper
 
-**Flags** a generator function that is no task body, in a file that imports
+**Flags** a generator function not written inline as a body, in a file that imports
 from `ramme` or a subpath: a generator declaration (`function* parse() { … }`),
 a generator method of a class or an object literal (`*parse() { … }`), and a
 generator expression anywhere but an argument of `task` (free or bound,
@@ -193,11 +193,12 @@ generator expression anywhere but an argument of `task` (free or bound,
 a generator method of the options (`{ *onFailure(e) { … } }`): a failure
 handler.
 
-**Why.** ramme has no helpers: the tree is the call tree (D44). A helper,
-`yield* parse(x)` of a generator function, runs in its caller's node: its
-temporaries are the caller's, it cannot be interrupted, timed or seen on its
-own, and a `yield*` in its `finally` loses the caller's halt (D41, decision
-29). Written as a task, it is called the same way and is a node of its own:
+**Why.** Every function that waits is a task: the tree is the call tree
+(D44). A generator function a body runs with `yield* parse(x)` runs in its
+caller's node instead: its temporaries are the caller's, it cannot be
+interrupted, timed or seen on its own, and a `yield*` in its `finally` loses
+the caller's halt (§4.4; D41, decision 29). Written as a task, it is called
+the same way and is a node of its own:
 
 ```ts
 const parse = task(function* parse(req: Request) {   // instead of function* parse(req: Request)
@@ -209,6 +210,9 @@ const parse = task(function* parse(req: Request) {   // instead of function* par
 **Approximations.** An `async function*` is not flagged (it is no ramme
 generator; `no-async-body` reports one passed as a body), and neither is an
 iterator-protocol method (`*[Symbol.iterator]()`, `*[Symbol.asyncIterator]()`).
+Every generator declaration is flagged, a task body passed by name included
+(`function* poll() { … }`, then `task(poll)`): write the body inline in
+`task(…)`.
 A generator that only iterates data (`function* range(n)`) in a file that
 uses ramme is flagged all the same, and so is a generator handed to a
 wrapper of your own over `task`: disable it there with a reason. The verbs
@@ -333,11 +337,11 @@ an emitter's `<x>.on(type, …)`, `<x>.once(type, …)` and
 assigned as a property (`el.onclick = …`, `ws.onmessage = …`, `??=` and the
 other logical assignments too; assigning `null` or `undefined` removes one and
 is fine). Ramme code is what is lexically inside
-a generator function (a body, a helper, a generator method, with the callbacks
-nested in it) or anywhere in a class that uses ramme: one with a generator
-method, or a free call of `inject`, `lookup`, `own`, `current`, `signal`,
-`fork`, `child`, `pool` or `listen` anywhere in it (a service built under a
-node).
+a generator function (a body, a generator method or any other, with the
+callbacks nested in it) or anywhere in a class that uses ramme: one with a generator
+method, or a free call of `task` (a `task(this, …)` field), `inject`,
+`lookup`, `own`, `current`, `signal`, `fork`, `child`, `pool` or `listen`
+anywhere in it (a service built under a node).
 
 **Why.** A callback the platform makes runs outside every node: `current()`,
 `lookup`, `own` and `fork` have no node there and throw, and nothing removes
@@ -355,14 +359,14 @@ const box = app.child({ name: 'search-box' });
 box.run(() =>
   listen(input, 'input', () => {                  // instead of input.addEventListener('input', …)
     latest?.abort();
-    latest = fork(search.with({ onFailure: showError }), input.value);
+    latest = fork(search.with({ onFailure: showError })(input.value));
   }),
 );
 ```
 
 **Approximations.** Matched by method name: any `.on(a, b)` in ramme code is
 taken for an emitter's (a router's or a jQuery object's too), and a class that
-uses none of the listed names (a plain helper class a body instantiates) is not
+uses none of the listed names (a plain class a body instantiates) is not
 checked. An `on<event>` property is matched by its name (`on` and lower-case
 letters) and by what it is assigned: a value that is never a function (a
 literal, a template, an object or array literal, an operator's result such as
@@ -383,7 +387,7 @@ a listener registered through an alias or a library wrapper; a
 
 **Flags** a call of the global `fetch`, bare or as `globalThis.fetch(…)`,
 `window.fetch(…)` or `self.fetch(…)`, lexically inside a generator function
-(a body, a helper, a generator method, and the callbacks nested in it, so the
+(a body, a generator method or any other, and the callbacks nested in it, so the
 older `yield* wait((signal) => fetch(url, { signal }))` is flagged too), in a
 file that imports from `ramme` or one of its subpaths. A file that does not
 use ramme is not checked, and neither is code outside every generator
@@ -399,7 +403,7 @@ parameters and is an op handed the body's signal, so a halt aborts the request
 ```ts
 import { fetch } from 'ramme/platform';
 
-const load = task(function* (id: string) {
+const load = task(function* load(id: string) {
   const res = yield* fetch(`/users/${id}`);       // instead of yield* wait(fetch(`/users/${id}`))
   return yield* wait(res.json());
 });
@@ -432,7 +436,7 @@ does not change them.
 
 **Flags** every `for await` in a file that imports from `ramme` or one of its
 subpaths, the top level included, and one lexically inside a generator
-function anywhere (in an async callback or helper a body contains). An
+function anywhere (in an async callback or function a body contains). An
 `async function*` in a file that does not use ramme is no body, and is not
 flagged.
 
@@ -446,7 +450,7 @@ and the node waits for it (D43):
 ```ts
 import { each } from 'ramme/platform';
 
-const tail = task(function* (lines: AsyncIterable<string>) {
+const tail = task(function* tail(lines: AsyncIterable<string>) {
   for (const line of yield* each(lines)) {        // instead of for await (const line of lines)
     handle(line);
     yield* each.next();                           // every pass, a `continue` included
@@ -460,22 +464,32 @@ plain async code's included (a script that reads lines before it calls
 
 ## Style
 
-ramme accepts more than its canonical style, which `configs.style` checks, as
-warnings (D44). The style, in five rules:
+ramme accepts more than its canonical style (D44). `configs.style` reports
+two departures from it, as warnings: an anonymous task (`named-task`) and a
+function used as a key (`no-function-key`); a token with a factory, and the
+rest of the style, it does not check. The style, in five rules (ramme's README,
+"The rules"):
 
-- **A service is a class** with `inject` fields for what it depends on and
-  `task(this, …)` fields for what it does:
-  `readonly get = task(this, function* get(path: string) { … })`.
+- **A service is a class, and its own key**: `readonly #x = inject(X)`
+  fields for what it is made of,
+  `readonly get = task(this, function* get(path: string) { … })` fields for
+  what it does, and `static readonly scope` when it holds state for one
+  session, request or other unit.
 - **Separate an interface from its class only at two implementations**, and
-  then key it with `createKeyFor(Impl)` (`createKeyFor<Clock>(SystemClock)`).
-- **Every function that waits is a task**: there are no generator helpers
-  (`no-generator-helper`), and a task is called as a function is,
+  then key it with `createKeyFor` (`createKeyFor<Clock>(SystemClock)`).
+- **Every function that waits is a task**, and one that does not is a plain
+  function: a generator function is a task's body (`no-generator-helper`, a
+  `recommended` rule), and a task is called as a function is,
   `yield* parse(x)`.
 - **A standalone task is an entry point**: a request handler, a job, `main`;
-  the rest of the work is a service's.
-- **`inject` for structural dependencies, `lookup` for contextual ones**: a
-  service's collaborators are injected where it is built; what the current
-  request or session holds is looked up in the body.
+  the rest of the work is the services' operations.
+- **`inject` for structural dependencies, `lookup` for contextual ones**:
+  what a service is made of is injected where it is built; what is true
+  where the work runs (the transaction, the connection, the request, the
+  principal) is looked up in the body. A service that declares no scope and
+  injects a contextual key is contextual itself, placed under the provider
+  and re-created with it: a legitimate design, chosen by name. One that
+  declares its scope does not see a provider below its scope's node.
 
 ### named-task
 
@@ -496,7 +510,8 @@ const poll = task(function* poll() { yield* sleep(1_000); });   // instead of ta
 ```
 
 **Approximations.** A body passed by name (`task(parse)`) is taken as named,
-whatever the function's name is; options other than an object literal, in
+whatever the function's name is (a generator so passed is
+`no-generator-helper`'s to report); options other than an object literal, in
 the call or in a chained `.with(…)`, are taken to name it. An inline body of `fork`, `attempt` or a node's `call` is
 not checked: it is no `task(…)`.
 
@@ -514,7 +529,7 @@ declare its lifetime with `static readonly scope`, a value by a token, and an
 interface by `createKeyFor` over its class (D44):
 
 ```ts
-const ClockKey = createKeyFor<Clock>(SystemClock);   // instead of inject(makeClock)
+export const Clock = createKeyFor<Clock>(SystemClock);   // the interface's key; instead of inject(makeClock)
 ```
 
 **Approximations.** By this file's declarations only: an import, a parameter
@@ -523,9 +538,10 @@ or a property is not checked, nor is a function given as a provider's value
 
 ## Not covered
 
-- A `yield*` in a helper's `finally` loses the halt: the body runs on past it
-  as release work (D41, decision 29). `no-generator-helper` reports the helper
-  itself; one it does not see (an imported helper, a disabled report) still
+- A `yield*` in the `finally` of a generator function a body `yield*`s
+  loses the halt: the body runs on past it as release work (§4.4; D41,
+  decision 29). `no-generator-helper` reports the generator function itself;
+  one it does not see (an imported one, a disabled report) still
   loses it, and ramme's development mode reports a lost halt.
 - An async function that uses ramme after its first `await` (an `async`
   release, a library callback) throws `NoCurrentNodeError` there; write it as

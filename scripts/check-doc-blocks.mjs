@@ -66,25 +66,29 @@ const RETIRED = new Map([
 const ENVIRONMENT = new Map([
   // README's services: a configuration class.
   ['Config', 'declare class Config { readonly apiUrl: string; }'],
-  // The examples' database: a connection to own, a transaction to commit or roll back, a driver's transaction
-  // callback, and the rows of the expected-failure examples.
+  // The examples' database: a connection to own, a transaction to commit or roll back, and a driver's transaction
+  // callback; and the client the expected-failure examples' `Users` service is made of, with its rows.
   [
     'db',
     'declare const db: { connect(): Promise<Connection>; begin(): Promise<Transaction>; ' +
-      'transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>; ' +
-      'findUser(id: string): Promise<User | undefined>; findOrder(user: User): Promise<Order | undefined> };',
+      'transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> };',
+  ],
+  [
+    'Database',
+    'declare class Database { findUser(id: string): Promise<User | undefined>; findOrder(user: User): Promise<Order | undefined>; }',
   ],
   ['Connection', 'interface Connection { query(sql: string, signal?: AbortSignal): Promise<unknown>; release(): void; }'],
   ['Transaction', 'interface Transaction { commit(): Promise<void>; rollback(): Promise<void>; }'],
   // The unit of work's pool (README; DESIGN.md §2.6), which hands out a lease synchronously, and README's request's
-  // pool, which hands one out asynchronously.
+  // pool, a driver's, which hands one out asynchronously.
   ['DbPool', 'declare class DbPool { acquire(owner?: unknown): { readonly conn: Connection }; }'],
   ['Connections', 'declare class Connections { acquire(): Promise<AsyncDisposable & { readonly conn: Connection }>; }'],
-  // README's `$`: a gateway whose authorization is a `Result`, written out (a ramme name is never declared here).
+  // README's `$`: the gateway client `Payments` is made of, whose authorization is a `Result`, written out (a ramme
+  // name is never declared here).
   [
-    'gateway',
-    "declare const gateway: { authorize(card: Card, amount: number): Promise<{ status: 'success'; value: Auth } | " +
-      "{ status: 'failure'; error: Declined }>; capture(auth: Auth): Promise<Receipt> };",
+    'Gateway',
+    "declare class Gateway { authorize(card: Card, amount: number): Promise<{ status: 'success'; value: Auth } | " +
+      "{ status: 'failure'; error: Declined }>; capture(auth: Auth): Promise<Receipt>; }",
   ],
   // README's driver adapter: node-postgres's pool and client, and the reader's own transaction helper.
   [
@@ -94,6 +98,11 @@ const ENVIRONMENT = new Map([
       'Promise<{ rows: unknown[] }>; connect(): Promise<PoolClient>; end(): Promise<void>; } }',
   ],
   ['withTx', 'declare function withTx<T>(client: pg.PoolClient, fn: (tx: pg.PoolClient) => Promise<T>): Promise<T>;'],
+  // README's services named and not shown: the request's orders, the cache's `Api` (whose `getUser` fails with
+  // `NotFound`), and the SMTP client the mailer is made of. A ramme type is reached through `import("ramme")`.
+  ['Orders', 'declare class Orders { readonly place: import("ramme").Task<[req: Request], unknown>; }'],
+  ['Api', 'declare class Api { readonly getUser: import("ramme").Task<[id: string], User, NotFound>; }'],
+  ['SmtpClient', 'declare class SmtpClient { deliver(to: string, body: string): Promise<void>; }'],
 ]);
 /** The diagnostics that name an identifier nothing declares. */
 const UNRESOLVED = new Set([2304, 2552, 2580, 2581, 2582, 2583, 2584, 2591, 2592, 2593]);

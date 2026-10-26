@@ -194,9 +194,9 @@ export function collect<R extends Result<unknown, unknown>>(rs: readonly R[]): R
  * `yield* fail(r.error)` does: no `catch` sees it, and its `finally` blocks run. So a `Result` that a function returned
  * or a library handed over joins the body's task's `E`.
  *
- * A generator helper: the success value is returned as it is, never awaited (a promise or a fiber included). It takes
- * a `Result`, not a promise of one: wait for that first, `yield* $(yield* wait(p))`; anything that is no `Result` is a
- * `TypeError` at the `yield*`. Typed by the argument as a whole: `$(charge(n))` over an unannotated function's
+ * An operation, as `fail(e)` is: the success value is returned as it is, never awaited (a promise or a fiber
+ * included). It takes a `Result`, not a promise of one: wait for that first, `yield* $(yield* wait(p))`; anything that
+ * is no `Result` is a `TypeError` at the `yield*`. Typed by the argument as a whole: `$(charge(n))` over an unannotated function's
  * `Failure<A> | Failure<B> | Success<T>` evaluates to `T` and adds both errors to the body's union, and a `Success`
  * adds none.
  */

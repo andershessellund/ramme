@@ -31,8 +31,10 @@ and implementation plan (added in commit 72a0448, last revised in
 19759ae), and the generator runtime's proposal, which D41 cites by its
 decision numbers ("D41, decision 12") and which lived at the repository
 root through the commits of PR #5 (added in 5da90d8, unrevised, and
-deleted when D41 was completed; read it at 5da90d8). Every decision here is
-complete without them.
+deleted when D41 was completed; read it at 5da90d8). Later stages of that
+PR were specified outside the repository: stage 6a made tasks callable
+(D44; commit a75ce3d) and stage 6b, the commit after it, rewrote the
+documents for it. Every decision here is complete without them.
 
 ## Shape
 
@@ -223,31 +225,36 @@ states, and nothing in ramme is kilde-specific. DESIGN.md §1.1.
 
 ### D8′. A fiber is one run of a task, and the ambient node is the default
 
-*Amended by D44: a task is a function, and its call is the lazy op of one
+*Amended by D44: a task is callable, and its call is the lazy op of one
 run; the free `call` and the task's own `call`, `bind`, `fork` and `attempt`
-are gone. What follows records the uncallable task.*
+are gone.*
 
-A **task** (`task(body, opts)`) is a body plus options; it is an object,
-not a function, and can only be `fork`ed or `call`ed, each run being a new
-fiber, a child of the current node. A **fiber** is a node with a body; it
-is not thenable (`join`/`result` read it). The operations are free functions
-over the **current node** (`fork`, `call`, `own`, `lookup`, `join`, …); the
-same operations exist as `Context` methods for the one case that needs a
-name: acting on behalf of a node that is not current.
+A **task** (`task(body, opts)`) is a body plus options; a `Task` is
+callable, and calling it makes a lazy op (D44), each run being a new fiber,
+a child of the current node. A **fiber** is a node with a body; it is not
+thenable (`join`/`result` read it). The operations are free functions over
+the **current node** (`fork`, `own`, `lookup`, `join`, …); the same
+operations exist as `Context` methods for the one case that needs a name:
+acting on behalf of a node that is not current.
 
 **Why.** "A fiber is a child context" (the previous D8) was the load-bearing
 unification and is kept, strengthened: every fiber is a node, so its
 temporaries are released when it ends, it is interruptible and visible, and
 it is found ambiently. The redesign closes the two gaps the old API left. An
 async function used as a fiber could also be called bare, running as an
-untracked promise; a `Task` cannot be invoked, so the decision "this is a
-node" is made once, at the definition. And `Fiber.spawn(fn, { context })`
-threaded the parent through every call site; the ambient node makes the
-parent the current node by default (I21), which is never wrong, only
-sometimes not what was meant, and the method form exists for that case.
-Inline bodies (`call(function* () { … })`) are accepted as anonymous tasks,
+untracked promise, so the redesign made a `Task` that cannot be invoked and
+the decision "this is a node" was made once, at the definition; that reason
+lapsed when a call became a lazy op that runs nothing until it is yielded
+(D41, decision 2), and the decision stands, made at `task(…)` (D44). And
+`Fiber.spawn(fn, { context })` threaded the parent through every call site;
+the ambient node makes the parent the current node by default (I21), which
+is never wrong, only sometimes not what was meant, and the method form
+exists for that case.
+Inline bodies (`fork(function* () { … })`) are accepted as anonymous tasks,
 because an inline function has no name by which it could also be called
-bare; the gap is a named function used both ways. A fiber is not thenable
+bare; a generator function declared by name could be used both ways, so
+`no-generator-helper` reports every such declaration, one only a task takes
+included (D44, decision 5). A fiber is not thenable
 because a wait is where ramme decides the halt and consumes failures (D41,
 D13′): `join(f)` and `result(f)` are ops the waiting body yields, run for
 that body. A thenable fiber would be awaited wherever anyone held it,
@@ -263,16 +270,17 @@ current node makes redundant: `signal()` reads the node's signal anywhere,
 and the `signal` option links a foreign signal at the definition or per use;
 requiring `task()` for inline bodies too, ceremony that closes no gap.
 **Cost.** A node per fiber (fibers are not free); application code must
-decide function vs task at the definition. `fork` and `call` also accept a
-plain function, so for a named generator function the gap stays open:
-`fork(parse)` and `yield* parse()` both compile, and neither the type nor a
-lint flags it (D35). DESIGN.md §4.5–§4.8.
+decide function vs task at the definition. `fork` and `attempt` also accept
+a plain function, so `fork(parse)` and `yield* parse()` of one named
+generator function both compile: the type does not flag it, and
+`no-generator-helper` reports the declaration (D35; D44, decision 5).
+DESIGN.md §4.5–§4.8.
 
-### D22. `fork` starts in a microtask; `call` starts synchronously
+### D22. `fork` starts in a microtask; a task's call starts synchronously
 
 `fork` never runs any part of the body in the forker's frame: the body
 starts in a microtask, or after placement when it was forked during
-creation (I20). `call` starts the body synchronously, with the child
+creation (I20). A task's call starts the body synchronously, with the child
 current.
 
 **Why.** A synchronous start would run the body's first segment inside the
@@ -281,59 +289,267 @@ would begin where `inject` is legal and `lookup` is not (D4′, I16), on a
 node not yet placed. Outside creation the forker has not yet returned, so
 an `own(fork(t))` (D19), or any other attachment the forker makes right
 after `fork`, would race the body's start. Starting in a microtask gives
-the body exactly its own node as current from its first line. `call` has
+the body exactly its own node as current from its first line. A call has
 none of these hazards: it is an op, which the driver runs at the caller's
 `yield*` and starts the body before the caller's step returns, the caller
-suspended on it (D41), and `call` is refused during creation, so a
+suspended on it (D41), and a call is refused during creation, so a
 synchronous start costs nothing and keeps a call as close to a plain
 function call as a node allows. **Rejected:** a synchronous `fork`; a
-microtask start for `call` too, which delays every call by a tick and
+microtask start for a call too, which delays every call by a tick and
 protects nothing. **Cost.** A fork's body starts a microtask later than a
 plain call would, and code that forks and then inspects the fiber
 synchronously sees it unstarted. Through `then` (`await app.call(main)` in
 top-level code) a call starts when `then` is first called, a job after the
 `await`. DESIGN.md §4.6.
 
-### D44. A task is callable, binds its receiver, and the combinators take ops
+### D44. Tasks are callable; every function that waits is a task; receivers; `createKeyFor`; the canonical style
 
-*A stub: the full entry, its reasons, rejected alternatives and costs, is
-written with the documents' rewrite. The decisions it records are final.*
+A task is a function whose call is the lazy op of one run, it may bind a
+receiver, the combinators take its ops, every function that waits is one,
+an interface is keyed over its class with `createKeyFor`, and the README
+shows one style (DESIGN.md §3.1, §3.2, §4.4, §4.5, §4.8, §9). Stage 6a of PR #5
+made the change in the code (commit a75ce3d), and stage 6b, the commit after
+it, in the documents; the code cites the decisions below as "D44, decision
+n". This amends D8′, D35, D37, D4′ and D41's decisions 2, 4, 6 and 29.
 
-1. **A task is callable.** `t(…args)` is the lazy op `call(t, …args)` was
-   (D41, decision 2): nothing runs until it is yielded, or awaited through
-   the node it was made through. Making it reads the slot, so outside any
-   node it throws `NoCurrentNodeError` and in a factory
-   `CreationViolationError`. D8′ kept a task uncallable because a bare call
-   ran as an untracked promise; a lazy op runs nothing, so the reason is gone,
-   and "this is a node" is still decided once, at `task`.
-2. **`task(self, body)` binds a receiver**: the body runs as
-   `body.call(self, …args)`, and `with` keeps it; a free body's `this` is
-   `void`. The second argument being a function makes the first the receiver.
-3. **The task's own `call`, `bind`, `fork` and `attempt` go**, and the free
-   `call` with them: `call` and `bind` are `Function.prototype`'s on a task,
-   `fork(t(…))` and `attempt(t(…))` replace the others. `with` and `name`
-   stay. `ctx.call(t, …)` and `ctx.fork(t, …)` stay, as plain async code's
-   explicit receiver; they take no op, since none can be made outside a node.
-4. **`fork`, `attempt`, `all`, `race`, `settle` and `pool.fork` take ops**,
-   and a task of no arguments as itself. A task's call is forked as its task,
-   so no node stands for the op; any other op runs in a fiber of its own,
-   named after its verb, and on it. `race([t(x), sleep(ms)])` is a deadline
-   on `t`'s success by D28's rules: the loser is aborted and waited for, and a
-   failing `t` beats nothing, so the race waits out the `ms` and drops the
-   failure as a loser's; `t.with({ timeoutMs: ms })(x)` is the deadline that
-   lets `t`'s failure through.
-5. **No helpers**: a generator function is a task body, a `promised` body or
-   an `own` release, and the lint `no-generator-helper` says so. The runtime
-   still drives a helper's generator, and decision 29 of D41 stands.
-6. **`createKeyFor(impl, opts?)`**: an explicit key whose factory is
-   `impl`'s, `new impl(…)` or `impl(…)` with the arguments `setDependencies`
-   declares, named and scoped by `impl` unless `opts` says otherwise, the
-   scope read at each read as D32 reads `impl`'s; a task is refused.
-7. **A task is not an injection key**: `inject(t)` is a type error and, with
-   `lookup(t)`, a `TypeError`.
-8. **The lints**: `no-unused-op` reads a dropped task's call where it has
-   type information, and a `style` preset holds `named-task` and
-   `no-function-key`. DESIGN.md §4.5, §4.8.
+**1. A task is callable.** `t(…args)` is the lazy op `call(t, …args)` was,
+run by `yield*` as a call-shaped child, and "this is a node" is decided
+once, at `task(…)` (DESIGN.md §4.5). **Why.** D8′ kept a task uncallable
+because a fiber's async function could also be called bare, running as an
+untracked promise. Under D41 a call makes a lazy op (D41, decision 2), which
+runs nothing until a body yields it, or plain async code awaits it through
+the node it was made through, so a bare `t(x);` is missing work, which a
+lint reports, never untracked work: the reason lapsed, and the decision it
+protected still holds, since `task(…)` says once whether a function is a
+node. A call then reads as the function call it stands for,
+`yield* getUser(id)` where the uncallable task needed
+`yield* call(getUser, id)`, and its op is a value the combinators take
+(decision 4). Making the op reads the slot (D41, decision 17): outside any
+node it throws `NoCurrentNodeError` and in a factory
+`CreationViolationError`, both naming the task. **Rejected:** keeping
+`call(t, …args)` beside `t(…)`, two spellings of one act; an eager call,
+whose child runs at once, D11's case.
+**Cost.** A task type-checks wherever a plain callback is expected, so
+`arr.forEach(t)` and `emitter.on(type, t)` compile and each call makes an op
+that nothing runs, dropped silently. `listen` refuses a handler that returns
+an op, with a `TypeError` at the event (DESIGN.md §4.9), and the type-aware
+`no-unused-op` does not see the case, which writes no call (decision 9).
+
+**2. `task(self, body)` binds a receiver.** The body runs as
+`body.call(self, …args)`, `with` keeps the receiver, a free body's `this` is
+typed `void`, and the second argument being a function makes the first the
+receiver (DESIGN.md §4.5). **Why.** A service's operations are fields,
+`readonly get = task(this, function* get(path) { … })`, which read the
+instance's `#private` state, are listed by the IDE, are typed `Task` (so the
+type-aware lint sees a dropped call, decision 9), and pass as values with
+the receiver attached (`all([api.get(a), api.get(b)])`). D41's decision 6
+refused an overload for `this` because `call(this, function* () { … })`
+cannot be told from `call(body, fnArg)` when `this` is a function; `task`
+has no such ambiguity, since a body is never the receiver of itself and
+`task(body, opts)` has no function second, so it reverses that decision for
+`task` (D41 records it). **Rejected:** a second name, `method(this, …)`: one
+concept, one name. `self` as an option, `task(body, { self: this })`: `this`
+typed from an option bag reads worse and infers less reliably than from a
+positional parameter. A `@task` method decorator: TypeScript's decorators
+cannot change a member's declared type, so the member would be typed as the
+generator function, invisible to `then` and to the `Op`-typed lint. Generator
+methods, decision 6's former answer: a method's call is no node, a helper
+(decision 5). **Cost.** An operation is a field, made per instance, not a
+prototype method: a subclass replaces it, it has no `super.get`, and one
+called from an earlier field's initializer is still `undefined`. And no
+task is generic, in this form or the free one: `Task` has members besides
+its call (`name`, `with`), so TypeScript carries no type parameter of a
+generic body through `task(…)`, and
+`function* transaction<T>(work: Task<[tx], T>)` gives `T` as `unknown`. An
+operation that would return its work's value returns nothing, and the work
+hands the value out itself, as README's `Db.transaction` does; a field
+annotated with the generic signature compiles only through a cast, and its
+type has no `with`.
+
+**3. A task's `call`, `bind`, `fork` and `attempt`, and the free `call`, are
+removed.** `t(…)`, `fork(t(…))` and `attempt(t(…))` are the spellings, and
+`ctx.call(t, …)` and `ctx.fork(t, …)` stay as plain async code's explicit
+receiver (DESIGN.md §4.5, §6). **Why.** A callable task is a function, and
+own properties named `call` and `bind` would shadow `Function.prototype`'s,
+which every library that calls a function as `fn.call(self, …)` relies on.
+`t.fork(x)` and `t.attempt(x)` were second spellings of `fork(t(x))` and
+`attempt(t(x))`, and the free `call(t, …)` is `t(…)`. `ctx.call` and
+`ctx.fork` take a task or a body, never an op: an op is made through the
+current node, so code that has an op has a current node and the free `fork`
+and `yield*` serve it, and outside every node no op can be made at all
+(decision 1). **Rejected:** keeping `t.fork` and `t.attempt` as sugar; a
+renamed own `call` (`t.run(x)`), a second spelling. **Cost.**
+`fork(t, …args)` and `attempt(t, …args)` stay as overloads, so code may
+still write two spellings where scripts/codemod-callable-tasks.mjs moved
+the tree to one; the README shows only `fork(t(…))`.
+
+**4. The combinators take ops.** `fork`, `attempt`, `all`, `race`, `settle`
+and `pool.fork` take an op, or a task of no arguments as itself; a task's
+call is unwrapped into the task's own fiber, any other op runs in a fiber
+named after its verb, and the fiber that runs an op is its host (DESIGN.md
+§4.8). **Why.** With a callable task the op is the value a body holds, so
+the combinators take what `yield*` takes, and unwrapping keeps the tree as
+it was: `all([a(1), b('x')])` makes exactly the fibers
+`all([a.bind(1), b.bind('x')])` made, one per task, named after it, with its
+options, and no node for the op. An op that is no task's call (`sleep(ms)`,
+`wait(p)`, a group) needs a node to run on; being its host, that fiber hands
+a `wait((signal) => p)` member its own signal, which the race fires when the
+member loses. `race([t(x), sleep(ms)])` then follows D28: the first success
+wins and the losers are aborted and waited for, so it is a deadline on
+success only, since a failing `t` beats nothing: the race waits out the
+sleep and drops `t`'s failure as a loser's, a defect included.
+`t.with({ timeoutMs })(x)` is the deadline that lets the failure through,
+and DESIGN.md §4.8 says so beside the form. **Rejected:** groups
+of tasks only, which need `t.bind` for arguments (decision 3); a node for
+every op, a fiber more per member and the task's own options lost under it;
+a race that a failure wins, D28's rejected alternative. **Cost.** The race
+with a sleep reads as a general deadline and is not one; an op that is no
+task's call runs with no options of its own.
+
+**5. No helpers.** Every function that waits is a task, a synchronous
+function is a plain function, and there is no third kind; the lint
+`no-generator-helper` refuses a generator function not written inline as a
+task body, `promised` body, release or failure handler, and the lost-halt detector
+stays (DESIGN.md §4.4, §4.5). **Why.** The tree is the call tree. A helper,
+a generator function a body runs with `yield*`, shares its caller's node:
+its temporaries are the caller's, it is not interrupted, timed or seen on
+its own, and a trace has a hole where it ran. A node per operation costs
+microseconds (`yield* syncTask()`, about 600 ns, DESIGN.md §7.1) against
+waits that are I/O. And the lost-halt hazard of D41's decision 29, a
+`yield*` in a helper's `finally` that resumes the body past its halt, exists
+only because helpers exist: a task's `finally` is its own body's, which
+keeps the halt. The runtime cannot tell a helper's generator from a body's
+(a `yield*` hands it the generator's yields), so it still drives one, and
+the sentinel and the development-mode report stay, as the detector for code
+that breaks the rule where the lint does not look (an imported generator, a
+disabled report). `fail(e)` and `ramme/result`'s `$` are operations ramme
+exports, a part of the language bodies are written in, not user code.
+**Rejected:** Effection's rule, "no `yield*` in a `finally`", as the rule
+users learn: it keeps the third kind and its hole in the trace, and forbids
+the waiting cleanup a task's own `finally` may do (D41). Removing the
+sentinel: it detects the rule's violation. Helpers as an accepted form under
+the style preset: the hazard is a bug, not a style, so the rule is in
+`recommended` (D35). **Cost.** A function that waits and needs no node of
+its own still gets one, a fiber per call; and the lint also flags a
+generator that only iterates data (`function* range(n)`) in a file that uses
+ramme, which takes an inline disable.
+
+**6. `createKeyFor<I>(impl, opts?)`.** An interface's key over its
+implementation: `impl` is checked against `I` at the call (its instance
+type assignable to `I`; `#private` members do not matter), the token's value
+is made by `impl`'s own default factory with the dependencies it declares,
+its name is `opts.name ?? impl.name`, and its scope `opts.scope`, else
+`impl`'s, read on every use (DESIGN.md §3.1). **Why.** An interface with
+two implementations needs a key that is neither: the interface has no value
+to key by, and keying by one class ties every call site to it.
+`createKeyFor` makes the separation in three declarations, interface,
+implementation and key, the key sharing the interface's name, since types
+and values are separate namespaces, so `inject(Mailer)` reads as a class
+key does. It is the separation Effect gets from a `Tag` and a `Layer`, a
+service's interface kept apart from its construction, without a layer: the
+default implementation is the key's own factory, placed by `impl`'s rules,
+and a provider replaces it (D36). Checked at the call, the default can never
+fail the interface, and a provider for the key is checked against `I`, which
+has no private members, so no `Public` is involved (D37). `impl`'s scope is
+read on every use, as D32 reads a key's, so a later `setScope(impl, …)`
+reaches the key. **Rejected:**
+`createInjectionKey<I>(name, { factory: () => inject(Impl) })`, the earlier
+seam: a name to keep in step by hand, no
+check of `Impl` against `I`, and the instance resolved as a key of its own
+and cached twice, under the class and under the token; an alias at the root,
+`aliasProvider(Mailer, SmtpMailer)`, which every root must repeat.
+**Cost.** `impl`'s type is a class or function callable with no arguments,
+so a constructor whose parameters `setDependencies` supplies declares them
+optional.
+
+**7. A task is not a key.** `inject(t)` and `lookup(t)` are type errors and
+`TypeError`s, and so are a provider for a task (at its registration), an
+alias to one and `setScope` on one; `setDependencies`, which takes any
+function, refuses one with a `TypeError` (DESIGN.md §3.1). **Why.** A task is
+a function, and a function key's default factory is its call (DESIGN.md
+§3.1), so `inject(getUser)` would compile and resolve the task's op as a
+service: a value that runs nothing, cached and shared. **Rejected:** a task
+as the factory of its op. **Cost.** The brand is read wherever a key
+enters, and is excluded from the function-key type (decision 8).
+
+**8. The brand is the task's own.** Each callable carries the task brand as
+an own property, so `Function.prototype`'s `bind`, `call` and `apply` work on
+a task as on any function, and a bound copy is no task but a plain function,
+run as an inline body whose op runs (DESIGN.md §4.5). **Why.** A brand on the
+prototype would make `t.bind(self)` a broken task, a task's prototype with
+none of its fields; an own brand makes it what `bind` makes of any function.
+**Cost.** `t.bind(self)` is typed as the task itself (TypeScript keeps a
+type whose call signature has no `this` parameter as it is) and is a plain
+function at run time: `with` on it throws a `TypeError`.
+
+**9. `no-unused-op` has a type-aware half.** With type information it flags
+a call statement in a function whose callee is typed `Task` and whose value
+is an `Op` (DESIGN.md §4.4, §9). **Why.** A task is a function, so syntax
+cannot tell `api.get(path);` from any other call statement, and types can.
+**Rejected:** a syntactic guess at every call statement in a body, which
+would flag every plain function's call; a run-time report of an op made and
+never run, a cost to every op (D35). **Cost.** It needs a typed lint run
+(`parserOptions.project`, or `projectService`), and sees a statement only:
+not an op kept in a variable, nor a task handed where a callback is expected
+(decision 1).
+
+**10. The canonical style.** The README shows one style and DESIGN.md lists
+what else is accepted (README, "The rules"; DESIGN.md §3.1, §3.2). A service
+is a class with `readonly #x = inject(X)` fields,
+`readonly op = task(this, function* op(…) { … })` fields and
+`static readonly scope`, and is its own key; an interface is separated only at two implementations, with
+`createKeyFor`; every function that waits is a task; a standalone task is
+an entry point (a handler, a job, `main`); `inject` is for structural
+dependencies (what a service is made of), `lookup` for contextual ones (what
+is true here: the transaction, the connection, the request, the principal),
+and `inject` of a contextual key makes an auto-hoisted service contextual,
+placed under the provider and re-created with it, a legitimate design named
+as such, while one with a declared scope resolves its `inject`s from its
+scope's node and does not see a provider below it;
+state lives in fields changed by atomic transitions, never read before a
+wait and written after it; a shared wait is a fiber the service owns (the
+cache idiom); the contextual lookup of a connection lives in the client, not
+in every repository. A closure service
+(`const Api = () => ({ get: task(function* get(…) { … }) })`, `Api.scope`
+set), a function key and `createInjectionKey(name, { factory })` are
+accepted and not canonical, and the `style` lint preset, off by default,
+reports a function key (`no-function-key`) and an anonymous task
+(`named-task`), not a token's `factory` (D35).
+**Why.** Several equal spellings of one model are learned as several models;
+one style shown makes each example read like the last. Structural and
+contextual name what the two verbs are for (D4′), and naming the
+consequence of injecting a contextual key keeps a per-transaction service
+a choice rather than a surprise of placement (D7); a declared scope keeps a
+service where it was declared (D4′), so only an auto-hoisted one follows the
+key. A body's code between two
+waits runs in one step, so a check and a set with no wait between them are
+atomic, and a state read before a wait may be stale after it. A shared wait
+owned by the service is joined by every caller: an interrupted caller stops
+waiting without stopping it, the service's end stops it, and every caller
+gets the same value or the same typed failure. A client that owns the
+connection's lookup keeps the repositories structural, so they are shared,
+and the transaction's boundary in one place. **Rejected:** removing the
+accepted forms: the model would not get smaller, only the surface, since a
+function key is a class key without the class and a token with a factory is
+what `createKeyFor` builds. Making the closure form canonical: the class
+form has fields the IDE lists, `static scope`, and a static name for the
+group of operations, and the author's objection to classes was to
+`instanceof` and inheritance, and the class form here uses neither. **Cost.** A class per
+service, with `this` in each operation; two forms to read in code ramme
+accepts; and the style preset sees only what syntax shows (an anonymous
+task, a function key), not the rest of the style.
+
+**11. The standing gap: requirements are checked at the first `lookup`.**
+Whether every requirement is provided is known when a `lookup` misses, not
+at compile time (DESIGN.md §9); deferred. **Why.** Effect's `R` makes a
+missing service a compile error (D1′); ramme's DI is ambient and untyped. An
+`R` inferred through the yield union, as `E` is (D42), would move the
+failure to the start of the run and expose the requirements as data, but
+would not prove them without typed providers on the root, and would add a
+parameter to every `Task`, `Fiber` and `Op`. **Rejected,** for now: that
+`R`, and typed providers. **Cost.** A missing provider fails at the first
+`lookup` of its key, which may be deep in a run, and only a run that reaches
+it finds it.
 
 ## Semantics
 
@@ -346,7 +562,15 @@ current *except* creation, where it throws `CreationViolationError`. The
 value's own node (`inject(ContextKey)`, `current()` in creation) is excluded
 from tracking. Tracked reads decide placement only for auto-hoisted values;
 a value with a declared placement (a provider target or a scope) stays where
-it was declared, and its author answers for what it holds.
+it was declared, and its author answers for what it holds. `inject` is for
+structural dependencies, what a service is made of, and `lookup` for
+contextual ones, what is true where the work runs (the transaction, the
+connection, the request, the principal); an auto-hoisted service that
+injects a contextual key becomes contextual itself, placed under the
+provider and re-created with it, a legitimate design named as such, while a
+value with a declared placement resolves its `inject`s from the node it is
+stored on and does not see a provider below it (D44, decision 10; README,
+"Services that hold state").
 
 **Why.** The verbs are distinguished by the lifetime their result must
 meet, not by timing. A dependency must live at least as long as the value,
@@ -372,9 +596,9 @@ whose documented hazard baked one scope's answer into a shared value; the
 previous planned convergence (track every creation-time read), which keeps
 the hazard's shape and blurs the verbs; an `untracked` verb, which gives
 placement to the caller; tracking the value's own node like any read.
-**Cost.** A helper written for bodies cannot be called from a factory and
-must be handed its dependencies, which is what a factory should be doing
-anyway. DESIGN.md §3.2, §3.5.
+**Cost.** Code written for bodies, a task or a function that `lookup`s,
+cannot run in a factory, which must be handed its dependencies, what a
+factory should be doing anyway. DESIGN.md §3.2, §3.5.
 
 Settled while implementing it:
 
@@ -496,10 +720,10 @@ what makes asynchronous DI containers hard, and ramme declines the problem.
 whose promise the container awaits before caching). **Cost.** Asynchronous
 acquisition happens in a body, where failure and cancellation are already
 structured, and the result is provided to what needs it synchronously:
-`const db = own(yield* wait(connect())); yield* call(task(work, { providers:
-[valueProvider(Db, db)] }))`, or a `child({ providers })`. A service that
+`const db = own(yield* wait(connect())); yield* work.with({ providers:
+[valueProvider(Db, db)] })()`, or a `child({ providers })`. A service that
 must own asynchronous setup starts it with a fork in its constructor or
-performs it at first use, behind a generator method's `yield*`; consumers
+performs it at first use, in one of its tasks; consumers
 cannot wait for a value's construction. DESIGN.md §3.3.
 
 ### D27. A declared value's node is live from the start and moves above its dependencies
@@ -900,9 +1124,13 @@ returning `T`. DESIGN.md §3.1.
 
 **Why.** Angular's providers are untyped (`useValue: any`): a wrong provider
 fails at run time, and a fake drifts from what it replaces without notice.
-Typing them against `T` itself forbids a fake of any class with a
-`#private` member, since no other class can have it, and that breeds casts,
-which hide exactly the drift the type should catch. `keyof` leaves out
+The case is a class that is its own key, the canonical service (D44,
+decision 10): a test fake of README's `SessionCache` cannot have its
+`#entries`, since no other class can, so typing providers against `T` itself
+forbids a fake of every class with a `#private` member, and that breeds
+casts, which hide exactly the drift the type should catch. An interface's
+key made with `createKeyFor` is checked against the interface, which has no
+private members, and needs no `Public` (D44, decision 6). `keyof` leaves out
 `private` and `#private` members, so `Public<T>` is the consumer's view of
 `T` and the right contract at the provider boundary: a fake needs every
 public member, each of a compatible type, and may have more. The
@@ -1164,8 +1392,9 @@ draft, the rest were its recommendations, adopted.
    run-time `TypeError`, an `async function*` cannot run an op through
    `then`, and a `fail`'s yield is told apart. Rejected: the op yields
    itself, as Effect's `SingleShotGen` does.
-2. *When an op runs*: work ops lazily, the lifecycle verbs eagerly (DESIGN.md
-   §4.2), for C7 (`release(x)` runs `x`'s release now), an early release
+2. *When an op runs*: work ops lazily, and the op a called task returns
+   (D44, decision 1), the lifecycle verbs eagerly (DESIGN.md §4.2), for C7
+   (`release(x)` runs `x`'s release now), an early release
    from a factory, which cannot wait (D26), and D16's promise that exists
    before any dispose code runs. Rejected: every op eager, which keeps
    lending; lifecycle ops lazy too, after which no synchronous code could
@@ -1174,8 +1403,9 @@ draft, the rest were its recommendations, adopted.
    and `then` runs it once per object, as a promise must (DESIGN.md §4.2).
    Rejected: memoizing both (a loop spins after one sleep, a retry never
    retries); single use (a second `await op` throws).
-4. *The thenable*: a plain `PromiseLike` on a work op that knows its node;
-   the lifecycle ops stay promises (DESIGN.md §4.2). Rejected: a `Promise`
+4. *The thenable*: a plain `PromiseLike` on a work op that knows its node,
+   and on the op a called task returns (D44, decision 1); the lifecycle ops
+   stay promises (DESIGN.md §4.2). Rejected: a `Promise`
    subclass, eager by contract.
 5. *Async bodies* (decided): refused (DESIGN.md §4.5); a release or a
    failure handler may still return a promise, a bare wait. Rejected: async
@@ -1185,6 +1415,9 @@ draft, the rest were its recommendations, adopted.
    that needs `this` is a generator method or `.bind(this)`. Rejected:
    `call(this, function* () { … })`, after Effect's `gen(self, …)`, which
    cannot be told from `call(body, fnArg)` when `this` is a function.
+   Reversed for `task` by D44 (decision 2): `task(self, body)` binds a
+   receiver, told apart by its second argument being a function, and a
+   generator method is a helper, which D44 removes (decision 5).
 7. *Resumption*: in the source's reaction (S1), a microtask per wait
    (DESIGN.md §4.2). Rejected: resuming within the step when an op
    completed during its start (S2), which would save that microtask of a
@@ -1253,9 +1486,10 @@ draft, the rest were its recommendations, adopted.
     the returning frame as its own `yield*` (DESIGN.md §4.5). Rejected:
     forbidding a returned op, which needs `Release<T>` narrowed.
 29. *A finally-yield in a helper* (decided): not release work, and
-    development mode reports a lost halt (DESIGN.md §4.2). Rejected:
-    wrapping every helper call in an op that tracks the return mode, a
-    wrapper at every call.
+    development mode reports a lost halt (DESIGN.md §4.4), kept as the
+    detector for D44's rule that there are no helpers (decision 5 there).
+    Rejected: wrapping every helper call in an op that tracks the return
+    mode, a wrapper at every call.
 30. *A library's async callback* (decided): `promised(body)`, a core verb,
     and `ctx.promised(body)` for a module-level entry point (DESIGN.md §4.5).
 31. *`[Symbol.asyncDispose]`* (decided): the contract for foreign resources
@@ -1334,11 +1568,12 @@ a lint's. *The two `wait` modes*: a choice at every foreign wait between
 of Effection's. *A helper's
 `finally` may not wait*: a `yield*` there loses the halt, and in production
 the rest of the body runs as release work; the development-mode detector is
-the guard. *Async code must enter through a node*: sprinkling ramme into
-existing async code is lost. An async function that uses ramme after an
-`await` throws `NoCurrentNodeError` there, and becomes a generator helper, a
-`promised` body, or code holding a node it took before its first `await`;
-libraries whose hooks are async (middleware, ORM extensions, test fixtures)
+the guard, and since D44 (decision 5) there are no helpers, which
+`no-generator-helper` reports. *Async code must enter through a node*:
+sprinkling ramme into existing async code is lost. An async function that
+uses ramme after an `await` throws `NoCurrentNodeError` there, and becomes a
+task, a `promised` body, or code holding a node it took before its first
+`await`; libraries whose hooks are async (middleware, ORM extensions, test fixtures)
 reach ramme only that way, and `await helper()` on a generator helper
 resolves to the generator object, which `@typescript-eslint/await-thenable`
 catches. *Unbounded work in a halted `finally`* holds every owner up to the
@@ -1401,8 +1636,9 @@ library interop is conceded, to one generic wrapper per wait and a node per
   `Operation<T>` member, makes every iterable value (a string, an array, a
   `Map`) infer as an operation, and refuses those plain bodies. A guard on
   the generator member against `return op` was tried and dropped: it refuses
-  every generic body. The cost: `Operation<T>` annotates only a `yield*`ed
-  helper (DESIGN.md §1.3).
+  every generic body. The cost: a body is annotated
+  `Generator<Instruction | Fail<E>, T, unknown>`, never `Operation<T>`
+  (DESIGN.md §1.3).
 - *`wait(op)` is the op's own wait*, and returns the op itself (DESIGN.md
   §4.2): `wait(db.close())` in a halted `finally` reports a failure once.
 - *Decision 12 covers a join of what only the unwound node's release ends*
@@ -1411,10 +1647,10 @@ library interop is conceded, to one generic wrapper per wait and a node per
 - *`promised` follows the body's consumption* (DESIGN.md §4.5), so a failed
   ROLLBACK in a halted callback surfaces from the node, as under
   `yield* call(body)`.
-- *The lost-halt detector* (decision 29): a lost halt gives the body the
-  halt's sentinel as the helper's `yield*` value, so dev mode's sentinel
-  reports any use of it, besides a finish with another value; a body that
-  only returns the sentinel unused goes unreported.
+- *The lost-halt detector* (decision 29; DESIGN.md §4.4): a lost halt gives
+  the body the halt's sentinel as the helper's `yield*` value, so dev mode's
+  sentinel reports any use of it, besides a finish with another value; a
+  body that only returns the sentinel unused goes unreported.
 - *The halt at a `yield*` of an op not yet started is a job* (DESIGN.md
   §4.2), so a born-delivered child runs its first step (decision 9) before
   its parent's release would cancel it unstarted.
@@ -1566,7 +1802,7 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   orFail<T, E>(x: T | undefined, e: E)`) emits it inline, where a name from a
   module the package's `exports` do not expose fails the emit (TS2883).
   `check:surface` compiles such a library outside the package.
-- *`Fiber`'s `E` defaults to `never`*, as `Task`'s does, so `t.fork()` is
+- *`Fiber`'s `E` defaults to `never`*, as `Task`'s does, so `fork(t())` is
   `Fiber<T, E>` with the task's `E` and `Fiber<T>` is the fiber of a
   `Task<A, T>`; a failure handler is handed `Fiber<unknown, unknown>`.
   `Outcome`'s defaults to `unknown`, the outcome of any node.
@@ -1818,8 +2054,8 @@ above it, the one exception to C4's order. DESIGN.md §2.6, §4.7.
 
 ### D28. `all` and `race` follow nodes, not promises
 
-`all` and `race` run their tasks as subscribers of a fresh group fiber,
-which the caller `call`s. `all` resolves with every value in order and
+`all` and `race` run their members as subscribers of a fresh group fiber,
+which runs as the caller's call (D44). `all` resolves with every value in order and
 rejects with an `AggregateError` of every real failure, excluding aborted
 members (`FiberAbortedError` when members were aborted and none failed).
 `race` resolves with the first `success`, aborts and awaits the rest, and
@@ -1847,24 +2083,24 @@ differ. DESIGN.md §4.8.
 
 ### D31. Outcomes as values: `attempt` and `settle`
 
-`attempt(t, …args)` (also `ctx.attempt`, `t.attempt`) is `call` with
-`result`'s resume step: the same child, started synchronously at its
-`yield*`, and an interrupted `freeze` or `restore` caller halted on it once
-the child has completed, as on `call` (D41, decision 8); it resolves with the
+`attempt(t(…args))` (also `attempt(t, …args)` and `ctx.attempt`, D44) is a
+task's call with `result`'s resume step: the same child, started
+synchronously at its `yield*`, and an interrupted `freeze` or `restore` caller halted on it once
+the child has completed, as on a task's call (D41, decision 8); it resolves with the
 child's four-way `Outcome<T, E>` (`success`; `failure`, an expected failure
 the child yielded, typed `E` on its task; `defect`, what it threw; and
 `aborted`, D42), and consumes a failure of either kind instead of
 propagating it. Below, a "failure" a caller branches on is either kind.
-`settle(tasks,
+`settle(members,
 opts)` (also `ctx.settle`) is `all` that resolves with every member's
 outcome instead of rejecting: its members run as `'join'` fibers of a group
-the caller `call`s, each runs to its end and none is aborted on a sibling's
+run as the caller's call, each runs to its end and none is aborted on a sibling's
 account, as in `all` (D28), and it resolves with the tuple of outcomes in
 order once every member has completed. A member's failure is held by the
 group's parent, not by the group, until `settle`'s resume step consumes it.
 `settle` rejects only with a failure of the group's own, and then with the
 members' failures attached and consumed, in the shape `all` rejects with.
-`call` and `all` stay as they are: they re-yield an expected failure and
+A task's call and `all` stay as they are: they re-yield an expected failure and
 throw a defect.
 
 **Why.** A body that branches on how other work ended had one tool:
@@ -1889,7 +2125,7 @@ an `observe` region tests the reason instead: the child's `timeoutMs`
 delivers a `TimeoutError` `DOMException`, which an ancestor's interruption
 carries only when it was itself a deadline. The outcome is the one `result`
 already reports, decided by state (D24), so nothing new is classified.
-`attempt` keeps what `call` has and `result(fork(t))` lacks: the body starts
+`attempt` keeps what a task's call has and `result(fork(t))` lacks: the body starts
 synchronously at the `yield*` (D22), and an interrupted caller is halted only
 once the child has stopped. `settle` is the form for
 several tasks, and the structured replacement for `Promise.allSettled`,
@@ -1908,7 +2144,7 @@ caller is still handed them, with the group's error: left held on the
 receiver, they would surface from the caller's completion after its `catch`
 had already handled the rejection, which `all` never does.
 **Rejected:** `result(fork(t))` as the idiom, which loses the synchronous
-start; making `call` itself resolve with an outcome, which hides every
+start; making the call itself resolve with an outcome, which hides every
 failure by default, so the forgotten check is silent where a forgotten
 `catch` is loud; resolving with `aborted` for the caller's own
 interruption, a value a body could branch past; `settle` as an option on `all`, which
@@ -1917,13 +2153,13 @@ rejection, or outcomes), two result types under one name; holding the
 members' failures on the group, or consuming them in its body (above).
 **Cost.** An outcome nobody inspects drops its error silently: `yield*
 attempt(t)` with no look at `status` is the failure mode outcomes-as-values
-invite, which is why `call` stays the default and `attempt` is opt-in.
+invite, which is why the plain call stays the default and `attempt` is opt-in.
 `ramme/no-unused-outcome` flags a discarded `attempt`/`settle` (D35). A
 `restore` child inside an `observe` region can hand a caller that was not
 interrupted the region's shutdown as
 `aborted`, which only its reason tells apart from the child's deadline. Two
 more names in tier 1; `attempt` emits `join:enter`/`join:leave`, which
-`call` does not. DESIGN.md §4.5, §4.8, §4.12.
+a task's call does not. DESIGN.md §4.5, §4.8, §4.12.
 
 ### D38. `Result` is `Outcome` minus `defect` and `aborted`; data only; `$` is the `?` operator
 
@@ -2340,15 +2576,18 @@ unreported. DESIGN.md §4.4, §4.11.
 
 ### D35. Lints, not runtime checks
 
-*Amended by D41 (decision 14) and D43: the four rules that served `async`
-bodies went, and five came.*
+*Amended by D41 (decision 14), D43 and D44: the four rules that served
+`async` bodies went, five came, and then `no-generator-helper`, a
+type-aware half of `no-unused-op` and the `style` preset.*
 
 The hazards that are syntactic are lint rules, in the separate package
 `eslint-plugin-ramme` in this repository (DESIGN.md §9), whose
-`recommended` config turns all nine on, as errors: an `async` function
+`recommended` config turns all ten on, as errors: an `async` function
 where a body is expected (`no-async-body`), a work op made and never yielded
-(`no-unused-op`), a discarded `attempt`, `settle` or `result` outcome
-(`no-unused-outcome`), a platform timer (`no-timers`), a `lookup` result
+(`no-unused-op`, which with type information also reads a dropped task's
+call, D44), a generator function not written inline as a body
+(`no-generator-helper`, D44), a discarded `attempt`, `settle` or `result`
+outcome (`no-unused-outcome`), a platform timer (`no-timers`), a `lookup` result
 stored in a field, on `this` or in a module variable (`no-stored-borrow`), a
 value provided on the node that owns it (`no-owned-provider`), and, in ramme
 code, the platform's bare forms `ramme/platform` replaces: a listener, the
@@ -2368,9 +2607,10 @@ constructs look like plain JavaScript and behave differently (DESIGN.md
 §2.6, §4.2), so a reader does not catch them either. A lint reports each one
 before the code runs, at no run-time cost, and checks the timer half of A7.
 The development-mode diagnostics stay because their hazards depend on what
-syntax cannot see: which generator a `yield*` in a `finally` belongs to,
-whether a read creates a value. Every rule is an error, since what each
-flags is a bug or missing work. Where a rule must choose, it is stricter
+syntax cannot see: a generator `yield*`ed from a body where the lint does
+not look (an imported one, a disabled report), whether a read creates a
+value. Every rule of `recommended` is an error, since what each flags is a
+bug or missing work. Where a rule must choose, it is stricter
 than the design, and an inline disable with a reason marks the cases that
 are fine. One package in the same repository keeps the rules in step with
 the design they enforce; it has no runtime dependencies (ESLint is a peer),
@@ -2380,15 +2620,31 @@ platform's globals, which changes what ramme does not own and costs every
 program that loads ramme (D43); a type-aware rule for an op kept in a
 variable, which the plugin's syntactic rules leave to a later variant (D41,
 decision 14); `no-bare-task`, the rule DESIGN.md §9 once listed for a
-function passed where a task belongs. `fork` and `call` accept inline bodies
-by design (DESIGN.md §4.5), and `all`, `race` and `settle` take only a
-`Task`, so the type already catches a bare function there. What remains, a
-named function passed to `fork` or `call` (`fork(parse)`, the case D8′ gave
-that rule), is an open gap with no lint (D8′). **Cost.** The rules are
+function passed where a task belongs. `fork` and `attempt` accept inline
+bodies by design (DESIGN.md §4.5), and `all`, `race` and `settle` take ops,
+so the type already catches a bare function there; the named generator
+function D8′ gave that rule (`fork(parse)`) is `no-generator-helper`'s
+(D44, decision 5). **Cost.** The rules are
 syntactic approximations, named per rule in the package's README. ramme's
 functions are matched by name, not by import. Aliasing gives false
 negatives (`const t = setTimeout`, a borrow stored through a local, an op
 kept in a variable). `setTimeout`, `setInterval` and `setImmediate` in
 application code are errors, and `fork` with a loop on `sleep` replaces
-`setInterval` (D34). A `yield*` in a helper's `finally` is not linted (D41,
-decision 29). A lint binds only a project that runs it. DESIGN.md §9.
+`setInterval` (D34). A helper the lint does not see (an imported one, a
+disabled report) still loses a halt in its `finally`, which only
+development mode reports (D41, decision 29). A lint binds only a project
+that runs it. DESIGN.md §9.
+
+**The `style` preset** (D44, decision 10). `configs.style` holds the rules
+whose violation is an accepted form, `named-task` (a task whose node would
+be named `anonymous`) and `no-function-key`, as warnings, and is off unless
+a project adds it beside `recommended`. A rule belongs in `recommended`
+when what it flags is a bug or missing work, and in `style` when what it
+flags works and only leaves the canonical style. **Why.** A style is a
+project's choice, which ramme recommends and does not impose: code in an
+accepted form is correct, so an error there would be wrong, and a warning
+in the default config would teach a project to read past the lint's
+warnings. **Rejected:** the style rules in `recommended`, as errors or as
+warnings (above); no style rules, which leaves the README's style unchecked
+in a project that wants it. **Cost.** A second config to know of; the
+preset checks only what syntax shows of the style.

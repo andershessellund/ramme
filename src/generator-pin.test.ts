@@ -358,7 +358,10 @@ describe('generator bodies: the pinning tests (rejection-pin.test.ts 1–7, re-e
         return owner.own(new Lease(this.#conn));
       }
     }
-    /** README's UnitOfWork, its commit and rollback generator methods: the release returns one, and it is driven. */
+    /**
+     * README's UnitOfWork as it stood before D44, with commit and rollback generator methods: the release returns one,
+     * and it is driven. Its form since, `task(this, …)` fields, is pinned in src/callable-tasks.test.ts.
+     */
     class UnitOfWork {
       static readonly scope = RequestScope;
       readonly #node = current();
