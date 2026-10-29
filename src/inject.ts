@@ -12,7 +12,7 @@
 //   default, or — auto-hoisted — at the deepest dependency. An `aliasProvider`
 //   is a redirect: the walk resolves its target from the walk's base instead and
 //   caches nothing under the alias key (D36).
-// - Creation runs synchronously (A5) under a creation frame. The value's node
+// - Creation runs synchronously (A4) under a creation frame. The value's node
 //   is created on demand: pending until placement for an auto-hoisted value,
 //   live on the storage context's provided stack for a declared placement
 //   (DESIGN.md §3.3). A failed creation releases what the node owns, with the
@@ -34,6 +34,7 @@ import {
   getKeyScope,
   hasDefaultFactory,
   invokeDefaultFactory,
+  refuseTask,
 } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context, LookupOptions, Provider } from './context.js';
@@ -320,7 +321,7 @@ function runCreation<R>(cs: CreationState, produce: () => R): R {
   try {
     let value: R;
     try {
-      // Factories are synchronous (A5): the frame is gone when produce returns, and a continuation the
+      // Factories are synchronous (A4): the frame is gone when produce returns, and a continuation the
       // factory scheduled that runs later sees no frame (DESIGN.md §3.5).
       value = runInFrame({ node: undefined, creation: cs }, produce);
     } finally {
@@ -494,7 +495,7 @@ function isComplete(n: NodeImpl): boolean {
 
 function assertLive(hit: CacheEntry, key: InjectionKey<unknown>): void {
   if (hit.valueNode !== undefined && hit.valueNode.state === 'complete')
-    throw new NodeCompletedError(`${keyName(key)} has been released`); // I22: escape fails loudly (DESIGN.md §2.7)
+    throw new NodeCompletedError(`${keyName(key)} has been released`); // I22: escape fails loudly (DESIGN.md §2.5, §4.12)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,7 +592,7 @@ export function resolveFrom<T>(
         ((hit.pinned && R !== C) || (hit.deps !== undefined && hit.deps.size > 0 && shadowBetween(R, C, hit.deps)))
       )
         return createAutoHoisted(R, key, hit.direct, via); // the re-run must inject the same keys itself (D7)
-      assertLive(hit, key); // I22: R's own answer was released (DESIGN.md §2.7)
+      assertLive(hit, key); // I22: R's own answer was released (DESIGN.md §2.5, §4.12)
       markDecided(R, C, hit.deps === undefined ? [key] : [key, ...hit.deps]);
       return hitResult(hit, C);
     }
@@ -819,9 +820,10 @@ function resolveSelf<T>(
  * PlacementError iff the key is decided at `C` (not at construction: a fresh node has no decisions; D10′). A
  * provider is stored where it is registered, whatever the key's scope (D36), so its placement needs no other
  * check; the key's scope is still read, and discarded, so that a malformed `static scope` is a TypeError at
- * registration (D32).
+ * registration (D32). A task is no key: a TypeError (D44, decision 7).
  */
 export function assertProviderPlacement(C: NodeImpl, p: Provider<unknown>, atConstruction: boolean): void {
+  refuseTask(p.key);
   if (!atConstruction && C.decided.has(p.key))
     throw new PlacementError(
       `Cannot provide '${keyName(p.key)}' at ${describeNode(C)}: the key has already been decided here. ` +

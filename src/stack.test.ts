@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import './node.js';
 import { Stack } from './stack.js';
 import type { NodeImpl } from './node-impl.js';
 import type { Entry } from './stack.js';

@@ -4,7 +4,7 @@ import { noTimers } from './no-timers.js';
 ruleTester.run('no-timers', noTimers, {
   assertionOptions,
   valid: [
-    { name: "ramme's sleep", code: 'const t = task(async () => { await sleep(20); });' },
+    { name: "ramme's sleep", code: 'const t = task(function* () { yield* sleep(20); });' },
     { name: 'ctx.sleep where no node is current', code: 'await app.sleep(10);' },
     { name: 'queueMicrotask is allowed', code: 'queueMicrotask(() => tick());' },
     { name: 'clearing a timer is allowed', code: 'clearTimeout(t); clearInterval(i); clearImmediate(m);' },
@@ -14,8 +14,19 @@ ruleTester.run('no-timers', noTimers, {
     { name: 'a timer name imported from another module', code: "import { setTimeout as delay } from 'my-timers'; await delay(10);" },
     { name: 'other names from the timers modules', code: "import { clearTimeout } from 'node:timers'; import { scheduler } from 'node:timers/promises';" },
     { name: 'a globalThis that is declared here', code: 'const globalThis = sandbox(); globalThis.setTimeout(f, 1);' },
+    { name: "ramme/platform's nextFrame", code: "import { nextFrame } from 'ramme/platform';\nfunction* draw() { const t = yield* nextFrame(); paint(t); }" },
+    { name: 'cancelling a frame is allowed', code: 'cancelAnimationFrame(id);' },
+    { name: 'a requestAnimationFrame of its own', code: 'const requestAnimationFrame = (cb) => cb(0); requestAnimationFrame(paint);' },
   ],
   invalid: [
+    {
+      name: 'requestAnimationFrame, bare and through window: its message names nextFrame',
+      code: 'function* draw() { requestAnimationFrame(paint); window.requestAnimationFrame(paint); }',
+      errors: [
+        { messageId: 'frame', data: { name: 'requestAnimationFrame' }, column: 20, endColumn: 41 },
+        { messageId: 'frame', data: { name: 'requestAnimationFrame' } },
+      ],
+    },
     {
       name: 'setTimeout',
       code: 'setTimeout(() => done(), 100);',
@@ -33,8 +44,8 @@ ruleTester.run('no-timers', noTimers, {
     },
     {
       name: 'a timer promise in a body',
-      code: 'const t = task(async () => {\n  await new Promise((r) => setTimeout(r, 20));\n});',
-      errors: [{ messageId: 'call', data: { name: 'setTimeout' }, line: 2, column: 28 }],
+      code: 'const t = task(function* () {\n  yield* wait(new Promise((r) => setTimeout(r, 20)));\n});',
+      errors: [{ messageId: 'call', data: { name: 'setTimeout' }, line: 2, column: 34 }],
     },
     {
       name: 'through globalThis, window and global',

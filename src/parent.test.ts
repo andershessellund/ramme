@@ -6,16 +6,15 @@
 // release reads the request's outcome through `#node.parent` and commits or rolls back. Its lease is taken from a
 // pool with a synchronous `acquire()` and owned by the value's node, below the commit entry (LIFO).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context } from './context.js';
+import type { Context, Instruction, Op } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
 import { inject } from './inject.js';
 import { valueProvider } from './provider-util.js';
 import { NotOwnedError, PendingNodeError } from './resource.js';
 import { RequestScope } from './scope.js';
-import { current, fork, lookup, never, own, release, signal } from './ambient.js';
+import { current, fork, lookup, never, own, release, signal, wait } from './ambient.js';
 import { tick, trace } from './test/util.js';
 import type { Trace } from './test/util.js';
 
@@ -57,7 +56,12 @@ class DbPool {
   }
 }
 
-/** DESIGN.md §2.6's idiom, as written there. */
+/**
+ * DESIGN.md §2.6's idiom, adapted from README's `UnitOfWork`: `commit` and `rollback` are async here (a tick, then a
+ * log line), so a test sees whether the lease is still held when a real asynchronous commit ends (LIFO), and `query`
+ * is synchronous; README's `commit` and `rollback`, bound tasks a release returns the call of, are pinned in
+ * src/callable-tasks.test.ts.
+ */
 class UnitOfWork {
   static readonly scope = RequestScope;
   readonly #log = inject(Log);
@@ -70,8 +74,8 @@ class UnitOfWork {
       return o.status === 'success' ? this.commit() : this.rollback();
     });
   }
-  /** Commit now, while the request still runs. */
-  done(): Promise<void> {
+  /** Commit now, while the request still runs: `yield* uow.done()`. */
+  done(): Op<void> {
     return this.#node.release(this);
   }
   query(sql: string): void {
@@ -96,7 +100,7 @@ function app(t: Trace): Context {
 }
 
 /** The request fiber carries RequestScope, so its outcome is the request's result (the idiom's precondition). */
-function request<T>(body: () => Promise<T>) {
+function request<T>(body: () => Generator<Instruction, T, unknown>) {
   return task(body, { name: 'request', scopes: [RequestScope] });
 }
 
@@ -127,7 +131,7 @@ describe('a value node’s parent is its storage node (DESIGN.md §3.3, D33)', (
     const root = createRootContext();
     let req: Context | undefined;
     const v = await root.call(
-      request(async () => {
+      request(function* () {
         req = current();
         return lookup(PerRequest);
       }),
@@ -193,7 +197,7 @@ describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', 
     const t = trace();
     const root = app(t);
     await root.call(
-      request(async () => {
+      request(function* () {
         lookup(UnitOfWork).query('insert');
       }),
     );
@@ -206,7 +210,7 @@ describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', 
     const root = app(t);
     await expect(
       root.call(
-        request(async () => {
+        request(function* () {
           lookup(UnitOfWork).query('insert');
           throw new Error('handler failed');
         }),
@@ -220,9 +224,9 @@ describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', 
     const t = trace();
     const root = app(t);
     const f = root.fork(
-      request(async () => {
+      request(function* () {
         lookup(UnitOfWork).query('insert');
-        await never();
+        yield* never();
       }).with({ onFailure: () => {} }),
     );
     await tick();
@@ -236,12 +240,12 @@ describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', 
     const t = trace();
     const root = app(t);
     await root.call(
-      request(async () => {
+      request(function* () {
         const uow = lookup(UnitOfWork);
         uow.query('insert');
         // The entry is on the value's node, not on the request's (C7).
         expect(() => release(uow)).toThrow(NotOwnedError);
-        await uow.done();
+        yield* uow.done();
         t.push(`after done, lease ${uow.leaseHeld ? 'held' : 'returned'}`);
         uow.query('select');
       }),
@@ -257,16 +261,16 @@ describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', 
     class WatchedUnitOfWork extends UnitOfWork {
       // Inherits RequestScope (D32). An owned fiber's failure aborts its owner, the value's node (C5).
       readonly #watch = own(
-        fork(async () => {
+        fork(function* () {
           throw heartbeat;
         }),
       );
     }
     await expect(
       root.call(
-        request(async () => {
+        request(function* () {
           lookup(WatchedUnitOfWork).query('insert');
-          await tick(3);
+          yield* wait(tick(3));
           t.push('request still running');
         }),
       ),
@@ -282,7 +286,7 @@ describe('the caveat: a bodiless child({ scopes: [RequestScope] }) reports how i
     const root = app(t);
     {
       await using req = root.child({ name: 'req', scopes: [RequestScope] });
-      await req.call(async () => {
+      await req.call(function* () {
         lookup(UnitOfWork).query('insert');
       });
     } // [Symbol.asyncDispose]() aborts first (DESIGN.md §2.7): the node's outcome is aborted
@@ -295,7 +299,7 @@ describe('the caveat: a bodiless child({ scopes: [RequestScope] }) reports how i
     const root = app(t);
     const req = root.child({ name: 'req', scopes: [RequestScope] });
     await expect(
-      req.call(async () => {
+      req.call(function* () {
         lookup(UnitOfWork).query('insert');
         throw new Error('caught by the caller');
       }),

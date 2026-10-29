@@ -8,7 +8,10 @@
 
 import type { Context } from './context.js';
 
-/** A free function was called outside any node, or no context storage is registered. */
+/**
+ * A free function, or an op through one, was called outside any node: at top level, or in plain async code after its
+ * first `await`, where ramme has no current node (DESIGN.md §6).
+ */
 export class NoCurrentNodeError extends Error {
   override name = 'NoCurrentNodeError';
 }
@@ -33,26 +36,15 @@ export class AlreadyOwnedError extends Error {
   override name = 'AlreadyOwnedError';
 }
 
-/** A body-shaped operation on a node that is lent to a `call` (an `attempt`, an `unshield`) or a `shield` (DESIGN.md §4.9): it was not awaited. */
-export class UnawaitedCallError extends Error {
-  override name = 'UnawaitedCallError';
-  constructor(
-    /** The call fiber (an `unshield`'s hole included), or the shield's release fiber, the node is lent to. */
-    readonly child: Context,
-    message?: string,
-  ) {
-    super(message ?? `the node is lent to ${label(child)}: a call() was not awaited`);
-  }
-}
 
-/** `await fiber`: fibers are not awaitable; use `join(f)` or `result(f)` (I27). */
+/** `await fiber`: fibers are not awaitable; use `join(f)` or `result(f)` (I26). */
 export class FiberNotAwaitableError extends Error {
   override name = 'FiberNotAwaitableError';
 }
 
 /**
- * Other work was aborted: the awaited fiber, or the node a managed promise was made for when another body awaits
- * it (DESIGN.md §4.2, §4.12). Never the awaiter's own interruption, which is `InterruptedError`.
+ * The awaited work was aborted: a fiber joined, called or awaited through an op's `then` ended `aborted`
+ * (DESIGN.md §4.12). A halted body never sees it for its own interruption, which is `return()`, never an error.
  */
 export class FiberAbortedError extends Error {
   override name = 'FiberAbortedError';
@@ -65,32 +57,6 @@ export class FiberAbortedError extends Error {
   }
 }
 
-/**
- * The awaiting body's own interruption (D39, DESIGN.md §4.2): after its `freeze` or `restore` node is delivered,
- * every managed await the body makes rejects with it, except release work. The node's outcome is `aborted` whatever
- * the body then does, so a `catch` that sees one rethrows it. A promise derived from another body's managed await
- * and shared with this one (a memoized load) carries that body's instead; `signal().aborted` tells them apart
- * (DESIGN.md §4.4).
- */
-export class InterruptedError extends Error {
-  override name = 'InterruptedError';
-  constructor(
-    /** The delivery's reason, as `signal().reason` reads it. */
-    readonly reason: unknown,
-    message?: string,
-  ) {
-    super(message ?? `interrupted: ${reasonText(reason)}`);
-  }
-}
-
-/** An abort reason as text that never throws: an error's message, else `String(reason)`. */
-function reasonText(reason: unknown): string {
-  try {
-    return reason instanceof Error ? reason.message : String(reason);
-  } catch {
-    return '[unprintable reason]';
-  }
-}
 
 /** `pool.fork` after the pool was delivered or close() was requested (D15). */
 export class PoolClosedError extends Error {
@@ -102,7 +68,7 @@ export class CreationViolationError extends Error {
   override name = 'CreationViolationError';
 }
 
-/** `ctx.run(fn)` returned a promise (development mode; DESIGN.md §4.11, §4.4). */
+/** `ctx.run(fn)` returned a promise or a generator (development mode; DESIGN.md §4.11, §4.4). */
 export class AsyncRunError extends Error {
   override name = 'AsyncRunError';
 }
@@ -145,7 +111,7 @@ function label(node: Context): string {
 }
 
 // ---------------------------------------------------------------------------
-// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (A3).
+// SuppressedError — global on Node >= 24; a minimal shim on Node 22 (A2).
 // ---------------------------------------------------------------------------
 
 export type SuppressedErrorLike = Error & { error: unknown; suppressed: unknown };
@@ -178,16 +144,20 @@ export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, mess
  * - `target[Symbol.asyncDispose]` is a function → `() => target[Symbol.asyncDispose]()`
  * - `target[Symbol.dispose]` is a function → `() => target[Symbol.dispose]()`
  * - `target` is a function → `target` (the defer overload)
+ *
+ * What the function returns is the release fiber's body result (DESIGN.md §2.4, §4.5): a generator object or an op
+ * is driven in the release fiber; a promise (a foreign `[Symbol.asyncDispose]()`, an `async` release) is waited for
+ * as a bare wait, and the release fiber is current only until its first `await`; anything else is done.
  */
-export function toDispose(target: object, release?: (value: any) => void | Promise<void>): () => void | Promise<void> {
+export function toDispose(target: object, release?: (value: any) => unknown): () => unknown {
   if (release !== undefined) {
     if (typeof release !== 'function') throw new TypeError('own(value, release): release must be a function');
     return () => release(target);
   }
   const t = target as Partial<AsyncDisposable & Disposable>;
   // The lib types asyncDispose as PromiseLike; the release loop treats any thenable as pending (isPromise is duck-typed).
-  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!() as Promise<void>;
+  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!();
   if (typeof t[Symbol.dispose] === 'function') return () => t[Symbol.dispose]!();
-  if (typeof target === 'function') return target as () => void | Promise<void>;
+  if (typeof target === 'function') return target as () => unknown;
   throw new TypeError('own(): value is neither Disposable nor AsyncDisposable; pass a release function');
 }

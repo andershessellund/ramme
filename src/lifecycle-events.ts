@@ -37,8 +37,7 @@ export type NodeEvent =
   | (Base & { type: 'node:started' })
   | (Base & { type: 'node:delivered'; reason: unknown })
   | (Base & { type: 'node:settled'; outcome: Outcome<unknown>['status'] })
-  | (Base & { type: 'node:lent'; childId: number })
-  | (Base & { type: 'node:returned'; childId: number })
+
   | (Base & { type: 'node:releasing'; stack: 'explicit' | 'provided' })
   | (Base & { type: 'entry:registered'; entryName: string; stack: 'explicit' | 'provided' })
   | (Base & { type: 'entry:released'; entryName: string; stack: 'explicit' | 'provided'; error?: string })

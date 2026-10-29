@@ -1,5 +1,5 @@
 // invariants.test.ts — one named test per invariant of DESIGN.md §10
-// (I1–I27). Each test pins the invariant end to end in ramme's idiom (law 2);
+// (I1–I26; I10 has two). Each test pins the invariant end to end in ramme's idiom (law 2);
 // the edge cases live in the per-module suites the comments name. The
 // candidate scenarios for the probes the review left without a scenario (see
 // probes.test.ts) are here too:
@@ -10,18 +10,15 @@
 // A delivered freeze body's outcome is `aborted` whatever it does (I13), so
 // nothing is asserted inside one: such bodies record, and the test asserts
 // after.
-import { describe, expect, it } from 'vitest';
-import './node.js';
+import { describe, expect, it, vi } from 'vitest';
 import {
   all,
-  call,
   child,
   current,
   fork,
   interrupted,
   join,
   lookup,
-  managed,
   never,
   own,
   pool,
@@ -33,6 +30,7 @@ import {
   shield,
   signal,
   sleep,
+  wait,
 } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber } from './context.js';
@@ -48,8 +46,8 @@ import {
   FiberNotAwaitableError,
   NodeCompletedError,
   NotOwnedError,
+  NoCurrentNodeError,
   PlacementError,
-  UnawaitedCallError,
 } from './resource.js';
 import { deferred, events, impl, tick, trace, unhandledRejectionGuard, within } from './test/util.js';
 
@@ -66,9 +64,8 @@ async function rejection(p: PromiseLike<unknown>): Promise<unknown> {
 }
 
 /**
- * What `fn` throws, or 'ok'. A promise it returns is dropped, not caught: every promise ramme returns
- * here is a managed promise over a source that never rejects (D13), and a dropped one is never an
- * unhandled rejection (I10), while attaching `.catch` to one would make it an await of the current body.
+ * What `fn` throws, or 'ok'. An op it returns is dropped, not consumed: a work op runs nothing then, and a
+ * lifecycle op's sources never reject (D13′), so a dropped one is never an unhandled rejection (I10).
  */
 function attempt(fn: () => unknown): unknown {
   try {
@@ -93,7 +90,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const A = root.child({ name: 'A' });
     const B = root.child({ name: 'B' });
     const c = A.child({ name: 'c' });
-    const f = A.fork(task(async () => never(), link));
+    const f = A.fork(task(function* () { return yield* never(); }, link));
     const p = A.pool({ name: 'p', onFailure: () => {} });
     const nodes = subtree(impl(root));
     for (const n of [c, f, p]) {
@@ -131,10 +128,10 @@ describe('invariants (DESIGN.md §10)', () => {
     expect(ev.of('node:complete').filter((e) => e.id === N.id)).toHaveLength(1);
     // (b) releaseAll() racing release(x) in a body
     const counts = { x: 0, y: 0 };
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       const x = own({ [Symbol.asyncDispose]: async () => void counts.x++ });
       own({ [Symbol.asyncDispose]: async () => void counts.y++ });
-      await Promise.all([releaseAll(), release(x)]);
+      yield* wait(Promise.all([releaseAll(), release(x)]));
     });
     expect(counts).toEqual({ x: 1, y: 1 });
     // (c) abort() arriving in the middle of a releaseAll(), whose last release fails. The error is the
@@ -158,7 +155,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const [all, closed] = await within(Promise.allSettled([releasing, M.close()]));
     expect(all).toEqual({ status: 'rejected', reason: E });
     expect(closed).toEqual({ status: 'fulfilled', value: undefined });
-    expect(M.outcome?.status).toBe('aborted'); // not 'failure': the error was the caller's
+    expect(M.outcome?.status).toBe('aborted'); // not 'defect': the error was the caller's
     expect(m).toEqual({ a: 1, b: 1 });
     expect(ev.of('entry:released').filter((e) => e.id === M.id).map((e) => e.entryName)).toEqual(['b', 'a']);
     expect(ev.of('node:complete').filter((e) => e.id === M.id)).toHaveLength(1);
@@ -185,7 +182,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const [all3, closed3] = await within(Promise.allSettled([M3.releaseAll(), M3.close()]));
     expect(all3).toEqual({ status: 'rejected', reason: E3 });
     expect(closed3).toEqual({ status: 'fulfilled', value: undefined });
-    expect(M3.outcome?.status).toBe('success'); // not 'failure': the error was the caller's
+    expect(M3.outcome?.status).toBe('success'); // not 'defect': the error was the caller's
     expect(ev.of('entry:released').filter((e) => e.id === M3.id).map((e) => e.entryName)).toEqual(['a3', 'b3']);
     await expect(ev.root.close()).resolves.toBeUndefined(); // neither error surfaces a second time
   });
@@ -213,17 +210,17 @@ describe('invariants (DESIGN.md §10)', () => {
     root.own(t.at('explicit 1'));
     root.get(Late); // provided AFTER an explicit entry: one merged LIFO stack would release it before 'explicit 1'
     root.child().own(t.at('child entry'));
-    await root.call(async () => {
+    await root.call(function* () {
       lookup(Service); // read from inside a body: the service outlives it (G1)
       own(t.at('call entry'));
     });
     const gate = deferred();
     let spawned: unknown;
     root.fork(
-      task(async () => {
+      task(function* () {
         own(t.at('fork entry'));
         spawned = lookup(Spawned); // first made here, after every explicit entry, by a fork still running at close
-        await gate.promise;
+        yield* wait(gate.promise);
       }, link),
     );
     await tick();
@@ -249,15 +246,15 @@ describe('invariants (DESIGN.md §10)', () => {
   it('I4 unsubscribed hear late: an owned fiber and a pool hear the signal only at their turn in the release loop', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const p = pool({ name: 'p', onFailure: () => {} });
       p.signal.addEventListener('abort', () => t.push('pool heard'));
-      const reaper = own(fork(async () => never()));
+      const reaper = own(fork(function* () { return yield* never(); }));
       reaper.signal.addEventListener('abort', () => t.push('owned fiber heard'));
-      const worker = fork(async () => never());
+      const worker = fork(function* () { return yield* never(); });
       worker.signal.addEventListener('abort', () => t.push('subscriber heard'));
       own(t.at('top entry released'));
-      await tick();
+      yield* wait(tick());
     });
     expect(t.log).toEqual(['subscriber heard', 'top entry released', 'owned fiber heard', 'pool heard']);
     await root.close();
@@ -267,64 +264,55 @@ describe('invariants (DESIGN.md §10)', () => {
   it('I5 LIFO, fixed positions: releasing a middle entry early leaves the others in their order', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       own(t.at('a'));
       const b = own(t.at('b'));
       own(t.at('c'));
       own(t.at('d'));
-      await release(b);
+      yield* release(b);
     });
     expect(t.log).toEqual(['b', 'd', 'c', 'a']);
     await root.close();
   });
 
   // -------------------------------------------------------------------------
-  it('I6 interruption is sticky: after delivery every managed await of the body rejects with InterruptedError, a swallowed one and one made later in its frame included, except release work; the outcome is aborted', async () => {
+  it('I6 once a freeze or restore node is delivered, its body runs no op it yields on its normal path, except one already started; what its own finally yields is release work, never interrupted; the outcome is aborted', async () => {
     const t = trace();
     const root = createRootContext();
-    const trigger = deferred();
-    const lateSettled = deferred<unknown>();
+    const gate = deferred();
+    let workRan = false;
     const f = root.fork(
-      task(async () => {
+      task(function* () {
         const x = own({}, () => void t.push('x released'));
-        void trigger.promise.then(() => {
-          const late = managed(Promise.resolve('x')); // made later, in this body's frame, and awaited there
-          late.then(
-            (v) => lateSettled.resolve(v),
-            (e: unknown) => lateSettled.resolve(e),
-          );
-        });
         t.push('before');
+        yield* wait(gate.promise); // delivered meanwhile: a started wait, which the halt lets finish (row 3)
+        t.push('resumed');
+        t.push(`late: ${yield* wait(Promise.resolve('started'))}`); // started before it was yielded: run (row 5)
         try {
-          await never();
-        } catch (e) {
-          t.push(`never: ${(e as Error).name}`); // swallowed
+          yield* task(function* () {
+            workRan = true; // never: not started, so not run; the body is returned here (row 4)
+          })();
+          t.push('unreachable');
+        } catch {
+          t.push('caught'); // never: no catch sees the halt
+        } finally {
+          t.push('finally');
+          yield* sleep(5); // release work: the unwind fiber is never interrupted, so it sleeps its full duration
+          t.push('slept in finally');
+          yield* release(x);
+          t.push('released in finally');
         }
-        try {
-          await sleep(1);
-          t.push('slept');
-        } catch (e) {
-          t.push(`sleep: ${(e as Error).name}`); // swallowed again: still interrupted
-        }
-        await release(x); // release work is exempt
-        t.push('released early');
-        trigger.resolve();
-        const seen = await lateSettled.promise; // a bare await
-        t.push(`late: ${(seen as Error).name}`);
-        return 'swallowed';
+        return 'unreachable';
       }, link),
     );
     await tick();
     f.abort('stop');
-    expect(await within(root.result(f))).toEqual({ status: 'aborted', reason: 'stop' }); // by state, the return discarded (D24)
-    expect(t.log).toEqual([
-      'before',
-      'never: InterruptedError',
-      'sleep: InterruptedError',
-      'x released',
-      'released early',
-      'late: InterruptedError',
-    ]);
+    gate.resolve();
+    expect(await within(root.result(f))).toEqual({ status: 'aborted', reason: 'stop' }); // by state (D24)
+    expect({ log: t.log, workRan }).toEqual({
+      log: ['before', 'resumed', 'late: started', 'finally', 'slept in finally', 'x released', 'released in finally'],
+      workRan: false,
+    });
     await root.close();
   });
 
@@ -333,14 +321,14 @@ describe('invariants (DESIGN.md §10)', () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     let done: Fiber<number> | undefined;
-    await root.call(async () => {
-      done = fork(async () => 1);
-      await join(done);
+    await root.call(function* () {
+      done = fork(function* () { return 1; });
+      yield* join(done);
     });
     for (const n of [root.child(), done!]) {
       if (n.state !== 'complete') await n.close();
       expect(n.state).toBe('complete');
-      const t = task(async () => 0);
+      const t = task(function* () { return 0; });
       const ops: Record<string, () => unknown> = {
         get: () => n.get(K),
         addProvider: () => n.addProvider(valueProvider(K, 'again')),
@@ -358,7 +346,7 @@ describe('invariants (DESIGN.md §10)', () => {
         result: () => n.result(done!),
         interrupted: () => n.interrupted(),
         never: () => n.never(),
-        managed: () => n.managed(Promise.resolve()),
+        managed: () => n.wait(Promise.resolve(), { abandon: true }),
         run: () => n.run(() => {}),
         runSync: () => n.runSync(() => {}),
       };
@@ -371,30 +359,36 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I8 open window: between delivery and completion own/release/fork/child/get work, release work can be awaited, and what is owned then is released at completion', async () => {
+  it('I8 open window: between delivery and completion own/release/fork/child/get work, its own finally may wait, and what is owned then is released at completion', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const gate = deferred();
     const t = trace();
     const seen: Record<string, unknown> = {};
     const f = root.fork(
-      task(async () => {
-        await gate.promise; // bare: the body is delivered meanwhile and keeps running plain code
-        seen.delivered = signal().aborted;
-        const x = own(t.at('owned after delivery'));
-        seen.get = lookup(K);
-        const g = fork(async () => never());
-        seen.forkBornDelivered = g.signal.aborted;
-        const c = child();
-        seen.childBornDelivered = c.signal.aborted;
-        const y = own(t.at('released early'));
-        void release(y); // runs now; the promise is a managed await this body never awaits
-        seen.releasedNow = t.log.includes('released early');
-        seen.xLive = impl(current()).explicit.find(x) !== undefined;
-        const z = own(t.at('released and awaited'));
-        await release(z); // release work: awaited after delivery without rejection (D39)
-        seen.shielded = await shield(() => lookup(K)); // so is a shield
-        await never();
+      task(function* () {
+        let z: object | undefined;
+        try {
+          yield* wait(gate.promise); // the body is delivered meanwhile, resumed when p finishes, and runs plain code
+          seen.delivered = signal().aborted;
+          const x = own(t.at('owned after delivery'));
+          seen.get = lookup(K);
+          const g = fork(function* () {
+            return yield* never();
+          });
+          seen.forkBornDelivered = g.signal.aborted;
+          const c = child();
+          seen.childBornDelivered = c.signal.aborted;
+          const y = own(t.at('released early'));
+          void release(y); // eager: it runs now, and nobody waits for it
+          seen.releasedNow = t.log.includes('released early');
+          seen.xLive = impl(current()).explicit.find(x) !== undefined;
+          z = own(t.at('released and waited for'));
+          yield* never(); // returned here
+        } finally {
+          yield* release(z!); // its own finally may wait: release work, never interrupted
+          seen.shielded = yield* shield(() => lookup(K)); // so may a shield there
+        }
       }, link),
     );
     await tick();
@@ -410,7 +404,7 @@ describe('invariants (DESIGN.md §10)', () => {
       xLive: true,
       shielded: 'k',
     });
-    expect(t.log).toEqual(['released early', 'released and awaited', 'owned after delivery']);
+    expect(t.log).toEqual(['released early', 'released and waited for', 'owned after delivery']);
     // from outside: own() on a delivered node that is still releasing (C2)
     const other = createRootContext();
     const N = other.child();
@@ -427,55 +421,56 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I9 marked before heard: the whole subscribed subtree is marked before any abort listener runs (G4)', async () => {
+  it('I9 marked before heard: every node a delivery reaches is marked before any abort listener runs (G4)', async () => {
     const root = createRootContext();
     const seen: boolean[] = [];
     let a: Context | undefined;
     let deep: Context | undefined;
-    await root.call(async () => {
-      a = fork(async () => never());
+    await root.call(function* () {
+      a = fork(function* () { return yield* never(); });
       const b = child();
-      deep = b.fork(task(async () => never(), link));
+      deep = b.fork(task(function* () { return yield* never(); }, link));
       a.signal.addEventListener('abort', () => {
         seen.push(impl(b).delivered, impl(deep!).delivered, deep!.signal.aborted);
       });
-      await tick();
+      yield* wait(tick());
       current().abort();
-    }).catch(() => {});
+    }).then(undefined, () => {});
     expect(seen).toEqual([true, true, false]); // marked, not yet fired
     expect(deep?.signal.aborted).toBe(true);
     await root.close();
   });
 
   // -------------------------------------------------------------------------
-  it('I10 no unhandled rejections: an unjoined failed fork, a dropped call and a dropped join surface as values, never as unhandled rejections', async () => {
+  it('I10 no unhandled rejections from the core’s promises, and a work op nobody consumes never runs: an unjoined failed fork and a dropped join surface as values, a dropped call runs nothing, never an unhandled rejection', async () => {
     const guard = unhandledRejectionGuard()!;
     expect(guard).toBeDefined();
     const before = guard.seen.length;
     const root = createRootContext();
     const err = await rejection(
-      root.call(async () => {
-        fork(async () => {
+      root.call(function* () {
+        fork(function* () {
           throw new Error('unjoined');
         });
-        const f = fork(async () => {
+        const f = fork(function* () {
           throw new Error('dropped join');
         });
-        void join(f);
-        await tick(3);
+        void join(f); // runs nothing: f's failure is unjoined, and surfaces from this body's node
+        yield* wait(tick(3));
       }),
     );
     expect(err).toBeInstanceOf(AggregateError);
     expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['dropped join', 'unjoined']);
-    const dropped = await rejection(
-      root.call(async () => {
-        void call(async () => {
-          throw new Error('dropped call');
-        }); // the await was forgotten: the failure is never delivered, so it surfaces from this body's node
-        await tick(2);
-      }),
-    );
-    expect((dropped as Error).message).toBe('dropped call');
+    let ran = false;
+    const dropped = await root.call(function* () {
+      void task(function* () {
+        ran = true;
+        throw new Error('dropped call');
+      })(); // the yield* was forgotten: the call never runs (no-unused-op reports it, with type information)
+      yield* wait(tick(2));
+      return 'returned';
+    });
+    expect({ dropped, ran }).toEqual({ dropped: 'returned', ran: false });
     await expect(root.close()).resolves.toBeUndefined();
     await tick(2);
     expect(guard.seen.length).toBe(before);
@@ -486,22 +481,22 @@ describe('invariants (DESIGN.md §10)', () => {
     const boom = new Error('boom');
     const root = createRootContext();
     await expect(
-      root.call(async () => {
-        const f = fork(async () => {
+      root.call(function* () {
+        const f = fork(function* () {
           throw boom;
         });
-        expect(await rejection(join(f))).toBe(boom);
+        expect(yield* wait(rejection(join(f)))).toBe(boom);
         expect(impl(current()).unconsumed.size).toBe(0);
       }),
     ).resolves.toBeUndefined();
     // a 'join' fork onto a bodiless node is refused (D14), so the unjoined fork is made from a body
     const parent = root.child();
     const err = await rejection(
-      parent.call(async () => {
-        fork(async () => {
+      parent.call(function* () {
+        fork(function* () {
           throw boom;
         });
-        await tick(); // bare: let it fail; a body that returned at once would interrupt it unstarted (DESIGN.md §2.4, §4.6)
+        yield* wait(tick()); // bare: let it fail; a body that returned at once would interrupt it unstarted (DESIGN.md §2.4, §4.6)
       }),
     );
     expect(err).toBe(boom); // surfaced from the call fiber's completion
@@ -513,8 +508,8 @@ describe('invariants (DESIGN.md §10)', () => {
   it('I12 aborted is not failure: an aborted fiber fires no destination, does not abort a linked parent, and is excluded from an AggregateError', async () => {
     const root = createRootContext();
     const handled: unknown[] = [];
-    const h = root.fork(task(async () => never(), { onFailure: (e) => void handled.push(e) }));
-    const l = root.fork(task(async () => never(), link));
+    const h = root.fork(task(function* () { return yield* never(); }, { onFailure: (e) => void handled.push(e) }));
+    const l = root.fork(task(function* () { return yield* never(); }, link));
     await tick();
     h.abort();
     l.abort();
@@ -524,16 +519,15 @@ describe('invariants (DESIGN.md §10)', () => {
     expect(h.outcome?.status).toBe('aborted');
     const boom = new Error('boom');
     const err = await rejection(
-      root.call(async () =>
-        all([
-          task(async () => {
+      root.call(function* () { return yield* all([
+          task(function* () {
             throw boom;
           }),
-          task(async () => {
+          task(function* () {
             current().abort('self');
-            await never();
+            yield* never();
           }),
-        ]),
+        ]); },
       ),
     );
     expect(err).toBeInstanceOf(AggregateError);
@@ -542,34 +536,35 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I13 state decides: a delivered freeze body is aborted whatever it produced, a caught InterruptedError included; an undelivered one that throws an AbortError has failed', async () => {
+  it('I13 state decides: a delivered freeze body is aborted whatever it produced, whatever its finally does; an undelivered one that throws an AbortError has failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); // the lost halt below is reported in dev mode
     const root = createRootContext();
     const gate = deferred();
     const returning = root.fork(
-      task(async () => {
-        await gate.promise;
+      task(function* () {
+        yield* wait(gate.promise);
         return 'value';
       }, link),
     );
     const swallowing = root.fork(
-      task(async () => {
+      task(function* () {
         try {
-          await never();
-        } catch {
-          return 'caught its interruption'; // the outcome stays aborted (D24, D39)
+          yield* never();
+        } finally {
+          return 'returned from its finally'; // a lost halt (dev mode reports it); the outcome stays aborted (D24)
         }
       }, link),
     );
     const throwing = root.fork(
-      task(async () => {
-        await gate.promise;
+      task(function* () {
+        yield* wait(gate.promise);
         throw new Error('after delivery');
       }, link),
     );
     const observer = root.fork(
       task(
-        async () => {
-          await gate.promise;
+        function* () {
+          yield* wait(gate.promise);
           return 'observed';
         },
         { ...link, interrupt: 'observe' },
@@ -584,19 +579,20 @@ describe('invariants (DESIGN.md §10)', () => {
     expect(swallowing.outcome).toEqual({ status: 'aborted', reason: 'stop' });
     expect(observer.outcome).toEqual({ status: 'success', value: 'observed' });
     const abortError = new DOMException('not really', 'AbortError');
-    const fake = await root.call(async () =>
-      result(
-        fork(async () => {
+    const fake = await root.call(function* () { return yield* result(
+        fork(function* () {
           throw abortError;
         }),
-      ),
+      ); },
     );
-    expect(fake).toEqual({ status: 'failure', error: abortError }); // never inspected (DESIGN.md §4.12)
+    expect(fake).toEqual({ status: 'defect', error: abortError }); // never inspected (DESIGN.md §4.12)
+    expect(warn.mock.calls.map((c) => /halt of .* was lost/.test(String(c[0])))).toEqual([true]);
+    warn.mockRestore();
     await root.close();
   });
 
   // -------------------------------------------------------------------------
-  it('I14 every release is a fiber and is current while it runs: kind release, parented to the owner, signal() is its deadline, owner.outcome is readable', async () => {
+  it('I14 every release is a fiber, current while it runs synchronously or steps: kind release, parented to the owner, signal() is its deadline, owner.outcome is readable, across a generator release’s yield*s too', async () => {
     const root = createRootContext();
     const seen: { kind: string; parent: unknown; deadline: AbortSignal; outcome: unknown }[] = [];
     const record = (owner: Context) => () =>
@@ -604,17 +600,21 @@ describe('invariants (DESIGN.md §10)', () => {
     let owner: Context | undefined;
     await root.call(
       task(
-        async () => {
+        function* () {
           owner = current();
           const me = owner;
           own({}, record(me)); // own(value, release)
-          own({ [Symbol.asyncDispose]: async () => record(me)() }); // the contract
+          own({ [Symbol.asyncDispose]: async () => record(me)() }); // the contract: current until its first await
           own(record(me)); // defer
+          own({}, function* () {
+            yield* sleep(1);
+            record(me)(); // a generator release: current at every step
+          });
         },
         { releaseTimeoutMs: 50 },
       ),
     );
-    expect(seen).toHaveLength(3);
+    expect(seen).toHaveLength(4);
     for (const s of seen) {
       expect(s.kind).toBe('release');
       expect(s.parent).toBe(owner);
@@ -641,14 +641,14 @@ describe('invariants (DESIGN.md §10)', () => {
   // -------------------------------------------------------------------------
   it('I15 synchronous attachment: own, fork, child and pool entries are registered before they return', async () => {
     const ev = events();
-    await ev.root.call(async () => {
+    await ev.root.call(function* () {
       const me = current();
       const registered = () => ev.of('entry:registered').filter((e) => e.id === me.id).length;
       const n0 = registered();
       const x = own({ [Symbol.dispose]() {} });
       expect(registered()).toBe(n0 + 1);
       expect(impl(me).explicit.find(x)).toBeDefined();
-      const f = fork(async () => 1);
+      const f = fork(function* () { return 1; });
       expect(registered()).toBe(n0 + 2);
       expect(impl(me).explicit.find(f)).toBeDefined();
       const c = child();
@@ -657,7 +657,7 @@ describe('invariants (DESIGN.md §10)', () => {
       const p = pool({ name: 'p', onFailure: () => {} });
       expect(registered()).toBe(n0 + 4);
       expect(impl(me).explicit.find(p)).toBeDefined();
-      await join(f);
+      yield* join(f);
     });
     await ev.root.close();
   });
@@ -673,21 +673,21 @@ describe('invariants (DESIGN.md §10)', () => {
     let forkRan = false;
     let forkRanDuringFactory = false;
     let inFactory = false;
-    const t = task(async () => 0);
+    const t = task(function* () { return 0; });
     class Value {
       constructor() {
         inFactory = true;
-        const done = other.fork(task(async () => 1, link));
+        const done = other.fork(task(function* () { return 1; }, link));
         const ops: Record<string, () => unknown> = {
           lookup: () => lookup(K),
-          call: () => call(t),
+          call: () => t(),
           all: () => all([t]),
           race: () => race([t]),
           join: () => join(done),
           result: () => result(done),
           interrupted: () => interrupted(),
           never: () => never(),
-          managed: () => managed(Promise.resolve()),
+          managed: () => wait(Promise.resolve(), { abandon: true }),
           runSync: () => runSync(() => {}),
           'other.run': () => other.run(() => {}),
           'other.get': () => other.get(K),
@@ -695,7 +695,7 @@ describe('invariants (DESIGN.md §10)', () => {
         };
         for (const [name, op] of Object.entries(ops)) seen[name] = attempt(op);
         own(
-          fork(async () => {
+          fork(function* () {
             forkRan = true;
             forkRanDuringFactory = inFactory;
             seen.creationInFork = currentCreation();
@@ -705,7 +705,7 @@ describe('invariants (DESIGN.md §10)', () => {
       }
     }
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
-    await root.call(async () => {
+    await root.call(function* () {
       seen.lookupInBody = lookup(K); // the same lookup outside a creation
     });
     expect(seen.lookupInBody).toBe('k');
@@ -813,14 +813,14 @@ describe('invariants (DESIGN.md §10)', () => {
     const root = createRootContext();
     const log: string[] = [];
     let first: Context | undefined;
-    await root.call(async () => {
-      const f = fork(async () => {
+    await root.call(function* () {
+      const f = fork(function* () {
         first = current();
         log.push('body');
       });
       log.push('after fork');
       expect(log).toEqual(['after fork']);
-      await join(f);
+      yield* join(f);
       expect(first).toBe(f);
     });
     expect(log).toEqual(['after fork', 'body']);
@@ -831,19 +831,19 @@ describe('invariants (DESIGN.md §10)', () => {
   it('I21 the current node is the default owner: every free function acts on current()', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'outer')] });
-    await root.call(async () => {
+    await root.call(function* () {
       const me = impl(current());
       const x = own({ [Symbol.dispose]() {} });
       expect(me.explicit.find(x)).toBeDefined();
-      const f = fork(async () => 1);
+      const f = fork(function* () { return 1; });
       expect(impl(f).parent).toBe(me);
       expect(impl(child()).parent).toBe(me);
       expect(impl(pool({ name: 'p', onFailure: () => {} })).parent).toBe(me);
       expect(signal()).toBe(me.signal);
       expect(lookup(K)).toBe('outer');
-      expect(await call(task(() => lookup(K), { providers: [valueProvider(K, 'inner')] }))).toBe('inner');
-      expect(await join(f)).toBe(1);
-      await release(x);
+      expect(yield* task(() => lookup(K), { providers: [valueProvider(K, 'inner')] })()).toBe('inner');
+      expect(yield* join(f)).toBe(1);
+      yield* release(x);
       expect(me.explicit.find(x)).toBeUndefined();
     });
     await root.close();
@@ -859,11 +859,11 @@ describe('invariants (DESIGN.md §10)', () => {
     svc.ctx.abort(); // the value's node completes; its cache entry stays
     expect(() => root.get(Service)).toThrow(NodeCompletedError);
     let escaped: Context | undefined;
-    await root.call(async () => {
+    await root.call(function* () {
       escaped = current();
     });
     expect(() => escaped!.own({ [Symbol.dispose]() {} })).toThrow(NodeCompletedError);
-    expect(() => escaped!.fork(async () => {})).toThrow(NodeCompletedError);
+    expect(() => escaped!.fork(function* () {})).toThrow(NodeCompletedError);
     await root.close();
   });
 
@@ -883,24 +883,24 @@ describe('invariants (DESIGN.md §10)', () => {
     }
     const acquire = (owner: Context = current()) => new Handle(owner);
     const root = createRootContext();
-    await root.call(async () => {
+    await root.call(function* () {
       const x = own(t.at('passive'));
-      await release(x);
-      const f = fork(async () => {
+      yield* release(x);
+      const f = fork(function* () {
         own(t.at('fiber'));
-        await never();
+        yield* never();
       });
-      await tick();
-      await release(f);
+      yield* wait(tick());
+      yield* release(f);
       expect(f.outcome?.status).toBe('aborted');
       const c = child();
       c.own(t.at('child'));
-      await release(c);
+      yield* release(c);
       const p = pool({ name: 'p', onFailure: () => {} });
       p.own(t.at('pool'));
-      await release(p);
+      yield* release(p);
       const h = acquire();
-      await h.release();
+      yield* wait(h.release());
       expect(impl(current()).explicit.size).toBe(0);
     });
     expect(t.log).toEqual(['passive', 'fiber', 'child', 'pool', 'handle']);
@@ -917,7 +917,7 @@ describe('invariants (DESIGN.md §10)', () => {
     const root = createRootContext();
     root.own(() => {});
     root.get(Service);
-    await root.call(async () => {
+    await root.call(function* () {
       own(() => {});
       expect(impl(current()).provided.size).toBe(0);
     });
@@ -931,17 +931,17 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I25 no bare callbacks: own(fn) runs inside a release fiber, as does a value release and a failure handler’s parent frame', async () => {
+  it('I25 every asynchronous hook is a fiber, or a synchronous re-entry of its node through a ramme wrapper: own(fn) runs inside a release fiber, as does a value release; a failure handler runs in its parent’s frame, and node.run re-enters a node synchronously', async () => {
     const root = createRootContext();
     const kinds: string[] = [];
     let handlerCurrent: Context | undefined;
-    await root.call(async () => {
+    await root.call(function* () {
       own(() => void kinds.push(impl(current()).kind));
       own({}, () => void kinds.push(impl(current()).kind));
     });
     const f = root.fork(
       task(
-        async () => {
+        function* () {
           throw new Error('x');
         },
         { onFailure: () => void (handlerCurrent = current()) },
@@ -950,79 +950,110 @@ describe('invariants (DESIGN.md §10)', () => {
     await tick(2);
     expect(kinds).toEqual(['release', 'release']);
     expect(handlerCurrent).toBe(root); // the one callback the design keeps runs with a node current (DESIGN.md §4.7)
-    expect(f.outcome?.status).toBe('failure');
+    expect(f.outcome?.status).toBe('defect');
+    // A platform callback re-enters a node synchronously, and only for its synchronous part (DESIGN.md §6)
+    let reentered: Context | undefined;
+    let afterAwait: unknown;
+    await new Promise<void>((resolve) =>
+      setTimeout(() => {
+        root.run(() => {
+          reentered = current();
+          void (async () => {
+            await Promise.resolve();
+            try {
+              current();
+            } catch (e) {
+              afterAwait = e;
+            }
+            resolve();
+          })();
+        });
+      }, 0),
+    );
+    expect(reentered).toBe(root);
+    expect(afterAwait).toBeInstanceOf(NoCurrentNodeError);
     await root.close();
   });
 
   // -------------------------------------------------------------------------
-  it('I26 a lent node rejects body-shaped use: every listed operation throws UnawaitedCallError naming the call child; own, release, close and abort do not', async () => {
+  it('I10, continued (D41 decision 2): a work op made and not yet yielded runs nothing: while one is made, every body-shaped operation works on the node, and the op runs at its yield*', async () => {
     const K = createInjectionKey<string>('K');
     const root = createRootContext({ providers: [valueProvider(K, 'k')] });
     const seen: Record<string, unknown> = {};
-    let callChild: Context | undefined;
-    const t = task(async () => 0);
+    let ran = 0;
+    const t = task(function* () {
+      return 0;
+    });
     const Y = root.fork(
-      task(async () => {
-        const other = fork(async () => 1);
-        await join(other);
-        await call(async () => {
-          callChild = current();
-          const y = impl(current()).parent!; // the lender
-          const ops: Record<string, () => unknown> = {
-            get: () => y.get(K),
-            call: () => y.call(t),
-            fork: () => y.fork(t),
-            child: () => y.child(),
-            pool: () => y.pool({ name: 'p', onFailure: () => {} }),
-            all: () => y.all([t]),
-            race: () => y.race([t]),
-            shield: () => y.shield(t),
-            join: () => y.join(other),
-            result: () => y.result(other),
-            interrupted: () => y.interrupted(),
-            never: () => y.never(),
-            managed: () => y.managed(Promise.resolve()),
-            run: () => y.run(() => {}),
-            runSync: () => y.runSync(() => {}),
-          };
-          for (const [name, op] of Object.entries(ops)) seen[name] = attempt(op);
-          const x = { [Symbol.dispose]() {} };
-          seen.own = attempt(() => y.own(x));
-          seen.release = attempt(() => y.release(x));
-          seen.close = attempt(() => void y.close());
-          seen.abort = attempt(() => y.abort('from the call'));
+      task(function* () {
+        const other = fork(function* () {
+          return 1;
         });
+        yield* join(other);
+        const y = current();
+        const pending = task(function* () {
+          ran++;
+          return 'called';
+        })(); // made, not yielded: nothing runs, nothing is lent
+        const ops: Record<string, () => unknown> = {
+          get: () => y.get(K),
+          call: () => y.call(t),
+          fork: () => y.fork(t),
+          child: () => y.child(),
+          pool: () => y.pool({ name: 'p', onFailure: () => {} }),
+          all: () => y.all([t]),
+          race: () => y.race([t]),
+          shield: () => y.shield(t),
+          join: () => y.join(other),
+          result: () => y.result(other),
+          interrupted: () => y.interrupted(),
+          never: () => y.never(),
+          wait: () => y.wait(Promise.resolve(), { abandon: true }),
+          run: () => y.run(() => {}),
+          runSync: () => y.runSync(() => {}),
+        };
+        for (const [name, op] of Object.entries(ops)) seen[name] = attempt(op);
+        seen.ranBeforeYield = ran;
+        seen.value = yield* pending;
+        seen.ranAfterYield = ran;
       }, link),
     );
-    expect(await root.call(async () => (await result(Y)).status)).toBe('aborted');
-    for (const name of ['get', 'call', 'fork', 'child', 'pool', 'all', 'race', 'shield', 'join', 'result', 'interrupted', 'never', 'managed', 'run', 'runSync']) {
-      expect(seen[name], name).toBeInstanceOf(UnawaitedCallError);
-      expect((seen[name] as UnawaitedCallError).child, name).toBe(callChild);
-    }
-    for (const name of ['own', 'release', 'close', 'abort']) expect(seen[name], name).toBe('ok');
+    expect(await root.call(function* () { return (yield* result(Y)).status; })).toBe('success');
+    expect(seen).toEqual({
+      ...Object.fromEntries(['get', 'call', 'fork', 'child', 'pool', 'all', 'race', 'shield', 'join', 'result', 'interrupted', 'never', 'wait', 'run', 'runSync'].map((n) => [n, 'ok'])),
+      ranBeforeYield: 0,
+      value: 'called',
+      ranAfterYield: 1,
+    });
     await root.close();
   });
 
   // -------------------------------------------------------------------------
-  it('I27 fibers are not awaitable and tasks are not callable', async () => {
+  it('I26 fibers are not awaitable, and a task’s call is a lazy op, never a bare promise', async () => {
     const root = createRootContext();
-    const tk = task(async (n: number) => n * 2);
-    // @ts-expect-error a Task has no call signature
-    expect(() => tk(1)).toThrow(TypeError);
-    await root.call(async () => {
+    let ran = 0;
+    const tk = task(function* (n: number) {
+      ran++;
+      return n * 2;
+    });
+    expect(() => tk(1)).toThrow(NoCurrentNodeError); // no node is current: no op is made, nothing runs
+    await root.call(function* () {
+      const op = tk(1);
+      expect([op instanceof Promise, ran]).toEqual([false, 0]); // made, not run
+      expect(yield* op).toBe(2);
       const f = fork(tk, 21);
-      const awaited = await rejection(
+      const awaited = yield* wait(rejection(
         (async () => {
           await (f as unknown as Promise<number>);
         })(),
-      );
+      ));
       expect(awaited).toBeInstanceOf(FiberNotAwaitableError);
-      expect(await rejection(Promise.resolve(f))).toBeInstanceOf(FiberNotAwaitableError);
-      expect(await rejection(Promise.all([f]))).toBeInstanceOf(FiberNotAwaitableError);
-      expect(await join(f)).toBe(42);
+      expect(yield* wait(rejection(Promise.resolve(f)))).toBeInstanceOf(FiberNotAwaitableError);
+      expect(yield* wait(rejection(Promise.all([f])))).toBeInstanceOf(FiberNotAwaitableError);
+      expect(yield* join(f)).toBe(42);
     });
     // an aborted fiber awaited from the top level reports FiberAbortedError: the top level is never interrupted (DESIGN.md §4.2)
-    const g = root.fork(task(async () => never(), link));
+    const g = root.fork(task(function* () { return yield* never(); }, link));
     await tick();
     g.abort('stop');
     expect(await rejection(root.join(g))).toBeInstanceOf(FiberAbortedError);

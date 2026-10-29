@@ -6,7 +6,6 @@
 //
 // `lookup` is the free function of ambient.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context } from './context.js';
@@ -27,7 +26,7 @@ afterEach(() => {
 
 /** Resolve `key` from a request fiber (it carries RequestScope) run under `session`. */
 async function fromRequest<T>(session: Context, key: InjectionKey<T>): Promise<T> {
-  return session.call(task(async () => lookup(key), { name: 'request', scopes: [RequestScope] }));
+  return session.call(task(function* () { return lookup(key); }, { name: 'request', scopes: [RequestScope] }));
 }
 
 /** The names of the nodes, among `nodes`, that cache `key`. */

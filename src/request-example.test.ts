@@ -1,21 +1,22 @@
 // request-example.test.ts — the request of README.md 'A request', end to
 // end. The handler is the README's request handler verbatim (its unused `res`
-// parameter is spelled `_res` for the lint rule); `Pool` is a class key whose
-// default factory has an owned reaper; `work(req)` is a plain function that `lookup`s
-// `Conn`; a fake server delivers its callbacks with no current node, and the
-// one place a node is named is `app.fork(...)` there (line 4). Each root is
-// created under `await using` and each test body runs as a top-level
+// parameter is spelled `_res` for the lint rule, and its pool is `Pool`);
+// `Pool` is a class key whose default factory has an owned reaper; `Orders` is
+// a service whose `place`, a bound task (`task(this, …)`), runs the work the
+// test sets, which `lookup`s `Conn`; a fake server delivers its request
+// callback to the listener and its other callbacks in a later job, with no
+// current node, and the one
+// place a node is named is `app.fork(...)` there (line 4). Each root is created
+// under `await using` and each test body runs as a top-level
 // `await app.call(main)`.
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it } from 'vitest';
-import './node.js';
-import { call, current, fork, lookup, managed, own, result, signal } from './ambient.js';
+import { current, fork, join, lookup, own, result, signal, sleep, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
-import type { Context, Fiber } from './context.js';
+import type { Context, Fiber, Instruction } from './context.js';
 import { task } from './fiber.js';
 import type { NodeImpl } from './node-impl.js';
 import { valueProvider } from './provider-util.js';
-import { FiberAbortedError, NoCurrentNodeError, PoolClosedError, UnawaitedCallError } from './resource.js';
+import { FiberAbortedError, NoCurrentNodeError, PoolClosedError } from './resource.js';
 import { deferred, events, impl, tick, trace, within } from './test/util.js';
 import type { EventLog, Trace } from './test/util.js';
 
@@ -28,29 +29,12 @@ interface Res {
   error?: unknown;
 }
 
-/** Resolves after `ms`, or as soon as `s` aborts; the timer never holds the process. */
-function sleep(ms: number, s: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    (timer as { unref?: () => void }).unref?.();
-    s.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-}
-
 /**
- * A platform event source. Its callbacks run in the async context the server
- * was created in, as an `EventEmitterAsyncResource` would run them: the test's
- * top level, where no node is current.
+ * A platform event source. A request is handed to the listener at once, so a test can read the handler's fiber;
+ * its other callbacks (a signal handler, a socket event) run in a later job, as a platform's do, where no node is
+ * current: the current node is a synchronous slot, set only while a body steps (DESIGN.md §6).
  */
 class FakeServer {
-  readonly #platform = AsyncLocalStorage.snapshot();
   readonly #listeners: ((req: Req, res: Res) => Fiber<unknown>)[] = [];
 
   on(_event: 'request', cb: (req: Req, res: Res) => Fiber<unknown>): void {
@@ -62,13 +46,13 @@ class FakeServer {
     const ac = new AbortController();
     const req: Req = { url, signal: ac.signal };
     const res: Res = { status: 0 };
-    const fiber = this.#platform(() => this.#listeners[0](req, res));
-    return { req, res, fiber, hangUp: (reason) => this.#platform(() => ac.abort(reason)) };
+    const fiber = this.#listeners[0](req, res);
+    return { req, res, fiber, hangUp: (reason) => ac.abort(reason) };
   }
 
-  /** Run `fn` as a platform callback (a signal handler, a socket event). */
+  /** Run `fn` as a platform callback: in a later job, after the step that asked for it has returned. */
   later(fn: () => void): void {
-    this.#platform(fn);
+    queueMicrotask(fn);
   }
 }
 
@@ -126,14 +110,16 @@ function world() {
     #inUse = 0;
     #idle: (() => void) | undefined;
     readonly free: Connection[] = [];
-    readonly #conns = own(new Connections(), async (conns) => {
-      this.#closed = true; // stop intake
-      await this.#drained(signal()); // the release fiber's deadline
-      t.push('pool');
-      conns.closeAll();
-    });
+    readonly #conns = own(new Connections(), (conns) => this.#close(conns)); // a generator release, driven in its release fiber
     constructor() {
       own(fork(() => this.#reap())); // owned reaper, starts after placement
+    }
+
+    *#close(conns: Connections): Generator<Instruction, void, unknown> {
+      this.#closed = true; // stop intake
+      yield* wait(this.#drained(signal())); // the release fiber's deadline
+      t.push('pool');
+      conns.closeAll();
     }
 
     /** The pool's own node (`#ctx`). */
@@ -172,26 +158,28 @@ function world() {
       });
     }
 
-    async #reap(): Promise<void> {
+    *#reap(): Generator<Instruction, never, unknown> {
       own(() => t.push('reaper'));
-      for (;;) await managed(sleep(60_000, signal())); // evicts idle connections (elided)
+      for (;;) yield* sleep(60_000); // evicts idle connections (elided); the halt clears the timer
     }
   }
 
-  let workImpl: (req: Req) => Promise<string> = async (req) => {
+  let workImpl: (req: Req) => Generator<Instruction, string, unknown> = function* (req) {
     const conn = lookup(Conn); // a borrow for the call's node
-    return conn.query(req.url, signal());
+    return yield* wait(conn.query(req.url, signal()));
   };
-  /** A plain function: it runs in the caller's node, the call child of line 3. */
-  function work(req: Req): Promise<string> {
-    return workImpl(req);
+  /** README's `Orders`: `place` is the call of line 3, so the work runs in its node, a child of the handler's. */
+  class Orders {
+    readonly place = task(this, function* place(req: Req) {
+      return yield* workImpl(req);
+    });
   }
 
   // The README's request handler, verbatim.
-  const handle = task(async (req: Req, _res: Res) => {
+  const handle = task(function* handle(req: Req, _res: Res) {
     const pool = lookup(Pool); // 1
-    const lease = own(await pool.acquire()); // 2
-    return call(task(() => work(req), { providers: [valueProvider(Conn, lease.conn)] })); // 3
+    const lease = own(yield* wait(pool.acquire())); // 2
+    return yield* lookup(Orders).place.with({ providers: [valueProvider(Conn, lease.conn)] })(req); // 3
   });
 
   function respond500(res: Res, e: unknown): void {
@@ -226,7 +214,7 @@ function world() {
     pending,
     app,
     inFlight,
-    setWork(fn: (req: Req) => Promise<string>) {
+    setWork(fn: (req: Req) => Generator<Instruction, string, unknown>) {
       workImpl = fn;
     },
     reply(url: string, value: string) {
@@ -242,15 +230,15 @@ describe('a request, end to end', () => {
     let poolNode: NodeImpl | undefined;
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         const a = server.request('/a');
         const b = server.request('/b');
-        await w.inFlight('/a');
-        await w.inFlight('/b');
+        yield* wait(w.inFlight('/a'));
+        yield* wait(w.inFlight('/b'));
         w.reply('/a', 'A');
         w.reply('/b', 'B');
-        expect(await result(a.fiber)).toEqual({ status: 'success', value: 'A' });
-        expect(await result(b.fiber)).toEqual({ status: 'success', value: 'B' });
+        expect(yield* result(a.fiber)).toEqual({ status: 'success', value: 'A' });
+        expect(yield* result(b.fiber)).toEqual({ status: 'success', value: 'B' });
       });
       const root = impl(app);
       expect([...root.provided].map((e) => e.name)).toEqual(['Pool']);
@@ -275,33 +263,29 @@ describe('a request, end to end', () => {
     expect(ev.of('node:started').filter((e) => e.id === reaper.id)).toHaveLength(1);
   });
 
-  it('(2) the handler is lent during call: fork through its node from inside work throws UnawaitedCallError naming the call child; own(await pool.acquire()) registers one entry', async () => {
+  it('(2) work runs in the call’s node, a child of the handler, which nothing lends: it may fork through the handler’s node; own(yield* wait(pool.acquire())) registers one entry', async () => {
     const w = world();
     const { ev, server } = w.app();
-    let lentError: unknown;
+    let forked: Fiber<string> | undefined;
     let callChild: Context | undefined;
     let handler: NodeImpl | undefined;
-    w.setWork(async () => {
+    w.setWork(function* () {
       callChild = current();
-      handler = impl(callChild).parent; // the handler's fiber: it lent itself to this call (DESIGN.md §4.9)
-      expect(handler?.lentTo).toBe(impl(callChild));
-      try {
-        handler!.fork(async () => {});
-      } catch (e) {
-        lentError = e;
-      }
+      handler = impl(callChild).parent; // the handler's fiber
+      forked = handler!.fork(function* () {
+        return 'forked through the handler';
+      });
       return 'ok';
     });
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         const r = server.request('/a');
-        expect(await result(r.fiber)).toEqual({ status: 'success', value: 'ok' });
+        expect(yield* result(r.fiber)).toEqual({ status: 'success', value: 'ok' });
       });
     }
-    expect(lentError).toBeInstanceOf(UnawaitedCallError);
-    expect((lentError as UnawaitedCallError).child).toBe(callChild);
-    expect(String((lentError as Error).message)).toMatch(/lent to/);
+    expect(forked?.outcome).toEqual({ status: 'success', value: 'forked through the handler' });
+    expect(impl(forked!).parent).toBe(handler);
     // D16: acquire() attached the lease to the handler; own(lease) with one argument is a no-op by identity.
     const lease = w.acquired[0].lease;
     expect(w.acquired[0].owner).toBe(handler);
@@ -312,20 +296,20 @@ describe('a request, end to end', () => {
     expect(lease.conn).toBeDefined();
   });
 
-  it('(3) aborting req.signal rejects the handler at its managed await, releases the lease back to the pool after the handler unwound, calls no onFailure, and app.close() surfaces nothing', async () => {
+  it('(3) aborting req.signal halts the handler once its call has stopped, releases the lease back to the pool after the handler unwound, calls no onFailure, and app.close() surfaces nothing', async () => {
     const w = world();
     const { ev, server } = w.app();
     let handlerId = -1;
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         const r = server.request('/a');
         handlerId = r.fiber.id;
-        await w.inFlight('/a');
+        yield* wait(w.inFlight('/a'));
         const pool = w.acquired[0].pool;
         expect(pool.free).toHaveLength(0);
         r.hangUp(new Error('client went away'));
-        const o = await result(r.fiber);
+        const o = yield* result(r.fiber);
         expect(o.status).toBe('aborted');
         expect(pool.free).toHaveLength(1); // the lease went back
         expect(r.res.status).toBe(0);
@@ -341,17 +325,17 @@ describe('a request, end to end', () => {
     const w = world();
     const { ev, server } = w.app();
     const boom = new Error('boom');
-    w.setWork(async () => {
+    w.setWork(function* () {
       throw boom;
     });
     let res: Res | undefined;
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         const r = server.request('/a');
         res = r.res;
-        const o = await result(r.fiber);
-        expect(o).toEqual({ status: 'failure', error: boom });
+        const o = yield* result(r.fiber);
+        expect(o).toEqual({ status: 'defect', error: boom });
       });
       await expect(app.close()).resolves.toBeUndefined(); // the handler consumed it
       expect(w.failures).toHaveLength(1);
@@ -368,10 +352,10 @@ describe('a request, end to end', () => {
     const handlers: Fiber<unknown>[] = [];
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         handlers.push(server.request('/a').fiber, server.request('/b').fiber);
-        await w.inFlight('/a');
-        await w.inFlight('/b');
+        yield* wait(w.inFlight('/a'));
+        yield* wait(w.inFlight('/b'));
       }); // returns with both handlers still waiting on their queries
       const closing = app.close(); // a close waits for subscribers naturally (DESIGN.md §2.7)
       await tick();
@@ -402,13 +386,13 @@ describe('a request, end to end', () => {
     let resumed = false;
     const run = async (): Promise<void> => {
       await using app = ev.root;
-      const main = task(async () => {
+      const main = task(function* () {
         mainId = current().id;
         handler = server.request('/a').fiber;
-        await w.inFlight('/a');
+        yield* wait(w.inFlight('/a'));
         server.later(() => app.abort('SIGTERM')); // no current node there
-        await result(handler); // managed: rejected here with InterruptedError, which ends main
-        resumed = true; // recorded, not thrown: a delivered freeze body is aborted whatever it does (I13)
+        yield* join(handler); // a fiber not subscribed below main: halted here at once, which ends main
+        resumed = true; // never reached: no code after a halted yield* runs
       });
       try {
         await app.call(main);
@@ -419,7 +403,7 @@ describe('a request, end to end', () => {
     };
     await within(run());
     w.t.push('after using');
-    expect(resumed).toBe(false); // main's managed await rejected (DESIGN.md §4.2), and the rejection unwound it (I6)
+    expect(resumed).toBe(false); // main was halted at its yield* (DESIGN.md §4.2, I6)
     expect(ev.of('node:settled').filter((e) => e.id === mainId).map((e) => e.outcome)).toEqual(['aborted']);
     expect(caught).toBeInstanceOf(FiberAbortedError);
     expect((caught as FiberAbortedError).reason).toBe('SIGTERM');
@@ -433,7 +417,7 @@ describe('a request, end to end', () => {
     expect(w.failures).toEqual([]);
   });
 
-  it('the server callback runs with no current node, even when it is triggered from inside a body: line 4 is the one place a node is named', async () => {
+  it('a platform callback runs with no current node, even when a body scheduled it: line 4 is the one place a node is named', async () => {
     const w = world();
     const { ev, server } = w.app();
     let seen: unknown;
@@ -442,26 +426,29 @@ describe('a request, end to end', () => {
     let handlerParent: NodeImpl | undefined;
     {
       await using app = ev.root;
-      await app.call(async () => {
+      await app.call(function* () {
         main = current();
+        const heard = deferred();
         server.later(() => {
           try {
             seen = current();
           } catch (e) {
             seen = e;
           }
+          heard.resolve();
         });
         after = current();
-        // the listener runs in the platform's context too, and names the app itself (line 4)
+        yield* wait(heard.promise); // the callback has run, from the event loop
+        // the listener names the app itself (line 4), so its handler is the app's child wherever it was called
         const r = server.request('/a');
         handlerParent = impl(r.fiber).parent;
-        await w.inFlight('/a');
+        yield* wait(w.inFlight('/a'));
         w.reply('/a', 'A');
-        await result(r.fiber);
+        yield* join(r.fiber);
       });
       expect(handlerParent).toBe(impl(app));
     }
-    expect(seen).toBeInstanceOf(NoCurrentNodeError); // not main: the callback does not inherit the caller's frame
+    expect(seen).toBeInstanceOf(NoCurrentNodeError); // not main: nothing carries the slot to a later callback
     expect(main).toBeDefined();
     expect(impl(main!).kind).toBe('fiber');
     expect(after).toBe(main);

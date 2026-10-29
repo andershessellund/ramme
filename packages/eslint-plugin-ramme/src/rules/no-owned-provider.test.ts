@@ -6,14 +6,14 @@ ruleTester.run('no-owned-provider', noOwnedProvider, {
   valid: [
     {
       name: 'providers: binds on a new node',
-      code: 'const t = task(async () => { const uow = own(begin()); return call(work.with({ providers: [ valueProvider(K, uow) ] })); });',
+      code: 'const t = task(function* () { const uow = own(begin()); return yield* work.with({ providers: [ valueProvider(K, uow) ] })(); });',
     },
     { name: 'providers: on a child, with own inline', code: 'const c = child({ providers: [valueProvider(K, own(x))] });' },
     { name: 'a value nobody owns', code: 'const x = makeX(); ctx.addProvider(valueProvider(K, x));' },
     { name: 'a literal value', code: 'current().addProvider(valueProvider(K, { retries: 3 }));' },
     {
       name: 'owned by the enclosing body, provided on a fork of its own',
-      code: 'const t = task(async () => { const tx = own(await db.begin()); fork(async () => { current().addProvider(valueProvider(Tx, tx)); }); });',
+      code: 'const t = task(function* () { const tx = own(yield* wait(db.begin())); fork(function* () { current().addProvider(valueProvider(Tx, tx)); }); });',
     },
     { name: 'a factory provider whose factory owns what it builds', code: 'ctx.addProvider(factoryProvider(K, () => own(x)));' },
     {
@@ -26,7 +26,7 @@ ruleTester.run('no-owned-provider', noOwnedProvider, {
   invalid: [
     {
       name: 'an owned transaction provided on the current node',
-      code: ['const t = task(async () => {', '  const tx = own(await db.begin());', '  current().addProvider(valueProvider(Tx, tx));', '});'].join('\n'),
+      code: ['const t = task(function* () {', '  const tx = own(yield* wait(db.begin()));', '  current().addProvider(valueProvider(Tx, tx));', '});'].join('\n'),
       errors: [{ messageId: 'owned', line: 3, column: 43, endColumn: 45 }],
     },
     {

@@ -6,7 +6,6 @@
 //
 // `lookup` and `own` are the free functions of ambient.ts (`./ambient.js`).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey, getKeyDescription } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context } from './context.js';
@@ -16,7 +15,7 @@ import { ContextKey, inject } from './inject.js';
 import { classProvider, factoryProvider, valueProvider } from './provider-util.js';
 import { NodeCompletedError, PlacementError } from './resource.js';
 import { SelfScope, createScope } from './scope.js';
-import { lookup, own } from './ambient.js';
+import { lookup, own, wait } from './ambient.js';
 import { deferred, here, impl, tick, trace } from './test/util.js';
 
 const linked = { onFailure: 'link' } as const;
@@ -513,19 +512,19 @@ describe('lazy registration order', () => {
     const gate = deferred();
     // A is forked first but requests Pool last; B is forked second and requests Cache first.
     const a = svc.fork(
-      task(async () => {
-        await gate.promise;
+      task(function* () {
+        yield* wait(gate.promise);
         lookup(Pool);
         here().own(t.at('fiber A'));
-        await here().never();
+        yield* here().never();
       }, linked),
     );
     const b = svc.fork(
-      task(async () => {
+      task(function* () {
         lookup(Cache);
         here().own(t.at('fiber B'));
         gate.resolve();
-        await here().never();
+        yield* here().never();
       }, linked),
     );
     await tick();
@@ -563,7 +562,7 @@ describe('captureAutoScoped', () => {
   });
 });
 
-describe('a released provided value fails loudly (I22, DESIGN.md §2.7)', () => {
+describe('a released provided value fails loudly (I22, DESIGN.md §2.7, §4.12)', () => {
   it("a cache hit whose value node completed throws NodeCompletedError", () => {
     class Svc {
       ctx: Context = inject(ContextKey);

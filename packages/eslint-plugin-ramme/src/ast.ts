@@ -80,12 +80,6 @@ export function enclosingFunction(node: EsNode): EsNode | null {
   return null;
 }
 
-/** Whether `node` is lexically inside an `async` function, method or arrow, with no non-async function in between. */
-export function isInAsyncFunction(node: EsNode): boolean {
-  const fn = enclosingFunction(node);
-  return fn !== null && isFunction(fn) && fn.async === true;
-}
-
 /**
  * The variable `name` resolves to from `node`'s scope, or `undefined` when it resolves to nothing
  * declared in this file (a global, or an undeclared name).
@@ -101,4 +95,40 @@ export function declaredVariable(context: Rule.RuleContext, node: EsNode, name: 
 /** Whether the identifier `id` names the global of that name: nothing in this file declares it. */
 export function isGlobalName(context: Rule.RuleContext, id: Identifier): boolean {
   return declaredVariable(context, id, id.name) === undefined;
+}
+
+/**
+ * Whether `node` is lexically inside a generator function that can be a ramme body or helper, at any depth (a nested
+ * arrow or callback included): a `function*`, a generator method, never an `async function*`, which ramme cannot step.
+ */
+export function inGeneratorBody(node: EsNode): boolean {
+  for (let n = parentOf(node); n !== null; n = parentOf(n)) {
+    if ((n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression') && n.generator && !n.async) return true;
+  }
+  return false;
+}
+
+/** Whether a module specifier is ramme's: `ramme` or one of its subpaths (`ramme/platform`, `ramme/result`). */
+export function isRammeModule(source: unknown): boolean {
+  return source === 'ramme' || (typeof source === 'string' && source.startsWith('ramme/'));
+}
+
+/** The file's import declarations from ramme and its subpaths, type-only imports included, in source order. */
+export function rammeImports(sourceCode: SourceCode): NodeOf<'ImportDeclaration'>[] {
+  return sourceCode.ast.body.filter((s): s is NodeOf<'ImportDeclaration'> => s.type === 'ImportDeclaration' && isRammeModule(s.source.value));
+}
+
+/**
+ * The module and the imported name an identifier is bound to, when this file binds it with a value import
+ * (`import { each } from 'ramme/platform'` gives `{ module: 'ramme/platform', imported: 'each' }`); otherwise `undefined`.
+ */
+export function importBinding(context: Rule.RuleContext, id: Identifier): { module: string; imported: string } | undefined {
+  const def = declaredVariable(context, id, id.name)?.defs[0];
+  if (def?.type !== 'ImportBinding') return undefined;
+  const declaration = def.parent as NodeOf<'ImportDeclaration'> & { importKind?: string };
+  const specifier = def.node as EsNode & { importKind?: string };
+  if (declaration.importKind === 'type' || specifier.importKind === 'type' || typeof declaration.source.value !== 'string') return undefined;
+  if (specifier.type !== 'ImportSpecifier') return undefined;
+  const imported = specifier.imported.type === 'Identifier' ? specifier.imported.name : String(specifier.imported.value);
+  return { module: declaration.source.value, imported };
 }

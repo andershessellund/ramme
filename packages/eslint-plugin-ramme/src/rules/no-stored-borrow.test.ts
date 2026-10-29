@@ -11,7 +11,7 @@ ruleTester.run('no-stored-borrow', noStoredBorrow, {
     { name: 'lookup used locally inside a method', code: 'class S { run() { const db = lookup(Db); return db.query(); } }' },
     { name: 'inject in a field', code: 'class S { readonly #db = inject(Db); readonly url = inject(Config).url; }' },
     { name: 'inject assigned to this in a constructor', code: 'class S { constructor() { this.db = inject(Db); } }' },
-    { name: 'lookup in a task body', code: 'const t = task(async () => { const api = lookup(Api); await api.get(); });' },
+    { name: 'lookup in a task body', code: 'const t = task(function* () { const api = lookup(Api); yield* api.get(); });' },
     { name: 'lookup in a function-scope variable', code: 'function f() { const x = lookup(X); return x.y; }' },
     { name: 'a field holding a function that looks up', code: 'class S { readonly db = () => lookup(Db); }' },
     { name: 'the #ctx idiom', code: 'class S { readonly #ctx = current(); get db() { return this.#ctx.get(Db); } }' },

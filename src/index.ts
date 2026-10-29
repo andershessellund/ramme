@@ -2,10 +2,18 @@
 // list, scripts/check-surface.mjs). The types of context.ts are listed by name
 // rather than re-exported with `export type *`, so the published index.d.ts
 // names every public type; the list is exactly context.ts's exports.
+//
+// The first import defines the disposal symbols where a runtime lacks them,
+// the floor's one guard (DESIGN.md §1.2; D41, decision 18); it exports nothing.
+import './disposal-symbols.js';
 export type {
   NodeState,
   InterruptMode,
   NodeOptions,
+  Instruction,
+  Fail,
+  Operation,
+  Op,
   Body,
   Release,
   Provider,
@@ -36,7 +44,6 @@ export {
   release,
   releaseAll,
   fork,
-  call,
   attempt,
   all,
   race,
@@ -50,7 +57,9 @@ export {
   interrupted,
   never,
   sleep,
-  managed,
+  wait,
+  promised,
+  fail,
   runSync,
 } from './ambient.js';
 export { inject, ContextKey } from './inject.js';
@@ -60,10 +69,8 @@ export {
   PendingNodeError,
   NotOwnedError,
   AlreadyOwnedError,
-  UnawaitedCallError,
   FiberNotAwaitableError,
   FiberAbortedError,
-  InterruptedError,
   PoolClosedError,
   PoolFullError,
   CreationViolationError,
@@ -72,9 +79,7 @@ export {
   PlacementError,
   OwnerInterrupt,
 } from './resource.js';
-export { registerContextStorage } from './context-storage.js';
-export type { ContextStorage, Frame } from './context-storage.js';
-export { createInjectionKey, setScope, setDependencies } from './context-key.js';
+export { createInjectionKey, createKeyFor, setScope, setDependencies } from './context-key.js';
 export type { InjectionKey, CreateInjectionKeyOptions } from './context-key.js';
 export { classProvider, factoryProvider, valueProvider, aliasProvider } from './provider-util.js';
 export { createScope, SelfScope, RootScope, RequestScope } from './scope.js';

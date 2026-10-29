@@ -6,7 +6,6 @@
 //
 // `call` and `lookup` are the free functions of ambient.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import './node.js';
 import { createInjectionKey } from './context-key.js';
 import type { InjectionKey } from './context-key.js';
 import type { Context } from './context.js';
@@ -16,7 +15,7 @@ import { inject } from './inject.js';
 import { classProvider, factoryProvider, valueProvider } from './provider-util.js';
 import { PlacementError } from './resource.js';
 import { RequestScope, RootScope, SelfScope, createScope } from './scope.js';
-import { call, current, lookup } from './ambient.js';
+import { current, lookup } from './ambient.js';
 import { impl } from './test/util.js';
 
 const SessionScope = createScope('session');
@@ -27,7 +26,7 @@ afterEach(() => {
 
 /** Resolve `key` from a request fiber (it carries RequestScope) run under `session`. */
 async function fromRequest<T>(session: Context, key: InjectionKey<T>): Promise<T> {
-  return session.call(task(async () => lookup(key), { name: 'request', scopes: [RequestScope] }));
+  return session.call(task(function* () { return lookup(key); }, { name: 'request', scopes: [RequestScope] }));
 }
 
 /** The names of the nodes, among `nodes`, that cache `key`. */
@@ -79,12 +78,10 @@ describe('an explicit provider stores its value where it is registered, whatever
     const app = createRootContext();
     const seen = await app.call(
       task(
-        async () => {
+        function* () {
           const own = lookup(UnitOfWork); // the request's own, stored on the request node
-          const overridden = await call(
-            task(async () => lookup(UnitOfWork), { name: 'override', providers: [valueProvider(UnitOfWork, fake)] }),
-          );
-          const sibling = await call(task(async () => lookup(UnitOfWork), { name: 'sibling' }));
+          const overridden = yield* task(function* () { return lookup(UnitOfWork); }, { name: 'override', providers: [valueProvider(UnitOfWork, fake)] })();
+          const sibling = yield* task(function* () { return lookup(UnitOfWork); }, { name: 'sibling' })();
           return { own, overridden, sibling, again: lookup(UnitOfWork) };
         },
         { name: 'request', scopes: [RequestScope] },
@@ -102,7 +99,7 @@ describe('an explicit provider stores its value where it is registered, whatever
       static readonly scope = RootScope; // owned by the root, above every call
       readonly mode: string = 'default';
     }
-    const read = task(async () => ({ value: lookup(Settings), here: impl(current()).cache.has(Settings) }));
+    const read = task(function* () { return ({ value: lookup(Settings), here: impl(current()).cache.has(Settings) }); });
     const app = createRootContext();
     const r = await app.call(read.with({ providers: [valueProvider(Settings, { mode: 'test' })] }));
     expect(r).toEqual({ value: { mode: 'test' }, here: true });
