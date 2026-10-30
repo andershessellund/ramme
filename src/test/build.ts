@@ -1,4 +1,4 @@
-// build.ts — vitest's global setup: the build the browser checks read (src/test/browser-smoke.test.ts,
+// build.ts — vitest's global setup: the build the browser checks read (src/test/browser-static.test.ts,
 // src/stage4-pin.test.ts). It compiles src/ as `pnpm build` does (tsconfig.json), JavaScript only, into a temporary
 // directory laid out as dist/ is, and provides its path as `builtDist`. So `pnpm test` checks the sources it tests, on
 // a clean checkout and after an edit alike, never a missing or stale dist/; `pnpm check:surface` makes the same check

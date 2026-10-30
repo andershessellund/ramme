@@ -78,6 +78,13 @@ async function halt(body: () => Generator<Instruction, unknown, unknown>, opts: 
   return o.status === 'defect' ? `defect: ${(o.error as Error).message}` : o.status;
 }
 
+/** A source whose `then` throws: a `Promise` subclass that overrides it. */
+class Hostile<T> extends Promise<T> {
+  override then(): never {
+    throw new Error('hostile then');
+  }
+}
+
 const failing = (name: string, ms = 1) =>
   task(
     function* (): Generator<Instruction, never, unknown> {
@@ -88,7 +95,7 @@ const failing = (name: string, ms = 1) =>
   );
 
 describe('U3: the halted finally, against the review probes', () => {
-  it('p6: the generator’s own throw in its halted finally is discarded (aborted, D24); a shield’s failure caught there is not consumed, and is the outcome', async () => {
+  it('p6, as D45 amends it: the generator’s own throw in its halted finally is a release failure (defect); a shield’s failure caught there is not consumed, and is the outcome; rethrown, it is reported once', async () => {
     const outcomes = [
       await halt(function* () {
         try {
@@ -110,8 +117,32 @@ describe('U3: the halted finally, against the review probes', () => {
           }
         }
       }),
+      await halt(function* () {
+        try {
+          yield* never();
+        } finally {
+          try {
+            yield* shield(function* (): Generator<Instruction, never, unknown> {
+              throw new Error('cleanup threw');
+            });
+          } catch (e) {
+            throw e; // the failure the wait handed it: one release failure, not two
+          }
+        }
+      }),
+      await halt(function* () {
+        try {
+          yield* never();
+        } finally {
+          try {
+            yield* wait(new Hostile<void>((resolve) => resolve())); // its `then` throws: p's own failure, recorded
+          } catch (e) {
+            throw e; // one release failure, not two
+          }
+        }
+      }),
     ];
-    expect(outcomes).toEqual(['aborted', 'defect: cleanup threw']);
+    expect(outcomes).toEqual(['defect: cleanup threw', 'defect: cleanup threw', 'defect: cleanup threw', 'defect: hostile then']);
   });
 
   it('p7: release(x) and releaseAll() in the halted finally address the node, so they find its entries and run now', async () => {
@@ -1207,11 +1238,6 @@ describe('the fixes of the stage 2 review', () => {
   });
 
   it('a source whose then throws (a Promise subclass that overrides it) fails the wait at the yield*, never escaping the driver: the body catches it, an uncaught one fails the node, a halted body is returned, a halted finally records it as p’s own failure, and a failure handler’s wait fails the handler', async () => {
-    class Hostile<T> extends Promise<T> {
-      override then(): never {
-        throw new Error('hostile then');
-      }
-    }
     const hostile = () => new Hostile<number>((resolve) => resolve(1));
     const root = app();
     const caught = await within(

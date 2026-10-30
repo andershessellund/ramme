@@ -2,3 +2,5 @@ node_modules/
 dist/
 tsconfig.tsbuildinfo
 .DS_Store
+# vitest's browser mode: failure screenshots and attachments (pnpm test:browser)
+.vitest/

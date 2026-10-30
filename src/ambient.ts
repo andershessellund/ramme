@@ -317,11 +317,12 @@ export function sleep(ms: number): Op<void> {
 }
 
 /**
- * Wait for a foreign promise in a body (DESIGN.md §4.2, D41 decision 10): `yield* wait(p)`. A halted body's `wait(p)`
- * lets `p` finish: the body is resumed with its value and returned at its next `yield*`, so
- * `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of `p` then ends
- * the body there and is discarded, as a halted body's throw is (in its halted `finally` it is a release failure). With
- * `{ abandon: true }` it stops waiting at the halt instead, and `p` runs on, marked handled.
+ * Wait for a foreign promise in a body (DESIGN.md §4.2, D41 decision 10, D45): `yield* wait(p)`. The `wait(p)` in
+ * flight at an interruption lets `p` finish: the body is resumed with its value once, its grant, and returned at its
+ * next `yield*`, so `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of
+ * `p` then ends the body there and is discarded, as a halted body's throw outside its `finally` is (in its halted
+ * `finally` it is a release failure). A `wait(p)` yielded after the grant abandons `p`, as `{ abandon: true }` does at
+ * the halt: `p` runs on, marked handled.
  * `wait((signal) => driver.query(sql, { signal }))` calls the function when the op is yielded, handing it the current
  * node's `signal()`, so the halt aborts it (`fetch` from `ramme/platform` is this wait over the global's); in a halted `finally` that is the unwind fiber's release deadline. A ramme op as
  * `p`, or as what the function returns, is that op's own wait, its expected failures included, so either is typed by
@@ -349,7 +350,7 @@ export function wait<T>(promise: PromiseLike<T> | ((signal: AbortSignal) => Prom
  */
 export function promised<T, A extends unknown[], Y extends Yields = never, E = never>(
   t: Task<A, T, E> | BodyOf<T, A, Y>,
-): (...args: A) => Promise<T> {
+): (...args: A) => Promise<Awaited<T>> {
   return requireCurrent('promised').promised(t);
 }
 

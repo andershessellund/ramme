@@ -130,8 +130,14 @@ class Listener {
     return this.#remove !== undefined;
   }
 
+  /**
+   * The registration is made: `remove` undoes it. A registration that ended its own node (an emitter's `newListener`
+   * hook, an `addEventListener` that aborts it) ran the node's delivery, and maybe this entry's release, before there
+   * was anything to remove: the listener is removed at once.
+   */
   attach(remove: () => void): void {
     this.#remove = remove;
+    if (this.#released || this.node.signal.aborted) this.remove();
   }
 
   /** Remove the listener now, once. */
@@ -210,6 +216,23 @@ function isOpLike(x: unknown): boolean {
   return typeof o.then === 'function' && typeof o[Symbol.iterator] === 'function';
 }
 
+/**
+ * Whether `x` is a thenable (an op aside: test `isOpLike` first), with a rejection handler attached when it is, so a
+ * thenable no one waits for is never an unhandled rejection. A `then` that throws when called is a thenable all the
+ * same; its throw is dropped.
+ */
+function handledThenable(x: unknown): boolean {
+  if ((typeof x !== 'object' && typeof x !== 'function') || x === null) return false;
+  const then = (x as { then?: unknown }).then;
+  if (typeof then !== 'function') return false;
+  try {
+    Reflect.apply(then, x, [undefined, () => {}]);
+  } catch {
+    // nothing was subscribed, so nothing can reject unhandled
+  }
+  return true;
+}
+
 function isEventTarget(x: unknown): x is EventTarget {
   return typeof (x as { addEventListener?: unknown } | null | undefined)?.addEventListener === 'function';
 }
@@ -227,13 +250,17 @@ function isEmitter(x: unknown): x is EventEmitterLike {
  * by the node's own destination rules (a body's default `'join'`, a bodiless node's `onFailure`; `listen` takes no
  * `onFailure`). The handler is synchronous: a generator function or an `async` function is refused with a `TypeError`
  * and nothing is registered. A handler that returns an op (a task as the handler, `(e) => save(e)`) made work that
- * nothing runs: its call throws a `TypeError`, which aborts the node as any throw from it does.
+ * nothing runs, and one that returns a promise made work nothing waits for: in every mode its call throws a
+ * `TypeError`, which aborts the node as any throw from it does, and a returned promise's rejection is handled first, so
+ * it is never also an unhandled rejection.
  *
  * The listener is removed when the node ends: at its delivery, through the native `{ signal }` (on an emitter, or a
  * target that ignores `signal` as ws's `WebSocket` does, `remove` at the signal's `abort`), and at an end without one
  * (`close()`, a body's natural exit), through an entry the node owns (decision 22). An event that still reaches it
  * after the delivery (an emitter's call of a listener removed during the same `emit`, an earlier listener of the
- * node's signal dispatching) is dropped. `opts.signal` removes it early. A node already delivered registers nothing.
+ * node's signal dispatching) is dropped. `opts.signal` removes it early. A node already delivered registers nothing, and
+ * a registration that ends its own node, or fires `opts.signal` (an emitter's `newListener` hook, an `addEventListener`
+ * that aborts), is removed as soon as the platform's call returns.
  * Every call is its own registration, as an emitter's `on` is: the same handler listened twice runs twice per event,
  * where `addEventListener` would register it once.
  *
@@ -297,6 +324,15 @@ export function listen(
             'listen(): the handler returned an op, which nothing runs: a handler is synchronous and nothing waits on ' +
               'what it returns; fork the work instead, (e) => void fork(save(e))',
           );
+        // A promise (a function that returns one, where `async` was refused at registration): nothing waits for it,
+        // and in every mode. Its rejection is handled first, so the misuse is one error, this one, never also an
+        // unhandled rejection; it is not awaited.
+        if (handledThenable(r))
+          throw new TypeError(
+            'listen(): the handler returned a promise, which nothing waits for: a handler is synchronous; run work ' +
+              'that waits as a task, (e) => void fork(save(e)), and a library callback that must return a promise is ' +
+              'promised(function* …)',
+          );
         return r;
       });
     } catch (e) {
@@ -334,7 +370,12 @@ export function listen(
       if (onEarly !== undefined) early!.removeEventListener('abort', onEarly);
     });
   }
-  if (onEarly !== undefined) early!.addEventListener('abort', onEarly, { once: true });
+  // A registration that ended the node removed the listener in `attach`: nothing is left on `opts.signal` either. One
+  // that fired `opts.signal` itself is removed now, as the signal's `abort` would have removed it.
+  if (onEarly !== undefined && listener.live) {
+    if (early!.aborted) listener.end();
+    else early!.addEventListener('abort', onEarly, { once: true });
+  }
 }
 
 // --- nextFrame ---------------------------------------------------------------------

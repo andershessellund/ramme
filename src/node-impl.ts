@@ -302,6 +302,15 @@ function take<T>(f: NodeImpl, consume = true, propagate = true): T {
 }
 
 /**
+ * `Run.held` of a wait on `n`'s completion (D45): whether `n`'s failure record still holds the failure its resume step
+ * threw, unconsumed, so `n`'s holder reports it. None for an `aborted` node (the `FiberAbortedError` `take` makes is
+ * ramme's own report, held by no record), nor once a consumer took it (an earlier `join`, a failure handler).
+ */
+function heldBy(n: NodeImpl): () => boolean {
+  return () => n.failure !== undefined && !n.failure.consumed;
+}
+
+/**
  * The resume step of `result(f)` and `attempt` (D13′): `join:leave` on the awaiter, then `f`'s outcome as a value;
  * a failure it delivers is consumed. A halted awaiter never runs it, so it consumes nothing (D39), nor does an
  * awaiter that consumes nothing (an unwind fiber, DESIGN.md §4.2): the outcome is a value and the record stays.
@@ -779,8 +788,11 @@ export class NodeImpl implements Context {
   wakeReleaseLoop: (() => void) | undefined = undefined;
   /** D16: the `release(x)`/`releaseAll()` calls on this node with an awaiter still waiting; see `EarlyAwait`. */
   readonly earlyAwaits = new Set<EarlyAwait>();
-  /** The error built from extraErrors + unconsumed at completion; what close() rejects with. */
-  aggregatedExtra: unknown = undefined;
+  /**
+   * The error built from extraErrors + unconsumed at completion; what close() rejects with. A record, so that a thrown
+   * `undefined` is a release failure like any other, never "none".
+   */
+  aggregatedExtra: { readonly error: unknown } | undefined = undefined;
   /** Failures held for this node (I11, D16); a record leaves the set when delivered. */
   readonly unconsumed = new Set<FailureRecord>();
   /** This node's own final failure, created at completion; the same object sits in its holder's `unconsumed` (`failureHolder`). */
@@ -1360,6 +1372,7 @@ export class NodeImpl implements Context {
           throw f.error;
         }
       },
+      held: () => e.failure !== undefined && !e.failure.consumed, // this node's completion reports it (D45)
       shape: releaseShape((awaiter) => waitsFor === undefined || !waitsFor(awaiter)),
       waitsFor,
       watch,
@@ -1393,6 +1406,9 @@ export class NodeImpl implements Context {
             'releaseAll(): some releases failed',
           );
       },
+      // Held while every record it threw is (D45): one another consumer took is not, so the throw is recorded again
+      // rather than lost.
+      held: () => entries.every((e) => e.failure === undefined || !e.failure.consumed),
       shape: releaseShape((awaiter) => !waitsFor(awaiter)), // release work unless an entry is the waiting node or above it (D39, A.3)
       waitsFor,
       watch,
@@ -1417,7 +1433,7 @@ export class NodeImpl implements Context {
     if (this.unwindOf !== undefined && extra.length > 0) this.unwindOf.extraErrors.push(...extra);
     if (extra.length > 0) {
       const agg = extra.length === 1 ? extra[0] : new AggregateError(extra, 'Errors during release');
-      this.aggregatedExtra = agg;
+      this.aggregatedExtra = { error: agg };
       // The amendment is always a defect (DESIGN.md §4.12, D42): a release failure is a thrown-class thing, never the
       // typed E. Body failure or defect + release failures → the release-primary SuppressedError; success, aborted or
       // bodiless + release failures → the release failure itself.
@@ -1600,6 +1616,7 @@ export class NodeImpl implements Context {
         ev.emit({ type: 'join:leave', joinedId: f.id, outcome: f.outcome!.status }); // a halted waiter never gets here
         return step(applied);
       },
+      held: heldBy(f),
       shape: joinShape(f), // call-shaped for a fiber subscribed below the waiting body (D39, A.2)
       waitsFor: joinOf(f), // a handler waiting for it holds nothing (DESIGN.md §4.7); a halted finally is returned (decision 12)
     };
@@ -1660,11 +1677,12 @@ export class NodeImpl implements Context {
   }
 
   /**
-   * DESIGN.md §4.2 (D41, decision 10): a wait for a foreign promise. `wait(p)` is release-shaped: a halt lets `p`
-   * finish, and a halted body is resumed with its value and returned at its next `yield*` (a failure returns it there,
-   * discarded as the halted body's throw is, or, in its halted `finally`, recorded as a release failure).
-   * `{ abandon: true }` stops waiting at the halt. `p` exists when the op is made, so a halted body that yields it
-   * still subscribes (DESIGN.md §4.2, the halt table's last row). The function form is called when the op runs, with the signal
+   * DESIGN.md §4.2 (D41, decision 10; D45): a wait for a foreign promise. `wait(p)` is release-shaped: a halt lets
+   * the `wait(p)` in flight finish, and the halted body is resumed with its value once, its grant, and returned at its
+   * next `yield*` (a failure returns it there, discarded as the halted body's throw outside its `finally` is, or, in its
+   * halted `finally`, recorded as a release failure). `{ abandon: true }` stops waiting at the halt. `p` exists when the
+   * op is made (`started`), so a body delivered with no wait in flight still subscribes to its first one, its grant,
+   * and the driver abandons any later one (DESIGN.md §4.2, the halt table's last two rows). The function form is called when the op runs, with the signal
    * of the node the op runs on: this node's, or in a halted `finally` of this node's body its unwind fiber's deadline
    * (U3); a halted body never calls it. A ramme op as `p`, or as what the function returns, is that op's own wait,
    * typed by its `E` (D42). A promise only ramme holds (the function form's, or the `Promise.resolve` of a thenable) is
@@ -1705,11 +1723,13 @@ export class NodeImpl implements Context {
    * `finally` of this node's body, it captures the unwind fiber instead, as a `call` run there runs on it (U3): its
    * callbacks are release work, not born delivered.
    */
-  promised<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>): (...args: A) => Promise<T> {
+  promised<T, A extends unknown[], Y extends Yields = never, E = never>(
+    t: Task<A, T, E> | BodyOf<T, A, Y>,
+  ): (...args: A) => Promise<Awaited<T>> {
     const task = toTask(t as unknown as TaskLike);
     const f = currentFrame();
     const host = f?.unwind !== undefined && f.node === this ? f.unwind : this;
-    return (...args: A): Promise<T> => {
+    return (...args: A): Promise<Awaited<T>> => {
       let child: NodeImpl;
       try {
         host.assertNotPending('promised');
@@ -1720,12 +1740,13 @@ export class NodeImpl implements Context {
         return Promise.reject(e);
       }
       child.startBody(); // synchronous, with the child current (D22); runs under its own frame whatever the caller's
-      return new Promise<T>((resolve, reject) => {
+      // A real promise: resolved with a promise the body returned, it adopts it, hence `Awaited<T>`.
+      return new Promise<Awaited<T>>((resolve, reject) => {
         const settle = (): void => {
           try {
             // The promise is the failure's one consumer (D13′), unless the host is a halted body (D41; DESIGN.md
             // §4.5). An expected failure rejects it with its error (D42).
-            resolve(take<T>(child, !(host.hasBody && host.applied)));
+            resolve(take<T>(child, !(host.hasBody && host.applied)) as Awaited<T> | PromiseLike<Awaited<T>>);
           } catch (e) {
             reject(unwrapExpected(e));
           }
@@ -1744,6 +1765,7 @@ export class NodeImpl implements Context {
     return new LifecycleOp<void, void>({
       source: this.completion,
       deliver: (_, applied) => this.deliverClose(applied),
+      held: heldBy(this), // a fiber's record holds its outcome, which carries what close() rejects with (DESIGN.md §4.12)
       shape: releaseShape(strictlyBelow(this)),
       waitsFor: completionOf(this),
     });
@@ -1771,9 +1793,10 @@ export class NodeImpl implements Context {
    * its consumer consumes nothing (D39, A.3).
    */
   deliverClose(applied = false): void {
-    if (this.aggregatedExtra === undefined) return;
+    const extra = this.aggregatedExtra;
+    if (extra === undefined) return; // no release failure (a thrown `undefined` is one: the record is present)
     if (this.kind !== 'fiber' && !applied) this.consumeFailure(); // a context/pool/value node: its failure IS aggregatedExtra
-    throw this.aggregatedExtra; // a fiber: release/unconsumed errors only — its own body failure is join's (DESIGN.md §4.12)
+    throw extra.error; // a fiber: release/unconsumed errors only — its own body failure is join's (DESIGN.md §4.12)
   }
 
   /** close semantics for the release loop: returns `completion` (never rejects). */
@@ -1801,6 +1824,7 @@ export class NodeImpl implements Context {
           throw (this.outcome as { error: unknown }).error;
         }
       },
+      held: heldBy(this),
       shape: releaseShape(strictlyBelow(this)), // release work for a waiter strictly above this node (D39, A.3)
       waitsFor: completionOf(this), // a handler waiting for it holds nothing (DESIGN.md §4.7)
     });
@@ -1948,6 +1972,7 @@ export class NodeImpl implements Context {
       return {
         source: child.completion,
         deliver: step,
+        held: heldBy(child),
         shape: (a) => {
           if (!child.delivered) child.abortIfOpen(a.abortReason);
           return 'call';
@@ -1987,7 +2012,7 @@ export class NodeImpl implements Context {
       holds.add(hold);
       outsideFrames(() => void hold.then(() => holds.delete(hold))); // before any wait's reaction (waitForShields)
       rf.startBody(); // synchronous up to its first yield*, with rf current
-      return { source: rf.completion, deliver: (_, applied) => take<T>(rf, !applied), shape: () => 'release' };
+      return { source: rf.completion, deliver: (_, applied) => take<T>(rf, !applied), held: heldBy(rf), shape: () => 'release' };
     }, { name: 'shield' });
   }
 
