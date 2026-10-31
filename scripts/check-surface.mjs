@@ -23,7 +23,7 @@
 // import at run time, import nothing from `node:` or a Node builtin such as
 // `async_hooks` (src/stage4-pin.test.ts makes the same check), and touch no
 // global beyond ES2022's but the host APIs of `browserGlobals`
-// (src/test/browser-smoke.test.ts makes the same check). Last, compiles a consumer outside
+// (src/test/browser-static.test.ts makes the same check). Last, compiles a consumer outside
 // the package with `declaration` (`consumerSource`): a library's unannotated
 // helpers generic over `E` must emit, and a task's `E` must emit as the plain
 // union (D42). Then a Node consumer with no DOM library (`nodeConsumerSource`):

@@ -18,6 +18,9 @@ export const typedRuleTester = new RuleTester({
     parser: tseslint.parser,
     ecmaVersion: 'latest',
     sourceType: 'module',
-    parserOptions: { project: './tsconfig.json', tsconfigRootDir: fixture },
+    // Each case lints the one file with different code, so the program must be rebuilt per case: under `CI=true`
+    // typescript-eslint would otherwise infer a single run, build the program once, and lint later cases in an
+    // isolated program without ramme.d.ts.
+    parserOptions: { project: './tsconfig.json', tsconfigRootDir: fixture, disallowAutomaticSingleRunInference: true },
   },
 });

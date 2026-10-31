@@ -696,6 +696,85 @@ describe('platform: listen', () => {
       entries: 0,
     });
   });
+
+  it('a registration that ends its node another way is removed at once too: one that closes it, whose release ran before there was a listener to remove, and one that aborts a fiber, whose release comes only after its halted finally', async () => {
+    // close() during on(): the bodiless box releases its entries at once, before listen attaches the removal.
+    const box = app().child({ name: 'box' });
+    const closing = new EventEmitter();
+    closing.on('newListener', (type: string | symbol) => {
+      if (type === 'ping') void box.close();
+    });
+    box.run(() => listen(closing, 'ping', () => {}));
+    const afterClose = { listeners: closing.listenerCount('ping'), state: box.state };
+    // abort() of a fiber during on(): its entries are released after its body, whose finally still waits here.
+    const aborting = new EventEmitter();
+    aborting.on('newListener', (type: string | symbol) => {
+      if (type === 'ping') current().abort(new Error('aborted while registering'));
+    });
+    let inFinally: number | undefined;
+    const root = app();
+    const f = root.fork(
+      task(function* () {
+        try {
+          listen(aborting, 'ping', () => {});
+          yield* never();
+        } finally {
+          yield* sleep(1); // release work: the fiber's own release has not run yet
+          inFinally = aborting.listenerCount('ping');
+        }
+      }, { onFailure: () => {} }),
+    );
+    const o = await within(root.result(f));
+    expect({ afterClose, inFinally, after: aborting.listenerCount('ping'), fiber: o.status }).toEqual({
+      afterClose: { listeners: 0, state: 'complete' },
+      inFinally: 0,
+      after: 0,
+      fiber: 'aborted',
+    });
+  });
+
+  it('a registration that fires its own opts.signal (an emitter’s newListener, an addEventListener that aborts it) is removed at once, with its entry, as the signal’s abort removes it; the node runs on', async () => {
+    const log = events();
+    roots.push(log.root);
+    const box = log.root.child({ name: 'box' });
+    const emitterEarly = new AbortController();
+    const em = new EventEmitter();
+    em.on('newListener', (type: string | symbol) => {
+      if (type === 'ping') emitterEarly.abort();
+    });
+    const targetEarly = new AbortController();
+    class Aborting extends EventTarget {
+      override addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, opts?: boolean | AddEventListenerOptions): void {
+        targetEarly.abort();
+        super.addEventListener(type, listener, { once: typeof opts === 'object' ? opts.once : undefined }); // ignores { signal }, as ws does
+      }
+    }
+    const target = new Aborting();
+    let calls = 0;
+    box.run(() => {
+      listen(em, 'ping', () => void calls++, { signal: emitterEarly.signal });
+      listen(target, 'ping', () => void calls++, { signal: targetEarly.signal });
+    });
+    em.emit('ping');
+    target.dispatchEvent(new Event('ping'));
+    const released = log.of('entry:released').filter((e) => e.id === box.id && e.entryName === 'Listener').length;
+    const seen = {
+      calls,
+      onEmitter: em.listenerCount('ping'),
+      onTarget: getEventListeners(target, 'ping').length,
+      released,
+      state: box.state,
+    };
+    await within(box.close());
+    expect({ ...seen, outcome: box.outcome?.status }).toEqual({
+      calls: 0,
+      onEmitter: 0,
+      onTarget: 0,
+      released: 2,
+      state: 'running',
+      outcome: 'success',
+    });
+  });
 });
 
 // --- nextFrame -----------------------------------------------------------------------------------------------------

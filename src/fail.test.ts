@@ -4,7 +4,8 @@
 //
 // A `Fail` fixes the body's outcome as `failure(e)` at once and returns its generator as a halt does, so its
 // `finally` blocks run as release work under an unwind fiber: a delivery then changes nothing, and what fails there
-// (a throw, a second fail, a failed wait) is a release failure, which amends the outcome to a `defect`. A delivered
+// (a throw, a second fail, a failed wait) is a release failure, which amends the outcome to a `defect`, a failure a
+// wait handed the `finally` and its throw let through once (D45). A delivered
 // body not yet halted is halted at its `Fail`, the error discarded as its throw would be (D24). `call`, `join`,
 // `shield`, `wait(op)` and the groups re-yield a child's expected failure; `then` rejects with its error; a fiber's
 // `[Symbol.asyncDispose]()`, whose op carries no `E`, throws it. Each test compares one observation object.
@@ -65,7 +66,7 @@ const notFoundAnywhere = new NotFound('made at module level');
 const failAnywhere = fail(notFoundAnywhere);
 
 describe('the finally a fail runs: release work (D42)', () => {
-  it('a throw from it, a second fail in it and a failed wait in it are release failures, reported beside the fail: the outcome is defect(SuppressedError(release, e)); its node:settled is failure', async () => {
+  it('a throw from it, a second fail in it and a failed wait in it are release failures, reported beside the fail: the outcome is defect(SuppressedError(release, e)); its node:settled is failure; a callee’s failure it lets through is reported once (D45)', async () => {
     const ev = events();
     roots.push(ev.root);
     const e = new NotFound('the fail');
@@ -73,6 +74,10 @@ describe('the finally a fail runs: release work (D42)', () => {
     const second = new Declined('a second fail');
     const rejected = new Error('rollback rejected');
     const known = { e, thrown, second, rejected };
+    const cleanup = task(function* (): Generator<Instruction, never, unknown> {
+      yield* sleep(0);
+      throw thrown;
+    });
     const run = async (body: () => Generator<Instruction | Fail<unknown>, void, unknown>) => {
       const f = ev.root.fork(task(body, { onFailure: () => {} }));
       const o = await within(ev.root.result(f));
@@ -104,11 +109,20 @@ describe('the finally a fail runs: release work (D42)', () => {
           }
         }
       }),
+      // The callee's failure is its holder's record, and the generator's throw of it the same failure: one, not two.
+      calleeThrew: await run(function* () {
+        try {
+          yield* fail(e);
+        } finally {
+          yield* cleanup();
+        }
+      }),
     };
     expect(rows).toEqual({
       throw: { o: 'defect(SuppressedError(thrown, e))', settled: 'failure' },
       secondFail: { o: 'defect(SuppressedError(second, e))', settled: 'failure' },
       failedWait: { o: 'defect(SuppressedError(rejected, e))', settled: 'failure' },
+      calleeThrew: { o: 'defect(SuppressedError(thrown, e))', settled: 'failure' },
     });
   });
 

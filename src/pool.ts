@@ -27,6 +27,9 @@ export class PoolState {
       throw new TypeError(`pool(opts): concurrency must be an integer >= 1 (got ${String(c)})`);
     if (opts.whenFull !== undefined && opts.whenFull !== 'wait' && opts.whenFull !== 'reject')
       throw new TypeError(`pool(opts): whenFull must be 'wait' or 'reject'`);
+    const m = opts.maxPending;
+    if (m !== undefined && !(Number.isInteger(m) && m >= 0))
+      throw new TypeError(`pool(opts): maxPending must be an integer >= 0 (got ${String(m)})`);
   }
 
   get pending(): number {
@@ -38,13 +41,19 @@ function label(pool: NodeImpl): string {
   return `${pool.name ?? pool.kind}#${pool.id}`;
 }
 
-/** `pool.fork(t, ...args)`: intake rules (D15), then create and admit or queue. */
+/**
+ * `pool.fork(t, ...args)`: intake rules (D15), then create and admit or queue. Refused before any node is made: at the
+ * concurrency bound under `'reject'`, and under `'wait'` when the queue is at `maxPending`.
+ */
 export function poolFork(pool: NodeImpl, task: TaskLike, args: unknown[]): NodeImpl {
   const st = pool.poolState!;
   if (pool.delivered || pool.closeRequested) throw new PoolClosedError(`pool ${label(pool)} is closed`);
   const full = st.opts.concurrency !== undefined && st.running >= st.opts.concurrency;
   if (full && (st.opts.whenFull ?? 'wait') === 'reject')
     throw new PoolFullError(`pool ${label(pool)} is full (${st.opts.concurrency})`);
+  const max = st.opts.maxPending;
+  if (full && max !== undefined && st.waiting.length >= max)
+    throw new PoolFullError(`pool ${label(pool)} is full (${st.opts.concurrency} running, maxPending ${max} pending)`);
   const child = pool.makeFiber(task, args, st.opts.onFailure);
   // Settled at birth (an already-aborted opts.signal, DESIGN.md §4.6): it completed before `pooled` was set, so
   // poolChildComplete never sees it, and it is neither running nor waiting.

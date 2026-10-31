@@ -19,7 +19,7 @@ Stating the rules is [DESIGN.md](DESIGN.md)'s job; an entry here
 states the decision and points there. ramme is the extraction of the
 DI/fiber/lifecycle core of a private monorepo package (internally
 "spindle"); entries note where a choice was inherited from that lineage.
-The guarantees G1–G4, contracts C1–C8, invariants I1–I26, assumptions
+The guarantees G1–G4, contracts C1–C8, invariants I1–I27, assumptions
 A1–A7 and the numbered design laws cited here are defined in DESIGN.md
 §2.5, §2.6 and §10.
 
@@ -34,7 +34,9 @@ root through the commits of PR #5 (added in 5da90d8, unrevised, and
 deleted when D41 was completed; read it at 5da90d8). Later stages of that
 PR were specified outside the repository: stage 6a made tasks callable
 (D44; commit a75ce3d) and stage 6b, the commit after it, rewrote the
-documents for it. Every decision here is complete without them.
+documents for it. So were PR #6's review fixes: D45, and the notes they
+added to D15, D24, D41, D42 and D43. Every decision here is complete without
+them.
 
 ## Shape
 
@@ -1430,17 +1432,24 @@ draft, the rest were its recommendations, adopted.
    started not run (DESIGN.md §4.2's table). Rejected: returning at once
    from every wait, as Effection halts, which runs a `finally` around
    `yield* call(t)` (an unlock, a rollback) while the callee still writes,
-   and loses an acquisition in flight.
+   and loses an acquisition in flight. Amended by D45: a body resumed after
+   its delivery has had its one grant, and stops at its next wait but a
+   lifecycle op of release work, so the table's two last rows are a grant
+   row and an after-the-grant row.
 9. *A body born delivered*: stepped to its first `yield*` of an op not yet
    started and halted there (DESIGN.md §4.2), since `return()` on an
    unstarted generator runs no code at all. Rejected: settling it
-   unstarted, which changes D12.
+   unstarted, which changes D12. Under D45 its first `wait(p)` or lifecycle
+   op of release work is its grant, and any later wait but a lifecycle op
+   returns it.
 10. *`wait(p)` at a halt* (decided): `p` finishes, `{ abandon: true }` stops
     waiting, `wait((signal) => p)` hands the work the signal (DESIGN.md
     §4.2); the name `managed` goes. Rejected: stopping at once by default,
     as Effection's `until` does, which never owns a connection being
     acquired and abandons a transaction callback in the middle of its
-    rollback.
+    rollback. Amended by D45: only the wait in flight at the delivery
+    finishes; after the grant every `wait` of the body's own flow abandons,
+    while its halted `finally` still waits for everything it yields.
 11. *What a halted `finally` addresses*: U3 (DESIGN.md §4.2). Rejected: the
     two-node frame (below); U1, the node current with its ops exempt, under
     which a `call` in the `finally` is born delivered and halted.
@@ -1563,7 +1572,8 @@ and `await`, there are no arrow generators, and tutorials and assistants
 default to `async`; most mistakes are compile errors (an `await` in a body
 is TS1308, a `yield*` of a promise TS2488, `for await` TS1103), and the rest
 a lint's. *The two `wait` modes*: a choice at every foreign wait between
-`wait(p)`, which a halt lets finish, with its hazards (DESIGN.md §4.4), and
+`wait(p)`, which a halt lets finish when it is in flight (D45), with its
+hazards (DESIGN.md §4.4), and
 `{ abandon: true }`, which leaves `p` running; the default is the opposite
 of Effection's. *A helper's
 `finally` may not wait*: a `yield*` there loses the halt, and in production
@@ -1618,7 +1628,8 @@ library interop is conceded, to one generic wrapper per wait and a node per
   running a hole whose owner was already interrupted up to its first wait.
 - *U3, not the two-node frame* (the proposal's open question 1; DESIGN.md
   §4.2). Re-run against U3, the review probes that could have refuted it do
-  not: a throw from the halted `finally` is discarded (p6); `release(tx)`
+  not: a throw from the halted `finally` is discarded (p6; a release
+  failure since D45); `release(tx)`
   and `releaseAll()` there find the body's entries (p7); a failure the
   `finally` catches from `release`, `call` or `attempt` still folds in once
   (p8); a second `return()` while a helper's `finally` is suspended skips
@@ -1764,10 +1775,11 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
 
 **Settled while implementing it.**
 
-- *The `finally` a fail runs is release work* (DESIGN.md §4.13). A halted
-  `finally` discards a throw (D24) because an interruption may have caused
-  it; nothing interrupted a fail's, so its throw is reported, as JavaScript
-  reports a `finally`'s throw over the `return` it replaces.
+- *The `finally` a fail runs is release work* (DESIGN.md §4.13). Its throw
+  is reported, as JavaScript reports a `finally`'s throw over the `return`
+  it replaces, and so, since D45, is a halted `finally`'s; a throw of a
+  failure a wait handed it that is reported without it (`p`'s own, or one a
+  failure record still holds) is not recorded again (D45).
 - *`all`, and `race` with no success, re-yield a lone expected failure, and
   report two or more as a defect* (DESIGN.md §4.8), the proposal having
   read "fail fast … as on a defect" as D28's behaviour, which waits for
@@ -1931,21 +1943,154 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   wait rejected with the reason, as a `fetch` is; the core's `sleep` instead
   runs its full duration (D34), which needs an internal canceller this layer
   does not import.
-- *The browser check is static and dependency-free* (DESIGN.md §7;
+- *The browser check: static on the build, and the smoke test run in
+  headless Chromium* (DESIGN.md §7;
   `DOMException` and `console` are the core's: an abort's default reason,
   development-mode reports). `check:surface` makes it on dist/, and
-  src/test/browser-smoke.test.ts on src/ compiled for the test run (vitest's
+  src/test/browser-static.test.ts on src/ compiled for the test run (vitest's
   global setup, src/test/build.ts), so `pnpm test` needs no build and never
-  reads a stale one; the smoke test also runs a body of the core's verbs and
-  README's search box ("The platform") through the public entries. `check:surface`
+  reads a stale one; the smoke test, src/test/browser-smoke.test.ts, runs a
+  body of the core's verbs and README's search box ("The platform") through
+  the public entries. `check:surface`
   also type-checks a Node consumer with no DOM library against every
   declaration file, so `ramme/platform`'s signatures name only what
   @types/node has as a global (`listen`'s options are its own interface, not
   the DOM's `AddEventListenerOptions`). Vitest's browser mode, which the
-  proposal planned, was not added: it needs Playwright.
+  proposal planned, was left out at first, since it needs Playwright; after
+  review it was added as development dependencies only
+  (`@vitest/browser-playwright`, `playwright`): `pnpm test:browser` runs the
+  smoke test unchanged in headless Chromium, as CI's `browser` job does, and
+  the static half, which reads files, moved to browser-static.test.ts.
 - *Decision 32 is settled as recommended*: a node's `[Symbol.asyncDispose]()`
   stays abort, then wait. `await using` ends a node the way an exception
   would, by interruption; to drain, call `close()`.
+- *Two `listen` defects, fixed after review* (DESIGN.md §4.9). A handler that
+  returns a promise is refused in every mode with the op case's `TypeError`,
+  its rejection handled first, where only development mode's `node.run`
+  check saw it and production left the rejection unhandled. A registration
+  that ends its own node (an emitter's `newListener` hook, an
+  `addEventListener` that aborts or closes it) or fires `opts.signal` ran the
+  node's delivery, and possibly the entry's release, before there was a
+  removal to run: the listener stayed registered for good. `Listener.attach`
+  now removes it at once, and nothing is left on `opts.signal`.
+
+### D45. A halt has one grant; a halted `finally`'s throw is a release failure
+
+Two rules of the halt (DESIGN.md §4.2), the first replacing D41's decision 8
+for a body resumed after its delivery, the second D24's discard.
+
+**One grant per halt.** The wait in flight at the delivery, when it is
+release work, a `wait(p)` or a `wait((signal) => p)`, finishes, and the body
+is resumed with its value once: the **grant**, so it can `own` what it waited
+for or finish its release work. Every op the halted body yields after that
+returns it at its `yield*`: a `wait(p)` abandons `p`, which runs on, its
+settlement ignored and its rejection handled; a `wait((signal) => p)` does
+not call its function; a task's call makes no child, and a `shield` does
+not start. A lifecycle op of release work (`release`, `releaseAll`,
+`close()` or `[Symbol.asyncDispose]()` of a node below the body) is the
+exception and still runs, resuming the body after it (`yield* release(x)`
+in the resumed segment, as in the `finally`). A body delivered with no wait
+in flight, in its own step or born delivered (decision 9), has its grant at
+its first `wait(p)` or lifecycle op; a resume before the delivery is none.
+After the grant every `wait` of the body's own flow behaves as
+`{ abandon: true }`, so the option matters only for the wait in flight. The
+halted `finally` is unchanged: it is release work, and every wait there
+finishes. So there are two regimes: the body's own flow has one grant and
+stops at its next wait; its halted `finally` waits for everything it
+yields. I27 names the first. The driver sees yields, not blocks, so a
+`finally` the body's own flow enters after the delivery, by a `return` or a
+throw in the resumed segment, is that flow: its first wait that is not a
+lifecycle op returns the body, and the rest of that `finally` never runs.
+
+**A halted `finally`'s throw is a release failure.** It is recorded on the
+unwind fiber as a failed wait there is, so the outcome, `aborted` by state,
+is amended to `defect(e)` by D24's release-phase rule, and `yield* cleanup()`
+failing with `e` and `throw e` give the same outcome. A throw of a failure a
+wait there handed the `finally` is not recorded again when something else
+reports it: `p`'s own, recorded when it was handed, or one a failure record
+still holds unconsumed (a child's, a release's), which its holder reports.
+The `finally` a fail runs (D42) follows the same rule, where it had reported
+such a failure twice, as an `AggregateError` of one error. No record holds
+ramme's `FiberAbortedError` for an aborted child, nor a failure an earlier
+consumer took (a caught `join`, a `result`), so a throw of either is
+recorded, as the same throw in the body's own flow is reported; so is a
+callee's `Fail` re-yielded in the `finally` from a consumed record. A value
+the `finally` returns stays discarded (decision 29's lost halt). D24 is
+amended with a pointer here, D41's decisions 8, 9 and 10 with a note each,
+and D42's note on the fail's `finally` rewritten.
+
+**Why.** D41's rule resumed a body after its wait and let the next wait
+decide again, and a `wait(p)` over a promise had started before it was
+yielded, so it was subscribed and let finish too: a body of eager waits was
+never halted. A probe of `read`, `write` and `commit`, interrupted during
+`read`, ran all three and ended `aborted`: the interruption stopped nothing,
+and the outcome said the commit had not happened. The grant keeps what
+decision 10 bought, the acquisition in flight owned
+(`own(yield* wait(connect()))`), and bounds what an interruption lets run to
+one segment of plain code. Release work stays outside the bound because an
+interruption stops all work except releasing what was acquired (DESIGN.md
+§4.2). D24 discarded a halted `finally`'s throw because, in the async
+runtime, the interruption was thrown into the body, so a `finally`'s throw
+could be its echo. A generator is returned, nothing is thrown in (D41), and
+the rationale is gone, while the asymmetry it left was real: the same
+cleanup failure was a `defect` when a task threw it and `aborted` when the
+`finally` did, so moving cleanup into a task changed the outcome.
+
+**Rejected.** *Resume and decide again* (D41's decision 8 as written): never
+halts a body of eager waits. *Halting at the wait in flight itself*, as
+Effection halts at every wait: breaks `own(yield* wait(connect()))`, which
+leaks the connection being acquired (decision 10's reason). *No grant for a
+body delivered with no wait in flight*: loses a born-delivered body's
+acquisition the same way. *Halting release work after the grant too*: an
+early `release(x)` the body wrote would be skipped, and its awaiter would
+learn nothing of the release's failure. *A `shield` yielded after the
+delivery as release work*: it is lazy work not yet started, as a task's
+call is, and D41 never ran one; only a shield in flight finishes. *Telling
+a `finally` the body enters itself from the halted one*: the driver sees a
+yield, not the block around it. *Keeping the discard*: its premise was the
+thrown interruption. *Recording a rethrown failure again*: one failure
+reported twice (I11). *Taking every handed failure as reported*: ramme's
+`FiberAbortedError` and a consumed record's error would be reported by no
+one (I11), and moving cleanup into a task would change the outcome again.
+
+**Cost.** Plain code in the grant still runs, and foreign work it starts
+eagerly (the `write` of `yield* wait(write(x))`) is started and abandoned:
+the lazy `wait((signal) => p)`, which a halted body calls only in its halted
+`finally`, is the form for starting work, and README shows it first. An abandoned promise runs on
+unobserved, and its node may complete before it settles. `wait(p)` means two
+things by position: the wait in flight, which a halt finishes, and any later
+one, which it abandons. A halted `finally` that throws now ends its node
+`defect`, which reaches the failure destinations (I12 keeps `aborted` silent,
+not a defect), and so does a body whose halt was lost (decision 29), whose
+main flow runs on as release work: its throw is a release failure too. The
+identity test sees only the value handed in: a `finally` that wraps a handed
+failure in a new error reports both. A throw from the grant's plain code,
+outside any `finally`, is still discarded by D24, while the same throw in
+the `finally` is reported: the grant is the body's flow, classified by state,
+and the `finally` is release. A `finally` the resumed segment enters by its
+own `return` or throw is cut at its first wait that is not a lifecycle op,
+its rollback abandoned and its node possibly complete first, where D41 let a
+`wait(p)` there finish: cleanup that must finish belongs in an entry
+(DESIGN.md §4.4), as it already did for a `finally` reached by normal
+completion.
+
+**Settled while implementing it.**
+
+- *The grant is the first resume after the delivery*, whichever wait gives
+  it: a body delivered during `yield* release(x)` is resumed by that release,
+  its grant, and stops at its next `wait(p)`.
+- *A lifecycle op after the grant is subscribed and its shape decides*
+  (DESIGN.md §4.2's table): release work runs, and a `close()` of the body's
+  own node returns it at once, the first row's.
+- *An abandoned `wait(p)` runs its op only to reach `p`*, whose rejection is
+  then handled; nothing is subscribed. `promised` bodies are driven by the
+  same driver, so a library's callback stops at its second wait as a task's
+  body does.
+- *Whether a handed failure is reported without the `finally` is read from
+  its failure record*, when the resume step throws it: still unconsumed, its
+  holder reports it. A run says so for what it throws (a child's outcome, an
+  entry's release, a node's `close()`); a user promise's own failure is
+  recorded when handed instead.
 
 ### D34. `sleep(ms)`: ramme's timer is a wait the halt cuts
 
@@ -2299,6 +2444,12 @@ once. **Rejected:** accepting forks into a closing pool until its queue
 drains. **Cost.** A producer that races shutdown must handle
 `PoolClosedError`. DESIGN.md §4.10.
 
+*`maxPending` bounds the queue.* Under `whenFull: 'wait'` the queue was
+unbounded, so a producer faster than the pool grew it without limit; with
+`maxPending` set, a fork that would queue beyond it throws `PoolFullError`,
+as `'reject'` does at `concurrency`, before any node is made (`0` is
+`'reject'`; beside `'reject'` it changes nothing).
+
 *Accounting counts only the pool's own fibers; abort stops the queue, close
 drains it.* `running` and `pending` move only for fibers the pool admitted,
 never for release fibers, DI values placed on the pool or passive
@@ -2460,7 +2611,8 @@ names in the surface. DESIGN.md §4.12.
 A node's outcome is fixed when its body settles, by its state,
 never by inspecting what the body produced: a `freeze` or `restore` node
 delivered before that point is `aborted`, whatever the body returned or
-threw, including what its halted `finally` returned or threw (D41); an
+threw, including what its halted `finally` returned (D41); what that
+`finally` throws is a release failure, which amends the outcome (D45); an
 `observe` node's outcome is its body's result; a bodiless node is `success`
 on `close()` and `aborted` on `abort()`. A body's throw is a `defect` and
 its yielded `fail(e)` a `failure`, fixed at the fail (D42). The release phase amends the
