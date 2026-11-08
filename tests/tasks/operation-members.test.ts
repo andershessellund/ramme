@@ -8,7 +8,7 @@ import type { EventLog } from '../support/util.js';
 import { labelError as label, showError as show } from '../support/observations.js';
 
 // Each error class has a distinct literal member: TypeScript compares classes by structure, so two bare
-// `class X extends Error {}` are one type and an inferred union would collapse to one of them (tests/result/results.test.ts).
+// `class X extends Error {}` are one type and an inferred union would collapse to one of them (src/result.test.ts).
 class Boom extends Error {
   readonly name = 'Boom' as const;
 }

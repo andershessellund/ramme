@@ -2,8 +2,8 @@
 // module slot that `runInFrame` sets for a synchronous `fn` and restores, re-entrant and on throw. Nothing carries
 // it across an `await`, a microtask or a timer: ramme registers no async context on any platform.
 import { describe, it, expect } from 'vitest';
-import { current, fork, lookup, own, signal } from '../../src/ambient.js';
-import { createInjectionKey } from '../../src/context-key.js';
+import { current, fork, lookup, own, signal } from './ambient.js';
+import { createInjectionKey } from './context-key.js';
 import {
   NO_NODE,
   currentCreation,
@@ -12,14 +12,14 @@ import {
   peekCurrentNode,
   runDetached,
   runInFrame,
-} from '../../src/context-storage.js';
-import type { Frame } from '../../src/context-storage.js';
-import { defineDisposalSymbols } from '../../src/disposal-symbols.js';
-import type { CreationState } from '../../src/inject.js';
-import type { NodeImpl } from '../../src/node-impl.js';
-import { NoCurrentNodeError } from '../../src/resource.js';
-import { deferred, micro, tick } from '../support/util.js';
-import { task } from '../../src/fiber.js';
+} from './context-storage.js';
+import type { Frame } from './context-storage.js';
+import { defineDisposalSymbols } from './disposal-symbols.js';
+import type { CreationState } from './inject.js';
+import type { NodeImpl } from './node-impl.js';
+import { NoCurrentNodeError } from './resource.js';
+import { deferred, micro, tick } from '../tests/support/util.js';
+import { task } from './fiber.js';
 
 function fakeNode(id: number): NodeImpl {
   return { id } as unknown as NodeImpl;

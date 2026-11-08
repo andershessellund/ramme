@@ -1,14 +1,14 @@
 // Tests for runtime / generator driver.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { current, fork, interrupted, join, lookup, never, own, promised, signal, sleep, wait } from '../../src/ambient.js';
-import { createInjectionKey } from '../../src/context-key.js';
-import type { Context, Fiber, Instruction } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { Sub, isInstruction } from '../../src/managed.js';
-import type { InstructionImpl, WorkOp } from '../../src/managed.js';
-import { AsyncRunError, FiberAbortedError, FiberNotAwaitableError, NoCurrentNodeError, NodeCompletedError } from '../../src/resource.js';
-import { deferred, impl, tick, within } from '../support/util.js';
+import { current, fork, interrupted, join, lookup, never, own, promised, signal, sleep, wait } from './ambient.js';
+import { createInjectionKey } from './context-key.js';
+import type { Context, Fiber, Instruction } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { Sub, isInstruction } from './managed.js';
+import type { InstructionImpl, WorkOp } from './managed.js';
+import { AsyncRunError, FiberAbortedError, FiberNotAwaitableError, NoCurrentNodeError, NodeCompletedError } from './resource.js';
+import { deferred, impl, tick, within } from '../tests/support/util.js';
 
 const warnings: string[] = [];
 

@@ -1,14 +1,14 @@
 // Tests for di / implementation keys.
 import { afterEach, describe, expect, it } from 'vitest';
-import { lookup } from '../../src/ambient.js';
-import { createKeyFor, getKeyScope } from '../../src/context-key.js';
-import type { InjectionKey } from '../../src/context-key.js';
-import type { Context } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { inject } from '../../src/inject.js';
-import { RequestScope, RootScope, createScope } from '../../src/scope.js';
-import { impl, within } from '../support/util.js';
+import { lookup } from './ambient.js';
+import { createKeyFor, getKeyScope } from './context-key.js';
+import type { InjectionKey } from './context-key.js';
+import type { Context } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { inject } from './inject.js';
+import { RequestScope, RootScope, createScope } from './scope.js';
+import { impl, within } from '../tests/support/util.js';
 
 const SessionScope = createScope('session');
 

@@ -5,11 +5,11 @@
 // the async `?` operator of D38, is retired: a body is the scope (D42). The type-level half is
 // tests/contracts/surface.check.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fail, fork, join, never, pool, sleep, wait } from '../../src/ambient.js';
-import type { Failure, Result } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { PoolFullError } from '../../src/resource.js';
+import { fail, fork, join, never, pool, sleep, wait } from './ambient.js';
+import type { Failure, Result } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { PoolFullError } from './resource.js';
 import {
   $,
   andThen,
@@ -24,8 +24,8 @@ import {
   success,
   unwrap,
   unwrapOr,
-} from '../../src/result.js';
-import { deferred, tick, within } from '../support/util.js';
+} from './result.js';
+import { deferred, tick, within } from '../tests/support/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();

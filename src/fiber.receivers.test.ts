@@ -1,13 +1,13 @@
 // Tests for tasks / task receivers.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { all, attempt, current, fork, join, lookup, own, pool, promised, release, shield, unshield, wait } from '../../src/ambient.js';
-import { createInjectionKey, createKeyFor } from '../../src/context-key.js';
-import type { Context } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { isTask } from '../../src/internal-context.js';
-import { events, within } from '../support/util.js';
-import type { EventLog } from '../support/util.js';
+import { all, attempt, current, fork, join, lookup, own, pool, promised, release, shield, unshield, wait } from './ambient.js';
+import { createInjectionKey, createKeyFor } from './context-key.js';
+import type { Context } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { isTask } from './internal-context.js';
+import { events, within } from '../tests/support/util.js';
+import type { EventLog } from '../tests/support/util.js';
 
 const roots: Context[] = [];
 

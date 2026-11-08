@@ -1,11 +1,11 @@
 // Tests for tasks / pool capacity.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { wait } from '../../src/ambient.js';
-import type { Context } from '../../src/context.js';
-import { task } from '../../src/fiber.js';
-import { PoolFullError } from '../../src/resource.js';
-import { deferred, events, within } from '../support/util.js';
-import type { EventLog } from '../support/util.js';
+import { wait } from './ambient.js';
+import type { Context } from './context.js';
+import { task } from './fiber.js';
+import { PoolFullError } from './resource.js';
+import { deferred, events, within } from '../tests/support/util.js';
+import type { EventLog } from '../tests/support/util.js';
 
 /** Every `console.warn` of the current test, first argument only; the spy keeps them off the console. */
 const warnings: string[] = [];

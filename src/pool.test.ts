@@ -1,14 +1,14 @@
 // Pool admission, concurrency, failure handling and constructor-owned workers (DESIGN.md §4.10).
 import { describe, expect, it, vi } from 'vitest';
-import { createInjectionKey } from '../../src/context-key.js';
-import type { Fiber, Pool } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { factoryProvider, valueProvider } from '../../src/provider-util.js';
-import { NodeCompletedError, PoolClosedError, PoolFullError } from '../../src/resource.js';
-import { createScope } from '../../src/scope.js';
-import { lookup, own, wait } from '../../src/ambient.js';
-import { deferred, here, impl, tick, trace } from '../support/util.js';
+import { createInjectionKey } from './context-key.js';
+import type { Fiber, Pool } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { factoryProvider, valueProvider } from './provider-util.js';
+import { NodeCompletedError, PoolClosedError, PoolFullError } from './resource.js';
+import { createScope } from './scope.js';
+import { lookup, own, wait } from './ambient.js';
+import { deferred, here, impl, tick, trace } from '../tests/support/util.js';
 
 const quiet = { name: 'pool', onFailure: () => {} };
 

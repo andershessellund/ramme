@@ -1,15 +1,15 @@
 // Tests for platform / listen.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { current, fork, join, lookup, own, sleep } from '../../src/ambient.js';
-import type { Context, Fiber } from '../../src/context.js';
-import { createInjectionKey } from '../../src/context-key.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { listen } from '../../src/platform.js';
-import { valueProvider } from '../../src/provider-util.js';
-import { NoCurrentNodeError } from '../../src/resource.js';
-import { tick, trace, within } from '../support/util.js';
-import { labelError as label, showError as show } from '../support/observations.js';
+import { current, fork, join, lookup, own, sleep } from './ambient.js';
+import type { Context, Fiber } from './context.js';
+import { createInjectionKey } from './context-key.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { listen } from './platform.js';
+import { valueProvider } from './provider-util.js';
+import { NoCurrentNodeError } from './resource.js';
+import { tick, trace, within } from '../tests/support/util.js';
+import { labelError as label, showError as show } from '../tests/support/observations.js';
 
 /** The roots of the current test, closed after it whatever happened to it. */
 const roots: Context[] = [];

@@ -1,12 +1,12 @@
 // Tests for tasks / callable tasks.
 import { afterEach, describe, expect, it } from 'vitest';
-import { current, fork, join, lookup, sleep } from '../../src/ambient.js';
-import type { Context } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { isTask } from '../../src/internal-context.js';
-import { events, trace, within } from '../support/util.js';
-import type { EventLog } from '../support/util.js';
+import { current, fork, join, lookup, sleep } from './ambient.js';
+import type { Context } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { isTask } from './internal-context.js';
+import { events, trace, within } from '../tests/support/util.js';
+import type { EventLog } from '../tests/support/util.js';
 
 /** The roots of the current test, closed after it whatever happened to it. */
 const roots: Context[] = [];

@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { Stack } from '../../src/stack.js';
-import type { NodeImpl } from '../../src/node-impl.js';
-import type { Entry } from '../../src/stack.js';
-import { AlreadyOwnedError } from '../../src/resource.js';
-import { gcUntil, hasGc } from '../support/util.js';
+import { Stack } from './stack.js';
+import type { NodeImpl } from './node-impl.js';
+import type { Entry } from './stack.js';
+import { AlreadyOwnedError } from './resource.js';
+import { gcUntil, hasGc } from '../tests/support/util.js';
 
 function input(target: object, name = 'e'): Omit<Entry, 'prev' | 'next' | 'stack'> {
   return { target, name, node: undefined, dispose: () => {}, state: 'live', done: undefined, failure: undefined, early: false };

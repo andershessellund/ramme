@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     // ramme's own suites; packages/eslint-plugin-ramme runs its tests itself (`pnpm check:plugin`).
-    include: ['tests/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     // The current-node slot is module state (D41); per-file isolation keeps
     // each suite's module graph its own.
     isolate: true,

@@ -20,23 +20,23 @@ import {
   settle,
   signal,
   wait,
-} from '../../src/ambient.js';
-import { createInjectionKey } from '../../src/context-key.js';
-import type { Context, Fiber, Op, Pool } from '../../src/context.js';
-import { peekCurrentNode } from '../../src/context-storage.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { ContextKey, inject } from '../../src/inject.js';
-import { NodeImpl } from '../../src/node-impl.js';
-import { valueProvider } from '../../src/provider-util.js';
+} from './ambient.js';
+import { createInjectionKey } from './context-key.js';
+import type { Context, Fiber, Op, Pool } from './context.js';
+import { peekCurrentNode } from './context-storage.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { ContextKey, inject } from './inject.js';
+import { NodeImpl } from './node-impl.js';
+import { valueProvider } from './provider-util.js';
 import {
   AlreadyOwnedError,
   AsyncRunError,
   CreationViolationError,
   NoCurrentNodeError,
   NotOwnedError,
-} from '../../src/resource.js';
-import { deferred, impl, tick, trace } from '../support/util.js';
+} from './resource.js';
+import { deferred, impl, tick, trace } from '../tests/support/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();

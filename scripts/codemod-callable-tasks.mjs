@@ -8,7 +8,7 @@
 // Run it on a tree that still has the free `call` and the `Task` methods: it
 // type-checks the project with tsconfig.tests.json and reads, for every call,
 // the declaration it resolves to. With no files it rewrites the TypeScript
-// files under tests/. In each file:
+// files under tests/ and the colocated src/**/*.test.ts suites. In each file:
 //
 // - the free `call(t, …args)` (`call` imported, or `ns.call` on a namespace
 //   import) becomes `t(…args)` when `t` is a task, and `task(body)(…args)`
@@ -41,10 +41,14 @@ const named = args.filter((a) => !a.startsWith('--')).map((f) => path.resolve(f)
 const files =
   named.length > 0
     ? named
-    : readdirSync(path.join(root, 'tests'), { recursive: true })
-        .filter((f) => f.endsWith('.ts'))
-        .map((f) => path.join(root, 'tests', f))
-        .sort();
+    : [
+        ...readdirSync(path.join(root, 'tests'), { recursive: true })
+          .filter((f) => f.endsWith('.ts'))
+          .map((f) => path.join(root, 'tests', f)),
+        ...readdirSync(path.join(root, 'src'), { recursive: true })
+          .filter((f) => f.endsWith('.test.ts'))
+          .map((f) => path.join(root, 'src', f)),
+      ].sort();
 
 const configPath = path.join(root, 'tsconfig.tests.json');
 const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} });
@@ -54,7 +58,7 @@ const checker = program.getTypeChecker();
 /** ramme's implementation sources. */
 function isRammeFile(fileName) {
   const f = path.resolve(fileName);
-  return f.startsWith(path.join(root, 'src') + path.sep);
+  return f.startsWith(path.join(root, 'src') + path.sep) && !f.endsWith('.test.ts');
 }
 
 function declName(decl) {

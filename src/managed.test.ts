@@ -1,14 +1,14 @@
 // Work and lifecycle operation protocols, promise reactions and rejection handling (DESIGN.md §4.2).
 import { describe, expect, it } from 'vitest';
-import { current, join, never, wait } from '../../src/ambient.js';
-import { peekCurrentNode } from '../../src/context-storage.js';
-import type { Instruction } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { LifecycleOp, WorkOp } from '../../src/managed.js';
-import { NodeCompletedError } from '../../src/resource.js';
-import { deferred, gcUntil, hasGc, tick, trace, unhandledRejectionGuard, within } from '../support/util.js';
-import type { UnhandledRejectionGuard } from '../support/util.js';
+import { current, join, never, wait } from './ambient.js';
+import { peekCurrentNode } from './context-storage.js';
+import type { Instruction } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { LifecycleOp, WorkOp } from './managed.js';
+import { NodeCompletedError } from './resource.js';
+import { deferred, gcUntil, hasGc, tick, trace, unhandledRejectionGuard, within } from '../tests/support/util.js';
+import type { UnhandledRejectionGuard } from '../tests/support/util.js';
 
 /** The setup file's unhandled-rejection guard (tests/support/setup.ts). */
 function guard(): UnhandledRejectionGuard {

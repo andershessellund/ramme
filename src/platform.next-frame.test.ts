@@ -1,12 +1,12 @@
 // Tests for platform / animation frames.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fork, result, sleep } from '../../src/ambient.js';
-import type { Context } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { nextFrame } from '../../src/platform.js';
-import { start, tick, trace, within } from '../support/util.js';
-import { showError as show } from '../support/observations.js';
+import { fork, result, sleep } from './ambient.js';
+import type { Context } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { nextFrame } from './platform.js';
+import { start, tick, trace, within } from '../tests/support/util.js';
+import { showError as show } from '../tests/support/observations.js';
 
 /** The roots of the current test, closed after it whatever happened to it. */
 const roots: Context[] = [];

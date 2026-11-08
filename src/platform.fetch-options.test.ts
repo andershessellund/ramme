@@ -1,14 +1,14 @@
 // Tests for platform / fetch options.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fork, join, never, result, sleep } from '../../src/ambient.js';
-import type { Context } from '../../src/context.js';
-import { createInjectionKey } from '../../src/context-key.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { fetch, listen, nextFrame } from '../../src/platform.js';
-import { trace, within } from '../support/util.js';
-import type { Trace } from '../support/util.js';
-import { showError as show } from '../support/observations.js';
+import { fork, join, never, result, sleep } from './ambient.js';
+import type { Context } from './context.js';
+import { createInjectionKey } from './context-key.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { fetch, listen, nextFrame } from './platform.js';
+import { trace, within } from '../tests/support/util.js';
+import type { Trace } from '../tests/support/util.js';
+import { showError as show } from '../tests/support/observations.js';
 
 const roots: Context[] = [];
 

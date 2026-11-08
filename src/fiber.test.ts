@@ -1,11 +1,11 @@
 // Tests for tasks / task definition.
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { current, fork, join, signal, wait } from '../../src/ambient.js';
-import type { Context, Op } from '../../src/context.js';
-import { createRootContext } from '../../src/create-context.js';
-import { task } from '../../src/fiber.js';
-import { NoCurrentNodeError } from '../../src/resource.js';
-import { impl, tick, trace } from '../support/util.js';
+import { current, fork, join, signal, wait } from './ambient.js';
+import type { Context, Op } from './context.js';
+import { createRootContext } from './create-context.js';
+import { task } from './fiber.js';
+import { NoCurrentNodeError } from './resource.js';
+import { impl, tick, trace } from '../tests/support/util.js';
 
 describe('task() (DESIGN.md §4.5, I26)', () => {
   it('a task is a function whose call is a lazy op, never a bare promise (I26): outside any node it throws NoCurrentNodeError, and a task made by with() is one too', async () => {

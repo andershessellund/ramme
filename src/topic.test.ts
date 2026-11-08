@@ -1,7 +1,7 @@
 // Topics are dependency-injection keys (DESIGN.md §3.1).
 import { describe, expect, it } from 'vitest';
-import { createRootContext, valueProvider } from '../../src/index.js';
-import { createTopic } from '../../src/topic.js';
+import { createRootContext, valueProvider } from './index.js';
+import { createTopic } from './topic.js';
 
 describe('topic', () => {
   it('receiver is called when provided and event is emitted', async () => {
