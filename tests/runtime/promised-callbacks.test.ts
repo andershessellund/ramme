@@ -1,6 +1,6 @@
 // Tests for runtime / promised callbacks.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { current, fork, never, own, promised, sleep, wait } from '../../src/ambient.js';
+import { current, fork, never, own, promised, result, sleep, wait } from '../../src/ambient.js';
 import type { Context, Fiber, Instruction, Outcome } from '../../src/context.js';
 import { createRootContext } from '../../src/create-context.js';
 import { task } from '../../src/fiber.js';
@@ -91,9 +91,9 @@ describe('generator bodies: promised', () => {
         const startedSync = started; // synchronous start
         let forked = 'not forked';
         try {
-          fork(function* () {
+          yield* result(fork(function* () {
             return 'x';
-          });
+          }));
           forked = 'forked'; // nothing lent
         } catch (e) {
           forked = (e as Error).name;

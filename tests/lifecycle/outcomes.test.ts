@@ -200,8 +200,8 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
       yield* wait(tick());
       return 'parent ok';
     }));
-    await expect(p).rejects.toBe(err);
-    expect(P.outcome).toEqual({ status: 'defect', error: err });
+    await expect(p).rejects.toEqual(expect.objectContaining({ name: 'SuppressedError', error: err, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }));
+    expect(P.outcome).toEqual({ status: 'defect', error: expect.objectContaining({ name: 'SuppressedError', error: err, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }) });
     await expect(app.close()).resolves.toBeUndefined(); // delivered to the caller of call: not again
   });
 
@@ -273,7 +273,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     await app.close();
   });
 
-  it("an owned fiber that fails after its owner's body exited under childrenOnExit 'await' interrupts the owner's other children (C5, DESIGN.md §4.7)", async () => {
+  it("an owned fiber in a supervised scope fails after the request body exited and interrupts the scope’s other children (C5, DESIGN.md §4.7)", async () => {
     const app = createRootContext();
     const err = new Error('owned, after the body');
     const gate = deferred();
@@ -281,18 +281,19 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     const O = spawn(
       app,
       function* () {
-        here().own(
-          here().fork(function* () {
+        const scope = here().child({ childrenOnExit: 'await' });
+        scope.own(
+          scope.fork(task(function* () {
             yield* wait(gate.promise);
             throw err;
-          }),
+          }, { onFailure: 'link' })),
         );
-        here().fork(
+        scope.fork(
           task(
             function* () {
               siblingHeard = yield* here().interrupted();
             },
-            { interrupt: 'observe' },
+            { interrupt: 'observe', onFailure: 'link' },
           ),
         );
       },
@@ -306,7 +307,7 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     await expect(app.close()).rejects.toBe(err); // 'link': O's failure surfaces from its parent too
   });
 
-  it("'link' escalation into an observe parent whose body exited under childrenOnExit 'await' interrupts its freeze children too (DESIGN.md §4.7)", async () => {
+  it("'link' escalation into a closing observe scope interrupts its freeze children after the request body exited (DESIGN.md §4.7)", async () => {
     const app = createRootContext();
     const err = new Error('linked after an observe body exited');
     const gate = deferred();
@@ -314,10 +315,11 @@ describe('failure destinations (DESIGN.md §4.7, §4.12)', () => {
     const S = spawn(
       app,
       function* () {
-        worker = here().fork(function* () {
+        const scope = here().child({ interrupt: 'observe', childrenOnExit: 'await' });
+        worker = scope.fork(task(function* () {
           yield* here().never();
-        });
-        here().fork(
+        }, { onFailure: 'link' }));
+        scope.fork(
           task(
             function* () {
               yield* wait(gate.promise);
@@ -617,7 +619,7 @@ describe('halted waiters consume nothing (D13′, D16, D39)', () => {
       yield* wait(tick());
       return 'ok';
     }));
-    await expect(p).rejects.toBe(err);
+    await expect(p).rejects.toEqual(expect.objectContaining({ name: 'SuppressedError', error: err, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }));
     await app.close();
   });
 

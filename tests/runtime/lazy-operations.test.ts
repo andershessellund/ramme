@@ -95,10 +95,12 @@ describe('work ops are lazy (decisions 2, 3)', () => {
       join: function* () {
         const f = fork(target);
         drop('join', () => join(f));
+        f.abort();
       },
       result: function* () {
         const f = fork(target);
         drop('result', () => result(f));
+        f.abort();
       },
       sleep: function* () {
         drop('sleep', () => sleep(50));

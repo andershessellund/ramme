@@ -8,7 +8,7 @@
 // account; its members' failures wait on the group's parent for the caller's resume step, so a halted caller
 // consumes nothing.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { all, attempt, fork, interrupted, lookup, never, own, settle, signal, wait } from '../../src/ambient.js';
+import { all, attempt, fork, interrupted, join, lookup, never, own, result, settle, signal, wait } from '../../src/ambient.js';
 import { createInjectionKey } from '../../src/context-key.js';
 import { createRootContext } from '../../src/create-context.js';
 import { task } from '../../src/fiber.js';
@@ -107,7 +107,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
         ac.abort('hung up'); // before the op runs: its child is born with an aborted signal, settled unstarted (§4.6)
         const bySignal = yield* signalled;
         let child!: NodeImpl;
-        fork(function* () {
+        const cancel = fork(function* () {
           yield* wait(tick()); // the attempt below has started by now
           child.abort('explicit');
         });
@@ -115,6 +115,7 @@ describe('attempt (DESIGN.md §4.5, D31)', () => {
           child = here();
           yield* never();
         });
+        yield* join(cancel);
         return { timed, bySignal, byAbort, value: timed.status === 'success' ? timed.value : 'cached' };
       }),
     );
@@ -808,7 +809,7 @@ describe('attempt and settle are body-shaped (DESIGN.md §3.5, §4.7)', () => {
     const got: unknown[] = [];
     const done = start(
       root.call(function* () {
-        fork(
+        yield* result(fork(
           task(
             function* () {
               throw new Error('child failed');
@@ -822,7 +823,7 @@ describe('attempt and settle are body-shaped (DESIGN.md §3.5, §4.7)', () => {
               },
             },
           ),
-        );
+        ));
         yield* task(function* () {
           yield* wait(tick(3));
         })();

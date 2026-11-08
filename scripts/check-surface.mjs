@@ -111,6 +111,7 @@ const expected = new Map([
     'NotOwnedError',
     'AlreadyOwnedError',
     'FiberNotAwaitableError',
+    'UnjoinedFiberError',
     'FiberAbortedError',
     'PoolClosedError',
     'PoolFullError',
@@ -155,7 +156,7 @@ const coreNames = [
   'PoolOptions', 'Pool',
   // errors
   'NoCurrentNodeError', 'NodeCompletedError', 'PendingNodeError', 'NotOwnedError', 'AlreadyOwnedError',
-  'FiberNotAwaitableError', 'FiberAbortedError', 'PoolClosedError', 'CreationViolationError', 'AsyncRunError',
+  'FiberNotAwaitableError', 'UnjoinedFiberError', 'FiberAbortedError', 'PoolClosedError', 'CreationViolationError', 'AsyncRunError',
   'PlacementError',
 ];
 

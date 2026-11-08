@@ -45,7 +45,7 @@ describe('anatomy', () => {
     const seen: string[] = [];
     const app = createRootContext();
     let F!: NodeImpl;
-    await app.call(function* () {
+    const o = await app.attempt(function* () {
       F = here();
       here().own(() => void seen.push(`release:${F.state}`));
       const g = here().fork(function* () {
@@ -55,6 +55,7 @@ describe('anatomy', () => {
       seen.push(`body:${F.state}`);
       yield* wait(tick());
     });
+    expect(o).toMatchObject({ status: 'defect', error: { name: 'UnjoinedFiberError' } });
     seen.push(`after:${F.state}`);
     expect(seen).toEqual(['body:running', 'interrupt:settling', 'release:releasing', 'after:complete']);
     await app.close();

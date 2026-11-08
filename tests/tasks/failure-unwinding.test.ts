@@ -1,6 +1,6 @@
 // Expected-failure propagation and cleanup under the generator driver (DESIGN.md §4.12, §4.13).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { all, current, fail, fork, join, never, own, race, shield, sleep, wait } from '../../src/ambient.js';
+import { all, current, fail, fork, join, never, own, race, result, shield, sleep, wait } from '../../src/ambient.js';
 import type { Context, Fail, Instruction, Task } from '../../src/context.js';
 import { createRootContext } from '../../src/create-context.js';
 import { task } from '../../src/fiber.js';
@@ -427,7 +427,7 @@ describe('an expected failure through the verbs (D42)', () => {
     expect({ o: show(o, { e }), log: t.log }).toEqual({ o: 'defect(e)', log: ['parent halted', 'child released'] });
   });
 
-  it("an unjoined 'join' fork's fail is held as a defect is, and surfaces from the parent's completion as the parent's defect(e)", async () => {
+  it("an unjoined 'join' fork's fail is held as a defect is, surfaces beside the parent's ownership error", async () => {
     const root = app();
     const e = new NotFound('unjoined');
     const o = await within(
@@ -439,7 +439,7 @@ describe('an expected failure through the verbs (D42)', () => {
         return 'parent done';
       }),
     );
-    expect(show(o, { e })).toBe('defect(e)');
+    expect(o).toEqual({ status: 'defect', error: expect.objectContaining({ name: 'SuppressedError', error: e, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }) });
   });
 
   it("a fiber's [Symbol.asyncDispose](), whose op carries no E, throws its expected failure into the caller, which may catch it; a top-level then rejects with it", async () => {
@@ -507,14 +507,14 @@ describe('an expected failure through the verbs (D42)', () => {
           return 'owner done';
         }),
         root.attempt(function* () {
-          fork(
+          yield* result(fork(
             task(
               function* () {
                 throw new Error('worker threw');
               },
               { onFailure: () => fail(handled) },
             ),
-          );
+          ));
           yield* sleep(5);
           return 'parent done';
         }),
@@ -536,7 +536,7 @@ describe('an expected failure through the verbs (D42)', () => {
     });
     const run = (name: string, handler: () => Generator<Instruction | Fail<unknown>, void, unknown>) =>
       root.attempt(function* () {
-        fork(
+        yield* result(fork(
           task(
             function* () {
               throw worker;
@@ -554,7 +554,7 @@ describe('an expected failure through the verbs (D42)', () => {
               },
             },
           ),
-        );
+        ));
         yield* sleep(5);
         return 'parent done';
       });
@@ -587,7 +587,7 @@ describe('an expected failure through the verbs (D42)', () => {
     });
     const run = (inFinally: () => Generator<Instruction | Fail<unknown>, void, unknown>) =>
       root.attempt(function* () {
-        fork(
+        yield* result(fork(
           task(
             function* () {
               throw new Error('worker threw');
@@ -602,7 +602,7 @@ describe('an expected failure through the verbs (D42)', () => {
               },
             },
           ),
-        );
+        ));
         yield* sleep(5);
         return 'parent done';
       });

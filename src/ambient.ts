@@ -167,7 +167,8 @@ export function releaseAll(): Op<void> & Promise<void> {
 /**
  * Run `t` concurrently in a new child of the current node; the body starts in a microtask (I20). `fork(op)` (D44,
  * decision 4) forks a task's call `t(…args)` as `fork(t, …args)`, and runs any other op in a new child of its own,
- * named after the op (`sleep`, `wait`, …), whose body is `yield* op`.
+ * named after the op (`sleep`, `wait`, …), whose body is `yield* op`. A body must complete join(f) or result(f), or
+ * explicitly abort f, before returning successfully; otherwise it fails with UnjoinedFiberError before releases run.
  */
 export function fork<T, A extends unknown[], Y extends Yields = never, E = never>(
   t: Task<A, T, E> | BodyOf<T, A, Y>,

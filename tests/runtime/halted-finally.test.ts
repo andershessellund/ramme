@@ -535,7 +535,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
             yield* sleep(5); // a release fiber's sleep runs its full duration
             t.push('release slept');
           });
-          fork(
+          yield* result(fork(
             task(
               function* (): Generator<Instruction, never, unknown> {
                 yield* sleep(1);
@@ -557,7 +557,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
                 },
               },
             ),
-          );
+          ));
           yield* wait(handlerStarted.promise);
           t.push('body returns');
           return 'done';

@@ -848,8 +848,9 @@ give before placement (DESIGN.md §3.3). **Cost.** `parent` lets code reach
 up the tree. DESIGN.md §2.6's rules on what a release may use (G3) are
 unchanged, and `lookup` remains the way to resolve upward. The idiom's
 reading is the outcome as decided at settling (D16): release failures and
-unconsumed child failures folded in at completion do not reach it, so a
-request whose unjoined `'join'` fork failed still commits, and a bodiless
+unconsumed child failures folded in at completion do not reach it. D46
+makes a forgotten fork a defect before settling, so that case rolls back;
+a cancelled child's cleanup failure can still arrive later. A bodiless
 `child({ scopes: [RequestScope] })` reports how it was ended, not how its
 work ended (DESIGN.md §2.6, §4.12). DESIGN.md §2.1, §2.6, §3.3.
 
@@ -1200,7 +1201,9 @@ parent's exit or at its turn is not visible at the `fork` call. DESIGN.md
 
 When a body settles, every subscriber of its node that is still
 running is delivered an `OwnerInterrupt` (`childrenOnExit: 'interrupt'`,
-the default); `childrenOnExit: 'await'` waits for them instead. The exiting
+the default); `childrenOnExit: 'await'` waits for them instead. D46 checks
+fork obligations first: a successful return with a forgotten fork becomes
+a defect and interrupts subscribers even under `'await'`. The exiting
 node is not itself marked delivered: the interrupt starts there, and its
 own signal stays unfired.
 
@@ -1219,9 +1222,55 @@ releases (a failure handler's restart) would be born delivered (D12).
 **Rejected:** waiting as the default, the nursery rule of other
 structured-concurrency libraries, which turns every unjoined fork into a
 hang its author does not see at the call site; marking the exiting node.
-**Cost.** A body that needs its forks finished must `join` them, use `all`,
-or set `childrenOnExit: 'await'`; a fork forgotten under the default is cut
-short without a report. DESIGN.md §2.1, §2.4.
+**Cost.** A body must `join` or `result` its forks, use a combinator, or
+explicitly cancel them before returning successfully (D46).
+`childrenOnExit` still controls subscriber cleanup, but cannot permit a
+forgotten fork. DESIGN.md §2.1, §2.4.
+
+### D46. A successful body return requires explicit fork joining or cancellation
+
+A body must account for every fork directly on its node before returning
+successfully: a completed `join` or `result`, or
+explicit cancellation through `abort`, disposal, or early release. A child
+finishing on its own is insufficient, and making or starting a join op
+without receiving its completion is insufficient. A completed join from
+another body also accounts for the fork, unless that consumer is halted
+and consumes nothing. Cancellation satisfies the
+obligation without consuming failures; the owner waits for cleanup before
+completing. Failed or aborted bodies clean up automatically, retaining
+their existing outcome and error aggregation. An `observe` body returning
+successfully must account for its forks even after its signal fires.
+
+A forgotten fork changes a successful return to
+`defect(UnjoinedFiberError)` before the outcome is exposed to the owner's
+releases. Remaining subscribers are interrupted even under
+`childrenOnExit: 'await'`. Existing child failures are preserved alongside
+the ownership error through the normal release-error aggregation.
+`onFailure` selects error routing, and `own(f)` selects release order;
+neither satisfies the obligation. Bodiless roots, scopes, DI values, and
+pools retain their supervised lifetimes. Release and shield bodies follow
+the same rule as task bodies. Calls and combinators account for their own
+children.
+
+**Why.** A request could return successfully after an unjoined child had
+failed. Its unit of work read success and committed, then its caller
+received the child's failure at completion. A body-exit check makes this
+programming error visible before the transaction's release decides to
+commit. Checking obligations even for completed children makes the rule
+independent of scheduling. Explicit cancellation expresses the intent to
+stop background work such as a heartbeat, without a redundant join.
+
+**Rejected:** a per-fork exit policy, which adds an abstraction where an
+explicit join or cancellation suffices; silently cancelling forgotten
+forks, which hides the mistake; implicitly joining them, which can wait
+forever on an accidentally forgotten background loop; discarding failures
+after cancellation, which loses errors. **Cost.** Each body retains its
+outstanding fork obligations until joined, cancelled, or exited. Existing
+code relying on implicit successful cleanup must join or cancel explicitly.
+Release failures, including a cancelled child's cleanup failure, can still
+amend an outcome after a transaction's commit decision: this is not a
+guarantee of rollback on every eventual completion error. This amends D18,
+D14, and the unit-of-work caveat in D33. DESIGN.md §2.4, §2.6, §4.5, §4.12.
 
 ### D20. Three interruption modes
 
@@ -2183,8 +2232,10 @@ a held failure would wait for a `join` no body makes. **Rejected:** `'link'`
 as the default, which turns every background failure into its parent's
 death; a handler called at settling, before the fiber's releases have run;
 a handler that cannot hold its parent; holding an owned fiber's failure
-like a subscriber's. **Cost.** An unjoined `'join'` failure is reported
-only when the parent completes, which may be much later. While a handler's
+like a subscriber's. **Cost.** A `'join'` failure is held until consumed or
+the parent completes, which may be much later. D46 independently rejects a
+successful body return with an unjoined, uncancelled fork before releases
+run. While a handler's
 hold lasts, a node entry can be released before a passive entry attached
 above it, the one exception to C4's order. DESIGN.md §2.6, §4.7.
 
@@ -2518,9 +2569,10 @@ Settled while implementing it:
   is what makes `owner.outcome` readable in every release, so a transaction
   entry can commit or roll back on its owner's outcome; an outcome computed
   only at completion would not exist until every release had run. The
-  price: a release reads the outcome from the body alone. A failure that an
-  earlier release or an unconsumed child adds is folded in after it, so a
-  transaction can commit on a node that then completes `failure`.
+  price: a release reads the outcome fixed at settling. D46 includes the
+  forgotten-fork check there. A failure that an earlier release or a
+  cancelled child's cleanup adds is folded in afterward, so a transaction
+  can still commit on a node that then completes `defect`.
 - *A release is idempotent by its entry's state, and its promise exists
   before any dispose code runs.* The entry is marked releasing, with a
   fresh promise, before its release fiber starts; any release that finds it
@@ -2581,7 +2633,7 @@ Settled while implementing it:
 ### D17. Three error types beyond the core set
 
 Besides `NoCurrentNodeError`, `NodeCompletedError`, `PendingNodeError`,
-`NotOwnedError`, `AlreadyOwnedError`, `FiberNotAwaitableError`,
+`NotOwnedError`, `AlreadyOwnedError`, `FiberNotAwaitableError`, `UnjoinedFiberError` (D46),
 `FiberAbortedError`, `PoolClosedError`, `CreationViolationError`,
 `AsyncRunError` and `PlacementError`, ramme
 exports `PoolFullError` (for `whenFull: 'reject'`), `OwnerInterrupt` (the

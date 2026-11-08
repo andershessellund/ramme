@@ -213,6 +213,12 @@ Its release returns `this.commit()` or `this.rollback()`, an op, which ramme
 runs as the release: in a node of its own, which no interruption cuts, and
 to its end before the lease is returned.
 
+The request must join or explicitly cancel every fork before returning.
+Forgetting one makes its outcome a defect before this release runs, so it
+rolls back even if that child already finished. Release failures, including
+a cancelled child's cleanup failure, can still amend the outcome later;
+this pattern does not promise rollback on every eventual completion error.
+
 The request's fiber must carry `RequestScope`, as `handle` does, so that
 its outcome is how the request ended. A bodiless
 `child({ scopes: [RequestScope] })` reports how it was ended, not how its
@@ -315,22 +321,35 @@ const report = task(function* report(id: string) {
 
 A fiber is not a promise: `await audit` throws. Use `join(f)` for the value
 or `result(f)` for the outcome (`success` / `failure` / `defect` /
-`aborted`, below). A fork
-you never join is interrupted when its parent's body returns, and its
-failure, if any, surfaces from the parent. It is never an unhandled
-rejection.
+`aborted`, below). Before a body returns successfully, every fork on its
+node must have completed a `join` or `result`, or been explicitly cancelled
+with `f.abort()`. A child finishing on its own does not satisfy this rule,
+and merely making a `join(f)` op does not run it.
+
+A forgotten fork makes the body's outcome a `UnjoinedFiberError` defect
+before releases run; remaining subscribed children are interrupted and
+the node waits for cleanup. Cancellation also waits for cleanup at node
+completion and does not discard failures. A body that fails or is
+aborted cleans up its children automatically. An `observe` body returning
+successfully still follows the rule after its signal fires. Neither `onFailure`,
+`own(f)`, nor `childrenOnExit` waives the rule. Background work belongs to
+a supervisor such as a bodiless root or a pool.
 
 Something that repeats is a fork that loops on `sleep`:
 
 ```ts
 const session = task(function* session(user: User) {
-  fork(function* heartbeat() {
+  const heartbeat = fork(function* heartbeat() {
     for (;;) {
       yield* sleep(30_000);                 // an interrupted loop is halted here, its timer cleared
       yield* sendHeartbeat(user);
     }
   });
-  yield* serve(user);                       // when serve returns, the heartbeat is interrupted
+  try {
+    yield* serve(user);
+  } finally {
+    heartbeat.abort();                     // explicit cancellation; cleanup finishes before session completes
+  }
 });
 ```
 
@@ -582,6 +601,7 @@ node a test scopes with it.
 | `CreationViolationError` | `lookup` (or a task's call) inside a constructor or factory, or `inject` outside one. |
 | `NodeCompletedError` | A node, or a service, was used after it was released. |
 | `FiberNotAwaitableError` | `await fiber`: use `join(fiber)` or `result(fiber)`. |
+| `UnjoinedFiberError` | A body returned successfully without joining or explicitly cancelling every fork it owns. |
 | `FiberAbortedError` | `join` / a task's call / `all` / `race` of work that was interrupted, by code that is not itself interrupted (top level, a platform callback, or a body whose own node was not aborted). Your own interruption is no error: it halts your task. |
 | `TypeError` naming `function*` | An `async` function was passed as a body: write it as `function*`. |
 

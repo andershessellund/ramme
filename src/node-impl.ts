@@ -87,6 +87,7 @@ import {
   CreationViolationError,
   FiberAbortedError,
   FiberNotAwaitableError,
+  UnjoinedFiberError,
   NodeCompletedError,
   NotOwnedError,
   OwnerInterrupt,
@@ -750,6 +751,8 @@ export class NodeImpl implements Context {
   // --- body and outcome ---
   bodyStarted = false;
   bodyDone = false;
+  /** Fork obligations survive child completion; only an observed join or explicit abort discharges one. */
+  private unjoinedForks: Set<NodeImpl> | undefined;
   closeRequested = false;
   exitKind: 'interrupt' | 'await' | undefined = undefined;
   /** Fixed at settling; amended once at completion (DESIGN.md §4.12). */
@@ -937,8 +940,9 @@ export class NodeImpl implements Context {
   }
 
   abort(reason?: unknown): void {
-    if (this.state === 'complete') return; // idempotent (DESIGN.md §2.7)
     if (this.state === 'pending') throw new PendingNodeError(`abort() on pending node ${describeNode(this)}`);
+    this.dischargeFork();
+    if (this.state === 'complete') return; // idempotent (DESIGN.md §2.7)
     this.abortInternal(reason === undefined ? new DOMException('This operation was aborted', 'AbortError') : reason);
   }
 
@@ -1145,7 +1149,20 @@ export class NodeImpl implements Context {
     if (this.bodyDone) return; // I2: once
     this.bodyDone = true;
     this.clearTimers();
-    this.outcome = classify(this, r); // fixed NOW, readable by every release (DESIGN.md §2.8, §2.6)
+    this.outcome = classify(this, r);
+    // Validate before settling exposes the outcome to releases, including transaction commit/rollback (D46).
+    if (this.outcome.status === 'success' && this.unjoinedForks?.size) {
+      this.outcome = {
+        status: 'defect',
+        error: new UnjoinedFiberError(
+          `the body of ${describeNode(this)} returned without joining or aborting: ` +
+            [...this.unjoinedForks].map(describeNode).join(', ') +
+            '. Use yield* join(f), yield* result(f), or f.abort() before returning',
+        ),
+      };
+      this.exitKind = 'interrupt'; // a forgotten child cannot keep a failed body open under childrenOnExit: 'await'
+    }
+    this.unjoinedForks = undefined;
     this.state = 'settling';
     if (this.pooled && r.kind === 'unstarted') poolChildSettled(this.up!, this); // D15: a waiter leaves the queue now
     this.emit({ type: 'node:settled', outcome: this.outcome.status });
@@ -1287,6 +1304,7 @@ export class NodeImpl implements Context {
 
   /** Never throws. Returns undefined when the release completed synchronously, else the entry's `done`. */
   releaseEntry(e: Entry, early: boolean): Promise<void> | undefined {
+    if (early) e.node?.dischargeFork(); // explicit release()/releaseAll() requests cancellation too
     if (e.state !== 'live') return e.state === 'released' ? undefined : e.done; // once (I2/C4/C7, D16)
     const deadline = releaseDeadline(this.releaseTimeoutMs); // before the entry changes (DESIGN.md §2.1)
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -1574,6 +1592,11 @@ export class NodeImpl implements Context {
     this.failureHolder()?.unconsumed.delete(r);
   }
 
+  /** A completed join, or explicit abort, accounts for this fork in its body's owner. */
+  private dischargeFork(): void {
+    this.up?.unjoinedForks?.delete(this);
+  }
+
   /** Where this node's failure record is held: its parent, or, for a member of a `settle` group, the group's parent (D31). */
   private failureHolder(): NodeImpl | undefined {
     const p = this.up;
@@ -1613,6 +1636,7 @@ export class NodeImpl implements Context {
     return {
       source: f.completion,
       deliver: (_, applied) => {
+        if (!applied) f.dischargeFork(); // a halted consumer leaves both the failure and the obligation with the owner
         ev.emit({ type: 'join:leave', joinedId: f.id, outcome: f.outcome!.status }); // a halted waiter never gets here
         return step(applied);
       },
@@ -1871,6 +1895,7 @@ export class NodeImpl implements Context {
           'Pass onFailure (a handler or \'link\'), fork from a body, or use pool().',
       );
     const child = this.makeFiber(task, args, dest);
+    if (this.hasBody && !this.bodyDone) (this.unjoinedForks ??= new Set()).add(child);
     if (child.state !== 'complete') child.scheduleStart(); // I20: never in the forker's frame
     return child as unknown as Fiber<unknown, unknown>;
   }
@@ -2030,6 +2055,7 @@ export class NodeImpl implements Context {
         // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt, so no member's
         // failure is consumed before every member has completed, nor by an interrupted group.
         yield* settledOp(Promise.all(fibers.map((f) => f.completion)));
+        for (const f of fibers) f.dischargeFork();
         const fail = groupFailure(fibers, (n) => `${n} of ${fibers.length} tasks failed`);
         if (fail !== undefined) return yield* failWith(fail.expected); // a member's expected failure, re-yielded (D42)
         const aborted = fibers.find((f) => f.outcome!.status === 'aborted');
@@ -2074,10 +2100,12 @@ export class NodeImpl implements Context {
           const won: NodeImpl = winner;
           for (const f of fibers) if (f !== won && f.state === 'running') f.abort(); // abort and wait for the rest (DESIGN.md §4.8)
           yield* settledOp(all);
+          for (const f of fibers) f.dischargeFork();
           for (const f of fibers) f.consumeFailure(); // a loser's failure is not the race's (DESIGN.md §4.8)
           return (won.outcome as { value: T }).value;
         }
         yield* settledOp(all);
+        for (const f of fibers) f.dischargeFork();
         const fail = groupFailure(fibers, () => 'every task failed');
         if (fail !== undefined) return yield* failWith(fail.expected); // a member's expected failure, re-yielded (D42)
         throw new FiberAbortedError((fibers[0].outcome as { reason: unknown }).reason, 'every task was aborted'); // every member aborted (DESIGN.md §4.8)
@@ -2106,6 +2134,7 @@ export class NodeImpl implements Context {
           // One wait over never-rejecting sources (DESIGN.md §4.8, D13′), returned at once by a halt. No member is
           // aborted on a sibling's account: the group waits for every one.
           yield* settledOp(Promise.all(settleFibers(g).map((f) => f.completion)));
+          for (const f of settleFibers(g)) f.dischargeFork();
         },
       } satisfies TaskLike<[], void>,
       [],

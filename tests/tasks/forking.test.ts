@@ -244,16 +244,17 @@ describe('fork', () => {
     expect(() => fork(function* () { return 'hello'; })).toThrow(NoCurrentNodeError);
   });
 
-  it("the parent's body exit: under childrenOnExit 'await' the fork finishes naturally; by default it is interrupted, and the call still waits for it", async () => {
+  it("explicit join lets a fork finish naturally; explicit abort stops it and the call waits for cleanup", async () => {
     const ctx = createRootContext();
     let completed = false;
     await ctx.call(
       task(
         function* () {
-          fork(function* () {
+          const f = fork(function* () {
             yield* wait(sleep(30));
             completed = true;
           });
+          yield* join(f);
         },
         { childrenOnExit: 'await' },
       ),
@@ -269,6 +270,7 @@ describe('fork', () => {
         t.push('resumed');
       });
       yield* wait(tick()); // let it start
+      forked.abort();
     });
     expect(t.log).toEqual(['fork released']); // released before the call resolved
     expect(forked?.state).toBe('complete');

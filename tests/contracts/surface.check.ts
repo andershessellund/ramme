@@ -246,7 +246,7 @@ export function generatorReleases(ctx: Context): void {
 }
 
 /**
- * The core's values, exactly: 56 of the 87 names the surface check lists (scripts/check-surface.mjs), which also
+ * The core's values, exactly: 57 of the 88 names the surface check lists (scripts/check-surface.mjs), which also
  * checks the 31 types, which a namespace object does not carry.
  */
 type _CoreValues = Expect<
@@ -258,7 +258,7 @@ type _CoreValues = Expect<
     | 'sleep' | 'wait' | 'promised' | 'fail' | 'runSync'
     | 'inject' | 'ContextKey'
     | 'NoCurrentNodeError' | 'NodeCompletedError' | 'PendingNodeError' | 'NotOwnedError' | 'AlreadyOwnedError'
-    | 'FiberNotAwaitableError' | 'FiberAbortedError' | 'PoolClosedError'
+    | 'FiberNotAwaitableError' | 'UnjoinedFiberError' | 'FiberAbortedError' | 'PoolClosedError'
     | 'PoolFullError' | 'CreationViolationError' | 'FactoryReturnedUndefinedError' | 'AsyncRunError'
     | 'PlacementError' | 'OwnerInterrupt'
     | 'createInjectionKey' | 'createKeyFor' | 'setScope' | 'setDependencies'
