@@ -1,0 +1,60 @@
+# The repository's gates, each its own step, on Node 22 and 24, the oldest supported lines (package.json "engines":
+# Node 22+), and the browser smoke test in headless Chromium (vitest.browser.config.ts). pnpm's version is
+# package.json's "packageManager", which pnpm/action-setup reads.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Gates (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck
+        run: pnpm typecheck
+      - name: lint
+        run: pnpm lint
+      - name: test
+        run: pnpm test
+      - name: build
+        run: pnpm build
+      - name: check:package
+        run: pnpm check:package
+      - name: check:plugin
+        run: pnpm check:plugin
+      - name: check:docs
+        run: pnpm check:docs
+      - name: bench
+        run: pnpm bench
+
+  browser:
+    name: Browser smoke test (Chromium, Node 24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: test:browser
+        run: pnpm test:browser

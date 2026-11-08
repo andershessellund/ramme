@@ -6,6 +6,13 @@ the tree answers both *what it may depend on* and *when it dies*. Ancestors
 outlive descendants, and you only ever resolve from ancestors, so nothing
 you can resolve dies before you do.
 
+Adopting ramme means writing bodies as generator functions, where every
+wait is a `yield*` and every function that waits is a task. Async libraries
+are reached through `wait`, `promised` and `ramme/platform`. It is an
+execution model for the whole application, not a utility added to one
+module, and the trade is that interruption, lifetime and dependency
+placement become one structure the runtime enforces.
+
 *Ramme* is Danish for frame: scoped resolution is literally "inden for
 rammerne af", within the frame of.
 
@@ -336,41 +343,53 @@ everything attached to it, until the timer fires. Outside any node,
 
 An interruption *halts* a body: ramme returns its generator at the `yield*`
 where it waits. No `catch` sees it, every `finally` runs, and nothing after
-that `yield*` does; the task's outcome is `aborted`, whatever it then does.
-When the body is returned depends on what it waits on: at once for a
-`sleep`, a `never()`, an owned fork's `join`; once the awaited work has
-stopped for a task's call, an `all`, a `join` of a fork it made; and after it
-finishes for a release or a foreign promise. A `finally` in the body itself
-may wait, and the interruption does not cut what it waits on, so cleanup
-can wait for a rollback:
+that `yield*` does; the task's outcome is `aborted`, unless its cleanup
+fails: a `finally` that throws, or a wait in it that fails, makes the
+outcome a `defect`, which is reported. When the body is returned depends on
+what it waits on: at once for a `sleep`, a `never()`, an owned fork's
+`join`; once the awaited work has stopped for a task's call, an `all`, a
+`join` of a fork it made; and for a release or a foreign promise, after it
+finishes: the body is resumed with its value once, so it can own it, and
+stops at its next wait. The `finally` the halt runs may wait, and the
+interruption does not cut what it waits on, so cleanup can wait for a
+rollback:
 
 ```ts
 import { own, task, wait } from 'ramme';
 
 const transfer = task(function* transfer(from: Id, to: Id, amount: number) {
-  const conn = own(yield* wait(db.connect()), (c) => c.release());   // halted while connecting: still owned
-  yield* wait(conn.query('BEGIN'));
+  const conn = own(yield* wait(db.connect()), (c) => c.release());   // interrupted while connecting: still owned
+  yield* wait((signal) => conn.query('BEGIN', signal));              // not started at all once interrupted
   let done = false;
   try {
     yield* debit(conn, from, amount);              // halted here: debit stops and completes first
     yield* credit(conn, to, amount);
-    yield* wait(conn.query('COMMIT'));
+    yield* wait((signal) => conn.query('COMMIT', signal));
     done = true;
   } catch (e) {
     throw translate(e);                            // a real failure of debit or credit, never the interruption
   } finally {
-    if (!done) yield* wait(conn.query('ROLLBACK'));  // runs to its end; a failed ROLLBACK is reported
+    if (!done) yield* wait((signal) => conn.query('ROLLBACK', signal));  // runs to its end; a failed ROLLBACK is reported
   }
 });
 ```
 
-A foreign promise is `yield* wait(p)`: the halt lets `p` finish, so what it
-produced can still be owned, and `wait(p, { abandon: true })` stops waiting
-at once instead. `wait((signal) => driver.query(sql, { signal }))` hands the
-work the task's signal (for `fetch`, `yield* fetch(url)` from
-`ramme/platform` does it for you). A library that calls you back with an
-async function gets `promised(function* …)`, which runs your generator as a
-child of the current task and hands the library a real promise:
+Start foreign work with `wait((signal) => p)`: hand the signal on, and the
+work stops when you do (`wait((signal) => driver.query(sql, { signal }))`;
+for `fetch`, `yield* fetch(url)` from `ramme/platform` does it for you); an
+interrupted body starts it only in the `finally` the halt runs, as the
+`ROLLBACK` above. A promise that already exists is
+`yield* wait(p)`, for acquisition you want to finish so you can own what it
+produced, as `db.connect()` above: an interrupted body finishes the wait it
+is in, then stops at its next. `wait(p, { abandon: true })` stops waiting at
+once instead. Past the wait in flight, every `wait` an interrupted body
+yields stops at once, except in the `finally` the halt runs, which waits for
+everything it yields; a `finally` the body enters on its own after the
+interruption, by a `return` or a throw, stops at its first wait, so cleanup
+that must finish belongs in `own(...)`. A library that
+calls you back with an async function gets `promised(function* …)`, which
+runs your generator as a child of the current task and hands the library a
+real promise:
 
 ```ts
 import { promised, task, wait } from 'ramme';
@@ -419,21 +438,26 @@ not a token with a factory. The rules:
 
 - **Own it before the work.** Anything that must be undone is attached with
   `own(...)` and released by its node, however the body ends. ramme cannot
-  see what a `finally` cleans up, and an interruption that halts a
-  `finally` reached by normal completion cuts it short, so keep invariants
-  in `own`. `await using` for the root at the top level is fine.
+  see what a `finally` cleans up, and an interruption cuts short a
+  `finally` the body reached on its own (by finishing its `try`, a `return`
+  or a throw) at its first wait, so keep invariants in `own`. `await using`
+  for the root at the top level is fine.
 - **Every wait is a `yield*`.** Run ramme's ops with `yield*`
   (`yield* api.get(path)`, `yield* sleep(ms)`): an op you make and do not
   yield runs nothing, and the lint reports `api.get(path);` alone when it
-  has type information. Wait for a foreign promise with `yield* wait(p)`,
-  which an interruption lets finish, or `wait(p, { abandon: true })`, which
-  it stops waiting for. Run concurrent work with `all([...])`.
+  has type information. Start foreign work with
+  `yield* wait((signal) => work(signal))`, which an interrupted body starts
+  only in the `finally` the halt runs; wait for a promise that already
+  exists with `yield* wait(p)`: an
+  interrupted body finishes the wait it is in, then stops at its next.
+  `wait(p, { abandon: true })` stops waiting at once. Run concurrent work
+  with `all([...])`.
 - **Every function that waits is a task.** The tree is the call tree: each
   operation runs in a node of its own, which releases what it acquired, is
   interrupted and timed on its own, and shows in a trace. A synchronous
   function is a plain function, and the lint reports a generator function
-  not written inline as a body. A `finally` in a task's body may wait: what it
-  yields after an interruption is not cut by it.
+  not written inline as a body. The `finally` an interruption runs in a
+  task's body may wait: what it yields is not cut by the interruption.
 - **A library's async callback is `promised(function* …)`.** Plain async
   code has no current node after its first `await`: `lookup`, `own` and the
   other free functions throw there. Reach ramme from plain async code
@@ -457,13 +481,15 @@ own `finally` rolls back before your task releases what the driver
 borrowed. Two more things to know about libraries:
 
 - A retry wrapper that retries on any error retries a halted callback: each
-  retry starts already interrupted and is halted at its first `yield*`,
-  repeating only the code before it. Keep writes behind a `yield*`.
+  retry starts already interrupted and is halted at its first `yield*` (or,
+  when that is a `wait(p)`, at the next one after it), repeating the code up
+  to there. Start writes with `wait((signal) => …)` or a task's call, which
+  such a retry never runs.
 - Cleanup that waits for a driver with no timeout of its own (a `ROLLBACK`
   on a dead connection) holds your task, and `await using app` shutdown with
   it, for as long as it hangs: `releaseTimeoutMs` only signals. Give such
   cleanup a driver-level timeout, or hand it the deadline:
-  `yield* wait((signal) => conn.query('ROLLBACK', { signal }))`.
+  `yield* wait((signal) => conn.query('ROLLBACK', signal))`.
 
 ## The platform
 
@@ -473,7 +499,8 @@ ramme needs ES2022 syntax and four runtime APIs, `Promise.withResolvers`,
 `AbortSignal.any`, `AbortSignal.timeout` and the disposal symbols
 (`Symbol.dispose`, `Symbol.asyncDispose`); it defines the two symbols itself
 where they are missing and polyfills nothing else, so on an older runtime
-polyfill the other three.
+polyfill the other three. CI runs the browser smoke test, the core and
+`ramme/platform` through their public entries, in headless Chromium.
 
 Every platform primitive that waits or calls back has a ramme spelling,
 because waiting is where an interruption stops a task and calling back is

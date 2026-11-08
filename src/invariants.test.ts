@@ -1,5 +1,5 @@
 // invariants.test.ts — one named test per invariant of DESIGN.md §10
-// (I1–I26; I10 has two). Each test pins the invariant end to end in ramme's idiom (law 2);
+// (I1–I27; I10 has two). Each test pins the invariant end to end in ramme's idiom (law 2);
 // the edge cases live in the per-module suites the comments name. The
 // candidate scenarios for the probes the review left without a scenario (see
 // probes.test.ts) are here too:
@@ -276,7 +276,7 @@ describe('invariants (DESIGN.md §10)', () => {
   });
 
   // -------------------------------------------------------------------------
-  it('I6 once a freeze or restore node is delivered, its body runs no op it yields on its normal path, except one already started; what its own finally yields is release work, never interrupted; the outcome is aborted', async () => {
+  it('I6 once a freeze or restore node is delivered, its body runs no op it yields on its normal path but lifecycle ops of release work and its one grant’s wait (I27); what its halted finally yields is release work, never interrupted; the outcome is aborted', async () => {
     const t = trace();
     const root = createRootContext();
     const gate = deferred();
@@ -284,10 +284,12 @@ describe('invariants (DESIGN.md §10)', () => {
     const f = root.fork(
       task(function* () {
         const x = own({}, () => void t.push('x released'));
+        const y = own({}, () => void t.push('y released'));
         t.push('before');
-        yield* wait(gate.promise); // delivered meanwhile: a started wait, which the halt lets finish (row 3)
+        yield* wait(gate.promise); // delivered meanwhile: the wait in flight finishes and resumes the body, once (I27)
         t.push('resumed');
-        t.push(`late: ${yield* wait(Promise.resolve('started'))}`); // started before it was yielded: run (row 5)
+        yield* release(y); // release work: still run, and the body is resumed after it
+        t.push('released y');
         try {
           yield* task(function* () {
             workRan = true; // never: not started, so not run; the body is returned here (row 4)
@@ -310,9 +312,64 @@ describe('invariants (DESIGN.md §10)', () => {
     gate.resolve();
     expect(await within(root.result(f))).toEqual({ status: 'aborted', reason: 'stop' }); // by state (D24)
     expect({ log: t.log, workRan }).toEqual({
-      log: ['before', 'resumed', 'late: started', 'finally', 'slept in finally', 'x released', 'released in finally'],
+      log: ['before', 'resumed', 'y released', 'released y', 'finally', 'slept in finally', 'x released', 'released in finally'],
       workRan: false,
     });
+    await root.close();
+  });
+
+  // -------------------------------------------------------------------------
+  it('I27 one grant per halt: a delivered freeze or restore body is resumed once after its delivery, by the wait in flight then or, delivered in its own step, by its first started one, however often it was resumed before; after it a wait(p) returns the body, p abandoned and its rejection handled, and a wait((signal) => p) is never called', async () => {
+    const t = trace();
+    const root = createRootContext();
+    const first = deferred<string>();
+    const second = deferred<string>();
+    const called: string[] = [];
+    // Resumed before its delivery, then delivered in its own step: a resume before the delivery is no grant, so the
+    // first wait after it is, and what it acquires is owned and released.
+    const warm = root.fork(
+      task(function* () {
+        t.push(`warm: ${yield* wait(Promise.resolve('warm-up'))}`);
+        current().abort('stop');
+        const conn = own(yield* wait(Promise.resolve({ id: 1 })), (c) => void t.push(`warm: released ${c.id}`));
+        t.push(`warm: owned ${conn.id}`);
+      }, link),
+    );
+    // Delivered while it waits: the wait in flight is the grant.
+    const inFlight = root.fork(
+      task(function* () {
+        t.push(`in flight: ${yield* wait(first.promise)}`);
+        t.push(`in flight: ${yield* wait(second.promise)}`); // returned here: second abandoned
+      }, link),
+    );
+    // Delivered in its own step: its first started wait is the grant.
+    const ownStep = root.fork(
+      task(function* () {
+        current().abort('stop');
+        t.push(`own step: ${yield* wait(Promise.resolve('granted'))}`);
+        t.push(
+          `own step: ${yield* wait(() => {
+            called.push('never'); // returned here: not called
+            return Promise.resolve('not granted');
+          })}`,
+        );
+      }, link),
+    );
+    await tick();
+    inFlight.abort('stop');
+    first.resolve('first');
+    const outcomes = await within(Promise.all([root.result(inFlight), root.result(ownStep), root.result(warm)]));
+    const whileSecondPending = inFlight.state;
+    second.reject(new Error('the abandoned wait failed late')); // handled: the setup's guard hears no rejection
+    await tick(2);
+    expect({ log: [...t.log].sort(), called, whileSecondPending, outcomes: outcomes.map((o) => o.status) }).toEqual({
+      // three bodies: in any order between them, sorted here
+      log: ['in flight: first', 'own step: granted', 'warm: owned 1', 'warm: released 1', 'warm: warm-up'],
+      called: [],
+      whileSecondPending: 'complete',
+      outcomes: ['aborted', 'aborted', 'aborted'],
+    });
+    expect(t.log.filter((l) => l.startsWith('warm'))).toEqual(['warm: warm-up', 'warm: owned 1', 'warm: released 1']);
     await root.close();
   });
 

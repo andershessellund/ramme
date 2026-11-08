@@ -746,7 +746,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
     await root.close();
   });
 
-  it('decision 29: after a lost halt the helper’s yield* gives the body the halt’s sentinel, and in dev mode any use of it reports the lost halt, once: rows.map, whose throw is discarded, and String(rows) followed by return rows', async () => {
+  it('decision 29: after a lost halt the helper’s yield* gives the body the halt’s sentinel, and in dev mode any use of it reports the lost halt, once: rows.map, whose throw is a release failure (D45), and String(rows) followed by return rows', async () => {
     const t = trace();
     const reason = new Error('hang up');
     /** A helper whose finally waits: its caller gets the halt's sentinel as the value of the yield*. */
@@ -764,7 +764,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
         function* () {
           const rows = yield* query();
           t.push('mapper ran more work');
-          return rows.map((r) => r.toUpperCase()); // a TypeError, discarded: the node is aborted by state
+          return rows.map((r) => r.toUpperCase()); // a TypeError, thrown in the unwind: a release failure (D45)
         },
         { name: 'mapper', ...quiet },
       ),
@@ -792,7 +792,7 @@ describe('generator bodies: the halted finally, and the halt’s other shapes', 
       warnings: rammeWarnings().length,
     }).toEqual({
       log: ['mapper ran more work', 'passer continued with a string', 'passer ran more work'],
-      outcomes: ['aborted', 'aborted'],
+      outcomes: ['defect', 'aborted'], // aborted by state (D24), the mapper's amended by its release failure
       warned: [1, 1],
       warnings: 2,
     });

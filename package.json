@@ -55,6 +55,7 @@
     "build": "tsc",
     "dev": "tsc -w",
     "test": "vitest run",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.tests.json",
     "check:package": "publint --strict && attw --pack . --profile esm-only && pnpm check:surface",
@@ -72,7 +73,9 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^22.0.0",
+    "@vitest/browser-playwright": "5.0.1",
     "eslint": "^10.10.0",
+    "playwright": "1.64.1",
     "publint": "^0.3.24",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.0.0",

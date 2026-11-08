@@ -73,7 +73,9 @@ export interface Operation<T, E = never> {
  * time, and `then` runs it once, as a child of the node it was made through, settling with its value or its failure
  * (an expected failure's error as the rejection, D42), or `FiberAbortedError` when that child ended `aborted`. The
  * lifecycle verbs (`release`, `releaseAll`, `close`, `[Symbol.asyncDispose]`) start their work when called and return
- * an `Op<void> & Promise<void>`.
+ * an `Op<void> & Promise<void>`. `yield* op` is `T` as it is, a promise included; `await op` is `Awaited<T>`, since a
+ * promise that resolves with a promise flattens. Two places await a value, so: a promise consumer of an op (`await`,
+ * a `then` whose handler returns it), and the real promise `promised`'s function returns (`Promise<Awaited<T>>`).
  */
 export interface Op<T, E = never> extends Operation<T, E>, PromiseLike<T> {}
 
@@ -237,20 +239,24 @@ export interface Task<A extends unknown[], T, E = never> {
   readonly [TASK]: true;
 }
 
-/** The tuple of the members' values, in order; `all([a(1), b('x')])` is `Op<[A, B], EA | EB>`. */
+/**
+ * The tuple of the members' values, in order; `all([a(1), b('x')])` is `Op<[A, B], EA | EB>`. A member's value is what
+ * its body returned, as it is: a body that returns a promise returns the promise (DESIGN.md §4.5), so nothing here is
+ * `Awaited`.
+ */
 export type AllResult<T extends readonly AnyMember[]> = {
-  -readonly [K in keyof T]: T[K] extends Op<infer U, unknown> ? Awaited<U> : T[K] extends Task<[], infer U, unknown> ? Awaited<U> : never;
+  -readonly [K in keyof T]: T[K] extends Op<infer U, unknown> ? U : T[K] extends Task<[], infer U, unknown> ? U : never;
 };
 
 /**
  * The tuple of the members' four-way outcomes, in order; `settle([a(1), b('x')])` is
- * `Op<[Outcome<A, EA>, Outcome<B, EB>]>` (DESIGN.md §4.8).
+ * `Op<[Outcome<A, EA>, Outcome<B, EB>]>` (DESIGN.md §4.8). A member's value is unflattened, as in `AllResult`.
  */
 export type SettleResult<T extends readonly AnyMember[]> = {
   -readonly [K in keyof T]: T[K] extends Op<infer U, unknown>
-    ? Outcome<Awaited<U>, ErrorOf<T[K]>>
+    ? Outcome<U, ErrorOf<T[K]>>
     : T[K] extends Task<[], infer U, unknown>
-      ? Outcome<Awaited<U>, ErrorOf<T[K]>>
+      ? Outcome<U, ErrorOf<T[K]>>
       : never;
 };
 
@@ -262,6 +268,12 @@ export interface PoolOptions extends NodeOptions {
   concurrency?: number;
   /** Default `'wait'`. */
   whenFull?: 'wait' | 'reject';
+  /**
+   * The bound on `pending` under `whenFull: 'wait'`, a non-negative integer; default unbounded. A fork that would
+   * queue beyond it is refused with `PoolFullError`, as `'reject'` refuses one at `concurrency`: `0` is `'reject'`.
+   * Beside `'reject'`, which queues nothing, it is allowed and changes nothing (DESIGN.md §4.10).
+   */
+  maxPending?: number;
 }
 
 /** An unsubscribed bodiless node whose forks are its subscribers (DESIGN.md §4.10). */
@@ -375,11 +387,12 @@ export interface Context {
    */
   sleep(ms: number): Op<void>;
   /**
-   * Wait for a foreign promise (DESIGN.md §4.2): `wait(p)` lets `p` finish when the waiting body is halted, so a
-   * halted body is resumed with its value and returned at its next `yield*` (a failure of `p` then is discarded, as a
-   * halted body's throw is; in its halted `finally` it is a release failure); with `{ abandon: true }` the wait stops
-   * at the halt. `wait((signal) => p)` calls the function when the op runs, handing it this node's signal (the unwind
-   * fiber's deadline in a halted `finally`). A ramme op as `p`, or as what the function returns, is that op's own wait,
+   * Wait for a foreign promise (DESIGN.md §4.2, D45): the `wait(p)` in flight when the waiting body is halted lets `p`
+   * finish, and the body is resumed with its value once and returned at its next `yield*` (a failure of `p` then is
+   * discarded, as a halted body's throw outside its `finally` is; in its halted `finally` it is a release failure); a
+   * `wait(p)` it yields after that abandons `p`, as `{ abandon: true }` does at the halt. `wait((signal) => p)` calls
+   * the function when the op runs, handing it this node's signal (the unwind fiber's deadline in a halted `finally`);
+   * a halted body never calls it. A ramme op as `p`, or as what the function returns, is that op's own wait,
    * its expected failures included, so either is typed by the op's `E`.
    */
   wait<T, E = never>(op: Op<T, E>, opts?: { abandon?: boolean }): Op<T, E>;
@@ -391,9 +404,10 @@ export interface Context {
    * the child's failure, which it consumes unless this node is a halted body (the failure then surfaces at this
    * node's completion), or with `FiberAbortedError` when the child ended `aborted`, with `NodeCompletedError` once
    * this node has completed, and with `CreationViolationError` when called during a creation. A child's expected
-   * failure rejects it with its error (D42).
+   * failure rejects it with its error (D42). A real promise resolved with a promise adopts it, so a body that returns
+   * one gives `Promise<Awaited<T>>`.
    */
-  promised<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>): (...args: A) => Promise<T>;
+  promised<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>): (...args: A) => Promise<Awaited<T>>;
 
   // --- synchronous frames ---
   /** Make this node current for a synchronous `fn`. */

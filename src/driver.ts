@@ -25,19 +25,28 @@
 //    subscribed below it): returned once the awaited fiber has completed,
 //    without its resume step, so nothing is consumed; the shape delivers a
 //    fiber the delivery missed;
-// 3. `release` (release work, `wait(p)`): not at the delivery; resumed on
-//    success, and returned at its next `yield*`; on failure returned there, the
-//    failure unconsumed (a release failure surfaces at completion; `p`'s own is
-//    discarded, as a halted body's throw is).
+// 3. `release` (release work, `wait(p)`, `wait((signal) => p)`): not at the
+//    delivery; on success resumed, once (the grant, D45); on failure returned
+//    there, the failure unconsumed (a release failure surfaces at completion;
+//    `p`'s own is discarded, as a halted body's throw outside its `finally` is).
 //
-// The driver reads the node's state, not a signal: a body that finds its node
+// The driver reads the node's state, not a signal. A body that finds its node
 // applied at a `yield*` of an op that has not started (rows 4 and 5 of
 // decision 8's table, which DESIGN.md §4.2's last row merges; a body born
-// delivered: decision 9) does not run it and is returned there; a started
-// one (`wait(p)` over a promise, a lifecycle op) is subscribed and its shape
-// decides. A return at the delivery, or at such a `yield*`, is a job queued
-// under no frame, never inside `abort()` nor inside the step, so no body code
-// runs inside a delivery, and a fork made just before the halt starts first.
+// delivered: decision 9) does not run it and is returned there. D45's one
+// grant: the body is resumed after its delivery once, by the wait in flight
+// then, or, delivered in a step (its own, or born delivered), by the first
+// started wait it yields (a `wait(p)` over a promise, subscribed as row 3).
+// After the grant a `wait(p)` returns it at its `yield*` too, `p` abandoned
+// with its rejection handled; a lifecycle op is subscribed and its shape
+// decides, so release work still runs and may resume the body again (a
+// `shield`, lazy, is not started). A `finally` the body's own flow enters
+// after the grant, by its `return` or a throw, is that flow, which the driver
+// cannot tell apart: it is returned at that `finally`'s first wait that is not
+// release work, and the rest of the block does not run. A return
+// at the delivery, or at such a `yield*`, is a job queued under no frame,
+// never inside `abort()` nor inside the step, so no body code runs inside a
+// delivery, and a fork made just before the halt starts first.
 //
 // After the halt every `yield*` is inside a `finally` (decision 11, U3): the
 // driver makes the body's unwind fiber, a release fiber of the node that no
@@ -49,8 +58,11 @@
 // release failure. A finally-yield whose wait includes the unwind itself is
 // returned there, with a warning (decision 12). The generator's completion is
 // the node's body exit: a halted body is `aborted` by state whatever its
-// `finally` did (D24). A generator that ends with any value other than the
-// halt's sentinel lost the halt, through a `yield*` in a helper's `finally` or a
+// `finally` did (D24); a throw from it is a release failure (D45), which
+// amends that to a defect, unless it throws what a wait there handed it that
+// is reported without it (`p`'s own, recorded when handed; one a failure
+// record still holds, its holder's). A generator that ends with any value other
+// than the halt's sentinel lost the halt, through a `yield*` in a helper's `finally` or a
 // `return` in a `finally`, and so did one that uses the sentinel, which that
 // helper's `yield*` gave it; dev mode reports either (decision 29; DESIGN.md §4.4).
 //
@@ -75,7 +87,7 @@
 import { runDetached, runInFrame } from './context-storage.js';
 import type { Frame } from './context-storage.js';
 import { describeNode } from './inject.js';
-import { Sub, consumesNothing, heldFailYield, isInstruction, readFail } from './managed.js';
+import { Sub, WorkOp, consumesNothing, failYield, heldFailYield, isInstruction, readFail } from './managed.js';
 import type { Run, WaitsFor } from './managed.js';
 import type { NodeImpl } from './node-impl.js';
 import { SuppressedErrorCtor } from './resource.js';
@@ -147,6 +159,8 @@ function notAnOp(where: string, value: unknown): TypeError {
   return new TypeError(`${where} yielded ${what}: run an op with yield*, as in yield* sleep(1) or yield* t(…)`);
 }
 
+function ignore(): void {}
+
 function next(value?: unknown): Resume {
   return (it) => it.next(value);
 }
@@ -165,11 +179,12 @@ function returnWith(sentinel: unknown): Resume {
 
 /**
  * A callee's expected failure re-yielded (D42): the step sees a `Fail` at the `yield*` that waited, as if the op's
- * iterator had yielded it, without resuming the generator. It is marked held: the callee's own record, which its holder
- * still reports, so in a halted `finally` it is not recorded a second time.
+ * iterator had yielded it, without resuming the generator. `held` when the callee's record still holds it unconsumed,
+ * so its holder reports it and a halted `finally` does not record it a second time; one an earlier consumer took (a
+ * `result(f)` before the halt) is recorded there, as any `Fail` in that `finally` is (D45).
  */
-function yieldFail(error: unknown): Resume {
-  return () => ({ done: false, value: heldFailYield(error) });
+function yieldFail(error: unknown, held: boolean): Resume {
+  return () => ({ done: false, value: held ? heldFailYield(error) : failYield(error) });
 }
 
 /** The wait a driven body is suspended on: its subscription, and the halt hook in its node's `onApplied`. */
@@ -195,6 +210,20 @@ class BodyDriver {
   #halted: { readonly sentinel: unknown; readonly report: () => void } | undefined = undefined;
   /** The fourth exit (D42): the error of the `Fail` that ended the body, which fixes its outcome as `failure`. */
   #failed: { readonly error: unknown } | undefined = undefined;
+  /**
+   * D45: the halt's one grant is spent: the body was resumed after its delivery (by the wait in flight then, or, when
+   * none was, by the first started wait it yielded after it). From now on every op it yields returns it there, except
+   * a lifecycle op, release work. A resume before the delivery spends nothing.
+   */
+  #granted = false;
+  /**
+   * D45: the failures the waits of the unwind handed the generator that are reported without it: a user promise's own,
+   * recorded as a release failure of the node when it was handed, and one a failure record still held unconsumed, its
+   * holder's to report. The generator's throw of the same value is not recorded a second time. Nothing else is here:
+   * ramme's `FiberAbortedError` for an aborted fiber, and a failure an earlier consumer took, are reported by no one
+   * else, so the generator's throw of either is recorded.
+   */
+  readonly #handed = new Set<unknown>();
 
   constructor(node: NodeImpl, it: Driven, frame: Frame) {
     this.#node = node;
@@ -236,10 +265,19 @@ class BodyDriver {
         continue;
       }
       const op = ins.op;
-      // Decision 8's rows 4 and 5 (DESIGN.md §4.2's last row) and decision 9: delivered before this yield* (in its own
-      // step, born delivered, or resumed by release work), the body does not run an op that has not started; it is
-      // returned here.
-      if (this.#halts() && !op.started) return this.#queueHalt();
+      if (this.#halts()) {
+        // Decision 8's rows 4 and 5 and decision 9 (DESIGN.md §4.2's last row): delivered before this yield* (in its own
+        // step, born delivered, or resumed by a wait after the delivery), the body does not run an op that has not
+        // started; it is returned here.
+        if (!op.started) return this.#queueHalt();
+        // D45: after the grant a started wait that is not release work, a `wait(p)` over a promise, returns the body
+        // here too: `p` runs on, its settlement ignored and its rejection handled. A lifecycle op is subscribed, and
+        // its shape decides: release work still runs.
+        if (this.#granted && op instanceof WorkOp) {
+          this.#abandon(op);
+          return this.#queueHalt();
+        }
+      }
       const unwind = this.#unwind?.fiber;
       if (unwind !== undefined) {
         // Decision 12: a wait for the completion of the node, an ancestor, or the unwind itself never ends, since that
@@ -274,11 +312,28 @@ class BodyDriver {
         // The source's `then` threw (a `Promise` subclass that overrides it): a failure of the wait, never an escape
         // from the driver (I10); answered as the source's own rejection would be.
         if (this.#halts()) return this.#queueHalt(); // row 3: a halted body's failed wait returns it, discarded
-        if (unwind !== undefined && run.user === true) unwind.extraErrors.push(e); // p's own failure in the halted finally
+        if (unwind !== undefined && run.user === true) {
+          unwind.extraErrors.push(e); // p's own failure in the halted finally
+          this.#handed.add(e); // reported: a rethrow is not recorded again (D45)
+        }
         resume = throwInto(e);
         continue;
       }
       return;
+    }
+  }
+
+  /**
+   * D45: a started `wait(p)` yielded after the grant is not waited for. Its run is made only to reach `p`, whose
+   * rejection is then handled, so a promise the halted body no longer waits for is never an unhandled rejection (I10).
+   * Nothing is subscribed; a source whose `then` throws subscribed nothing either.
+   */
+  #abandon(op: WorkOp<unknown>): void {
+    try {
+      const run = runInFrame(this.#frame, () => op.start(this.#node, this.#node));
+      runDetached(() => void run.source.then(undefined, ignore));
+    } catch {
+      // nothing was subscribed, so nothing can reject unhandled
     }
   }
 
@@ -326,11 +381,21 @@ class BodyDriver {
     }
     const unwind = this.#unwind?.fiber;
     w.sub.resume(ok, x, consumesNothing(unwind ?? this.#node), (r) => {
-      if (r.ok) return this.step(next(r.value));
+      if (r.ok) {
+        // D45: the grant. A delivered body resumed by the wait in flight at its delivery, or by the first started one
+        // it yielded after it, is resumed this once; release work may resume it again.
+        if (this.#halts()) this.#granted = true;
+        return this.step(next(r.value));
+      }
       // Row 3: release work or wait(p) failed after the halt: returned, the failure unconsumed (or discarded: p's own).
       if (this.#halts()) return this.#halt();
-      if (unwind !== undefined && r.user) unwind.extraErrors.push(r.error); // p's own failure in the halted finally
-      this.step(r.failed === true ? yieldFail(r.error) : throwInto(r.error)); // a callee's fail is re-yielded (D42)
+      if (unwind !== undefined) {
+        if (r.user) unwind.extraErrors.push(r.error); // p's own failure in the halted finally
+        // Reported without the generator: a rethrow is not recorded again (D45). A thrown error no record holds is not.
+        if (r.failed !== true && (r.user || r.held === true)) this.#handed.add(r.error);
+      }
+      // A callee's fail is re-yielded (D42), as held as its record is.
+      this.step(r.failed === true ? yieldFail(r.error, r.held === true) : throwInto(r.error));
     });
   }
 
@@ -340,8 +405,8 @@ class BodyDriver {
    * - In a halted `finally`, or in the `finally` of the body's own fail: a release failure of the node, recorded on the
    *   unwind fiber (a callee's re-yielded one is already its holder's to report), and the generator is returned again,
    *   which ends that `finally`; the outcome stays what the halt or the first fail made it.
-   * - A delivered body not yet halted (resumed by release work): halted here, as at an op not yet started; the error is
-   *   discarded, as its throw would be (D24).
+   * - A delivered body not yet halted (resumed by its grant, or by release work, D45): halted here, as at an op not yet
+   *   started; the error is discarded, as its throw outside a `finally` would be (D24).
    * - Otherwise the fourth exit: the outcome is fixed as `failure(e)` now, and the generator is returned under an unwind
    *   fiber, as at a halt, so its `finally` blocks run as release work and may wait.
    */
@@ -398,11 +463,12 @@ class BodyDriver {
         if (halted !== undefined && r.value !== halted.sentinel) halted.report(); // the identity test touches no sentinel
         // The value is discarded: the outcome is aborted by state (D24), or the fail's (D42).
         r = failed !== undefined ? { kind: 'failed', error: failed.error } : { kind: 'returned', value: undefined };
-      } else if (failed !== undefined && r.kind === 'threw') {
-        // A throw from the finally a fail ran: a release failure, reported beside the fail, which still decides (D42).
-        // A halted body's throw is discarded instead (D24): an interruption may have caused it.
-        unwind.fiber.extraErrors.push(r.error);
-        r = { kind: 'failed', error: failed.error };
+      } else if (r.kind === 'threw') {
+        // A throw from the finally a halt or a fail ran: a release failure (D45; D42), recorded on the unwind fiber as a
+        // failed wait there is, so the node's outcome, aborted by state or the fail's, is amended to a defect (D24). A
+        // throw of what a wait handed the finally that is reported without it (`#handed`) is not recorded again.
+        if (!this.#handed.has(r.error)) unwind.fiber.extraErrors.push(r.error);
+        r = failed !== undefined ? { kind: 'failed', error: failed.error } : { kind: 'returned', value: undefined };
       }
       unwind.done(); // the unwind fiber completes after its last op; the node's release loop waits for it
     }
@@ -487,7 +553,7 @@ export function driveHandler(it: Driven, frame: Frame, run: HandlerRun): Promise
       try {
         sub = new Sub(src, (ok, x) =>
           sub.resume(ok, x, false, (res) =>
-            step(res.ok ? next(res.value) : res.failed === true ? yieldFail(res.error) : throwInto(res.error)),
+            step(res.ok ? next(res.value) : res.failed === true ? yieldFail(res.error, res.held === true) : throwInto(res.error)),
           ),
         );
       } catch (e) {

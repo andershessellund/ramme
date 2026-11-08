@@ -23,8 +23,8 @@
 // a halt (DESIGN.md §4.2): `abandon` (returned at once: `sleep`, `never`, an
 // unrelated wait), `call` (returned once the awaited fiber has completed; the
 // shape delivers a fiber the delivery missed) or `release` (release work and
-// `wait(p)`, which the halt lets finish). The driver reads the shape; this
-// module only subscribes (`Sub`) and resumes.
+// `wait(p)`, which the halt lets finish when it is in flight, D45). The driver
+// reads the shape; this module only subscribes (`Sub`) and resumes.
 //
 // The reactions ramme registers on a source hold only a `Sub`, which a
 // settlement or a drop empties, so a halted body's generator and node are not
@@ -86,17 +86,24 @@ export interface Run<S = unknown, T = unknown> {
   readonly watch?: AwaitWatch;
   /** The source is a user promise: its rejection is its own failure, which a halted finally records (DESIGN.md §4.2). */
   readonly user?: boolean;
+  /**
+   * Read right after the resume step threw: whether a failure record still holds what it threw, unconsumed, so the
+   * record's holder reports it (D45): the step consumed nothing, and no consumer before it did. A run without it holds
+   * none of its failures: a user promise's own, or ramme's `FiberAbortedError` for a fiber that ended `aborted`.
+   */
+  readonly held?: () => boolean;
   /** Dropped before it settled (a halt that does not wait): a sleep clears its timer (D34). */
   readonly cancel?: () => void;
 }
 
 /**
  * What a resumed consumer gets. `failed`: the error is a child's expected failure, which a body re-yields as its own
- * `Fail` (D42), and a `then` rejects with.
+ * `Fail` (D42), and a `then` rejects with. `held`: a failure record still holds the error, unconsumed (`Run.held`), so
+ * a halted `finally` that rethrows it does not record it a second time (D45).
  */
 export type Resumed<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: unknown; readonly user: boolean; readonly failed?: boolean };
+  | { readonly ok: false; readonly error: unknown; readonly user: boolean; readonly failed?: boolean; readonly held?: boolean };
 
 /**
  * The run-time brand of a yielded `Fail` (D42, DESIGN.md §4.13): a registered symbol, so `ramme/result`'s `$`, a leaf
@@ -294,7 +301,8 @@ export class Sub<S = unknown, T = unknown> {
         r = { ok: true, value: run.deliver !== undefined ? run.deliver(x as S, applied) : (x as T) }; // DELIVERY: the only place a failure is consumed (D13′)
       } catch (e) {
         // A child's expected failure is re-yielded by a body, and rejects a `then` with its error (D42).
-        r = e instanceof Expected ? { ok: false, error: e.error, user: false, failed: true } : { ok: false, error: e, user: false };
+        const held = run.held?.() === true;
+        r = e instanceof Expected ? { ok: false, error: e.error, user: false, failed: true, held } : { ok: false, error: e, user: false, held };
       }
     try {
       use(r);
@@ -404,7 +412,8 @@ export interface TaskCall {
  * A lazy op (decision 2): the verb ran its guards when it was made (decision 17), and its work runs at each `yield*`
  * and at most once through `then`. A plain thenable (decision 4): `then` only, no `catch` or `finally`, and not a
  * `Promise`. `started` marks a wait whose work began before the op was made (`wait(p)` over a promise): a halted body
- * that yields it still subscribes, as DESIGN.md §4.2's last halt row says. `receiver` is the node the verb was called
+ * that yields it as its grant still subscribes, and the driver abandons one yielded after the grant (DESIGN.md §4.2's
+ * last two halt rows, D45). `receiver` is the node the verb was called
  * on, for U3's host when the op is made in a halted `finally` (`then` only; the driver passes its own awaiter).
  * `name` and `taskCall` say how `fork`, `attempt`, a group or a pool runs the op when handed it (D44, decision 4).
  */
