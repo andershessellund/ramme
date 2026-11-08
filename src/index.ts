@@ -70,6 +70,7 @@ export {
   NotOwnedError,
   AlreadyOwnedError,
   FiberNotAwaitableError,
+  UnjoinedFiberError,
   FiberAbortedError,
   PoolClosedError,
   PoolFullError,

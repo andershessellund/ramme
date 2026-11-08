@@ -1,6 +1,6 @@
 // Tests for tasks / failure handlers.
 import { describe, expect, it, vi } from 'vitest';
-import { current, fork, interrupted, join, lookup, never, own, signal, wait } from '../../src/ambient.js';
+import { current, fork, interrupted, join, lookup, never, own, result, signal, wait } from '../../src/ambient.js';
 import { createInjectionKey } from '../../src/context-key.js';
 import type { Context, Fiber } from '../../src/context.js';
 import { createRootContext } from '../../src/create-context.js';
@@ -42,7 +42,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
         yield* wait(tick());
       }),
     );
-    expect(surfaced).toBe(err);
+    expect(surfaced).toEqual(expect.objectContaining({ name: 'SuppressedError', error: err, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }));
     await root.close(); // nothing left over
   });
 
@@ -229,7 +229,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
       let Y: Context | undefined;
       const done = start(root.call(function* () {
         Y = current();
-        fork(
+        yield* result(fork(
           task(
             function* () {
               throw new Error('fatal');
@@ -251,7 +251,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
               },
             },
           ),
-        );
+        ));
         yield* wait(tick());
         return 'Y ok';
       }));
@@ -285,7 +285,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
             const app = createRootContext();
             const Y = app.fork(
               task(function* () {
-                fork(task(fail, { onFailure: onFailure(app) }));
+                yield* result(fork(task(fail, { onFailure: onFailure(app) })));
                 yield* wait(tick());
                 return 'Y';
               }, link),
@@ -341,7 +341,7 @@ describe('failure destinations (DESIGN.md §4.7)', () => {
           const root = createRootContext();
           const Y: Fiber<string> = root.fork(
             task(function* () {
-              fork(task(fail, { onFailure: onFailure(root, () => Y) }));
+              yield* result(fork(task(fail, { onFailure: onFailure(root, () => Y) })));
               yield* wait(tick());
               return 'Y';
             }, link),

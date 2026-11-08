@@ -275,6 +275,7 @@ describe('a request, end to end', () => {
       forked = handler!.fork(function* () {
         return 'forked through the handler';
       });
+      yield* join(forked);
       return 'ok';
     });
     {

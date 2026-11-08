@@ -65,11 +65,11 @@ describe('unstarted fibers (DESIGN.md §4.6)', () => {
 
 // Keeps the OwnerInterrupt import honest: a parent's natural exit interrupts its subscribers with one (DESIGN.md §2.4).
 describe('body exit (DESIGN.md §2.4)', () => {
-  it("a parent's natural exit delivers an OwnerInterrupt to its subscribers and does not mark itself", async () => {
+  it("a forgotten fork makes the body exit a defect, delivers OwnerInterrupt to subscribers, and does not mark the parent", async () => {
     const app = createRootContext();
     let sub!: Fiber<unknown>;
     let P!: NodeImpl;
-    await app.call(function* () {
+    const o = await app.attempt(function* () {
       P = here();
       sub = here().fork(function* () {
         yield* here().never();
@@ -79,15 +79,15 @@ describe('body exit (DESIGN.md §2.4)', () => {
     expect(sub.signal.reason).toBeInstanceOf(OwnerInterrupt);
     expect((sub.signal.reason as OwnerInterrupt).owner).toBe(P);
     expect(P.delivered).toBe(false);
-    expect(P.outcome?.status).toBe('success');
+    expect(o).toEqual({ status: 'defect', error: expect.objectContaining({ name: 'UnjoinedFiberError' }) });
     await app.close();
   });
 
-  it("childrenOnExit: 'await' waits for subscribers instead of interrupting them", async () => {
+  it("childrenOnExit: 'await' does not permit a body to return with an unjoined fork", async () => {
     const app = createRootContext();
     const gate = deferred();
     let sub!: Fiber<unknown>;
-    const p = start(app.call(
+    const p = start(app.attempt(
       task(
         function* () {
           sub = here().fork(function* () {
@@ -99,10 +99,10 @@ describe('body exit (DESIGN.md §2.4)', () => {
       ),
     ));
     await tick();
-    expect(sub.signal.aborted).toBe(false);
+    expect(sub.signal.aborted).toBe(true);
     gate.resolve();
-    await p;
-    expect(sub.outcome).toEqual({ status: 'success', value: 'natural' });
+    expect(await p).toEqual({ status: 'defect', error: expect.objectContaining({ name: 'UnjoinedFiberError' }) });
+    expect(sub.outcome?.status).toBe('aborted');
     await app.close();
   });
 });

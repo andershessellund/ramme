@@ -142,6 +142,13 @@ When a node's body settles (a bodiless node: on `abort()` or `close()`, or
 at its turn in its parent's release loop, below; a delivered body after it
 has unwound, §4.2):
 
+Before fixing a successful body's outcome, ramme checks its direct forks
+(§4.5, D46). Any fork neither joined nor explicitly cancelled makes that
+outcome a `defect(UnjoinedFiberError)`, visible to every release. Its
+remaining subscribers are interrupted even under `childrenOnExit: 'await'`
+or a prior `close()` request. The node still completes only after cleanup.
+Bodies ending in failure, defect, or abort retain their normal automatic cleanup.
+
 1. **Signal.** Under `childrenOnExit: 'interrupt'` (the default, D18), and
    always after `abort()`, the subscribed subtree is delivered in this tick,
    as each mode forwards (§4.1). A natural body exit delivers with an
@@ -286,8 +293,12 @@ case (§2.4, §4.12) a value's release sees the outcome of the node storing it
 as decided at settling, and a G1 abort after the request settled reads that
 settled outcome. The release phase may later amend the outcome with release
 failures and unconsumed child failures, folded in at completion (§4.12,
-D16), which the release does not see; so a request body that returns while a
-`'join'` fork it never joined has failed still commits.
+D16), which the release does not see. An unjoined fork, even one already
+complete, instead makes a successful body return a defect before settling
+(D46), so this idiom rolls back. Explicit cancellation satisfies the fork
+obligation without consuming failures: a cancelled child's cleanup failure
+can still amend the outcome later. The idiom does not guarantee rollback
+on every eventual completion error.
 
 `releaseAll()` releases the entries on the node's explicit stack at the time
 of the call, top down and one at a time: each release finishes before the
@@ -1100,6 +1111,32 @@ failure re-yielded, a defect thrown) or `result(f)` (the four-way outcome,
 never the failure propagated; an interrupted waiter is halted as §4.2
 says). A body that returns a fiber fails with `FiberNotAwaitableError`.
 
+**Fork ownership (D46).** Before returning successfully, a body must
+account for every direct `fork` on its node:
+complete a `join(f)` or `result(f)`, or explicitly call `f.abort()`.
+Disposal of the fiber, or an explicit `release(f)`/`releaseAll()` that
+cancels it, also satisfies cancellation. Cancellation requests termination;
+the owner still waits for cleanup before completing, and failures are not
+consumed by cancellation. A completed child still needs accounting, and
+making or starting a join without receiving its completion is insufficient.
+A join completed by another body also accounts for the fork, unless that
+consumer is halted and consumes nothing (§4.2).
+
+Otherwise the successful return becomes `defect(UnjoinedFiberError)`
+before the owner's exit releases begin (§2.4). Existing child failures remain
+reported through the normal release-error aggregation (§4.12). A thrown
+or expected body failure, or an aborted body, keeps its outcome and
+automatic child cleanup; no additional ownership defect is imposed.
+An `observe` body returning successfully still follows the rule, even
+after its signal has fired.
+
+The rule applies to synchronous and generator bodies, including release
+and shield bodies. `own(f)`, `onFailure`, and `childrenOnExit` do not waive
+it. Bodiless nodes (roots, scopes, DI values, pools) retain their supervised
+lifetimes and failure destinations (§4.7, §4.10); their forks do not belong
+to a returning body. Calls and the combinators account for the children
+they run. There is no per-fork exit policy.
+
 **`attempt`** is a task's call with `result`'s resume step, as a call is
 `fork` plus `join`. `attempt(op)` of a task's call `t(…args)`, and
 `attempt(t, …args)` and `ctx.attempt(t, …args)`, make the child the call
@@ -1346,6 +1383,8 @@ settled is `aborted`, whatever the body produced, including when its halted
 `finally` returned a value (what it throws is a release failure, below); an
 `observe` node's outcome is its body's
 result; a bodiless node is `success` on `close`, `aborted` on `abort`.
+A would-be successful body return with an outstanding fork obligation is
+instead `defect(UnjoinedFiberError)` before releases begin (§4.5, D46).
 Delivery after settling changes nothing. A yielded `Fail` fixes `failure` at
 the fail, before its `finally` blocks run, so a delivery while they run
 changes nothing either; a body already delivered when it yields one is
@@ -1400,6 +1439,7 @@ or propagated (D31).
 | `NotOwnedError` | `release(x)` of something this node does not own; `own(node)` of another node's entry |
 | `AlreadyOwnedError` | a second release for one object on one node; `own(node)` of an already-owned node |
 | `FiberNotAwaitableError` | awaiting a fiber; a body returning a fiber |
+| `UnjoinedFiberError` | a successful body return with a fork neither joined nor explicitly cancelled (§4.5) |
 | `FiberAbortedError` | `join`, a task's call, `all` or `race` of an aborted fiber by a waiter that is not itself halted; an op awaited through its `then` whose child ended `aborted`; a `promised` callback's aborted child; `[Symbol.asyncDispose]()` of an aborted fiber (it aborts first, §2.7), including a halted body's release-work dispose of a fiber below it (§4.2); `.reason`. `result`, `attempt`, `unshield` and `settle` report `aborted` as an outcome instead. A halted body never sees one for its own interruption, which is `return()` |
 | `PoolClosedError`, `PoolFullError` | pool intake after the signal or `close()`; at capacity with `whenFull: 'reject'`, or with the queue at `maxPending` |
 | `CreationViolationError` | `lookup` or a body-shaped operation during creation; `inject` outside creation; `get(ContextKey)` |

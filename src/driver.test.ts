@@ -1,6 +1,6 @@
 // Tests for runtime / generator driver.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { current, fork, interrupted, join, lookup, never, own, promised, signal, sleep, wait } from './ambient.js';
+import { current, fork, interrupted, join, lookup, never, own, promised, result, signal, sleep, wait } from './ambient.js';
 import { createInjectionKey } from './context-key.js';
 import type { Context, Fiber, Instruction } from './context.js';
 import { createRootContext } from './create-context.js';
@@ -192,7 +192,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
     const parent = root.fork(
       task(
         function* () {
-          fork(
+          yield* result(fork(
             task(
               function* (): Generator<Instruction, never, unknown> {
                 throw new Error('child failed');
@@ -208,7 +208,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
                 },
               },
             ),
-          );
+          ));
           yield* sleep(5);
         },
         { name: 'parent', onFailure: () => {} },
@@ -305,7 +305,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
     const root = app();
     const o = await within(
       root.attempt(function* () {
-        fork(
+        yield* result(fork(
           task(
             function* (): Generator<Instruction, never, unknown> {
               throw new Error('worker failed');
@@ -317,7 +317,7 @@ describe('the driver: returned ops, handlers, refusals', () => {
               },
             },
           ),
-        );
+        ));
         yield* sleep(5);
         return 'owner done';
       }),

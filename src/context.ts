@@ -97,7 +97,7 @@ export interface NodeOptions {
   scopes?: Scope[];
   /** Default `'freeze'`. */
   interrupt?: InterruptMode;
-  /** Default `'interrupt'`: subscribers are interrupted when the body exits. */
+  /** Default `'interrupt'`: subscribers are interrupted when the body exits. Does not waive explicit fork joining/cancellation. */
   childrenOnExit?: 'interrupt' | 'await';
   /** Deliver to this node's own signal after this many milliseconds; `Infinity` means never. At most 2^31 - 1 (TypeError otherwise). */
   timeoutMs?: number;
@@ -324,6 +324,7 @@ export interface Context {
   releaseAll(): Op<void> & Promise<void>;
 
   // --- running bodies in a child of THIS node (DESIGN.md §4.5); E is the body's expected failures (D42) ---
+  /** A body must join/result or explicitly abort each fork before returning successfully, even one already complete. */
   fork<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>, ...args: A): Fiber<T, FailedWith<Y> | E>;
   /**
    * The child's value, or its expected failure re-yielded into this body (D42); its defect is thrown. `ctx.call(t, …args)`
@@ -416,6 +417,7 @@ export interface Context {
   runSync<R, A extends unknown[]>(fn: (...args: A) => R, ...args: A): R;
 
   // --- lifecycle (DESIGN.md §2.7): eager, so each op only waits, and is a promise as well ---
+  /** Request interruption. On a fork, satisfies its owner's explicit cancellation obligation; completion still waits for cleanup. */
   abort(reason?: unknown): void;
   close(): Op<void> & Promise<void>;
   [Symbol.dispose](): void;

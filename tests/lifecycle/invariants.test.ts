@@ -235,7 +235,7 @@ describe('invariants (DESIGN.md §10)', () => {
   it('I4 unsubscribed hear late: an owned fiber and a pool hear the signal only at their turn in the release loop', async () => {
     const t = trace();
     const root = createRootContext();
-    await root.call(function* () {
+    const o = await root.attempt(function* () {
       const p = pool({ name: 'p', onFailure: () => {} });
       p.signal.addEventListener('abort', () => t.push('pool heard'));
       const reaper = own(fork(function* () { return yield* never(); }));
@@ -244,7 +244,9 @@ describe('invariants (DESIGN.md §10)', () => {
       worker.signal.addEventListener('abort', () => t.push('subscriber heard'));
       own(t.at('top entry released'));
       yield* wait(tick());
+      throw new Error('body failed');
     });
+    expect(o).toMatchObject({ status: 'defect', error: { message: 'body failed' } });
     expect(t.log).toEqual(['subscriber heard', 'top entry released', 'owned fiber heard', 'pool heard']);
     await root.close();
   });
@@ -505,8 +507,8 @@ describe('invariants (DESIGN.md §10)', () => {
         yield* wait(tick(3));
       }),
     );
-    expect(err).toBeInstanceOf(AggregateError);
-    expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['dropped join', 'unjoined']);
+    expect(err).toEqual(expect.objectContaining({ name: 'SuppressedError', error: expect.any(AggregateError), suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }));
+    expect((err as { error: AggregateError }).error.errors.map((e: Error) => e.message).sort()).toEqual(['dropped join', 'unjoined']);
     let ran = false;
     const dropped = await root.call(function* () {
       void task(function* () {
@@ -545,7 +547,7 @@ describe('invariants (DESIGN.md §10)', () => {
         yield* wait(tick()); // bare: let it fail; a body that returned at once would interrupt it unstarted (DESIGN.md §2.4, §4.6)
       }),
     );
-    expect(err).toBe(boom); // surfaced from the call fiber's completion
+    expect(err).toEqual(expect.objectContaining({ name: 'SuppressedError', error: boom, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) })); // surfaced from the call fiber's completion
     await expect(parent.close()).resolves.toBeUndefined(); // consumed by that delivery: not again
     await root.close();
   });
@@ -1044,7 +1046,7 @@ describe('invariants (DESIGN.md §10)', () => {
         const ops: Record<string, () => unknown> = {
           get: () => y.get(K),
           call: () => y.call(t),
-          fork: () => y.fork(t),
+          fork: () => y.fork(t).abort(),
           child: () => y.child(),
           pool: () => y.pool({ name: 'p', onFailure: () => {} }),
           all: () => y.all([t]),

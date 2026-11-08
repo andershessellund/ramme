@@ -12,7 +12,7 @@ import { createRootContext } from '../../src/create-context.js';
 import { task } from '../../src/fiber.js';
 import { inject } from '../../src/inject.js';
 import { valueProvider } from '../../src/provider-util.js';
-import { NotOwnedError, PendingNodeError } from '../../src/resource.js';
+import { NotOwnedError, PendingNodeError, UnjoinedFiberError } from '../../src/resource.js';
 import { RequestScope } from '../../src/scope.js';
 import { current, fork, lookup, never, own, release, signal, wait } from '../../src/ambient.js';
 import { tick, trace } from '../support/util.js';
@@ -193,6 +193,24 @@ describe('a value node’s parent is its storage node (DESIGN.md §3.3, D33)', (
 });
 
 describe('the unit-of-work idiom under a request fiber (DESIGN.md §2.6, D33)', () => {
+  it('rolls back before returning an unjoined child failure to the caller', async () => {
+    const t = trace();
+    const root = app(t);
+    const childError = new Error('child failed');
+    const o = await root.attempt(request(function* () {
+      lookup(UnitOfWork).query('insert');
+      fork(() => { throw childError; });
+      yield* wait(tick()); // the failed child has completed before the successful body return
+      return 'ok';
+    }));
+    expect(o.status).toBe('defect');
+    const error = (o as { error: { error: unknown; suppressed: unknown } }).error;
+    expect(error.error).toBe(childError);
+    expect(error.suppressed).toBeInstanceOf(UnjoinedFiberError);
+    expect(t.log).toEqual(['query insert', 'rollback', 'lease returned']);
+    await root.close();
+  });
+
   it('commits on success; the lease is returned after the commit (LIFO)', async () => {
     const t = trace();
     const root = app(t);

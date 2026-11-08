@@ -350,7 +350,7 @@ describe('reentrant shutdown and failure accounting', () => {
       log: t.log,
       bodyFirst: settledBody !== undefined && ownerComplete !== undefined && settledBody.seq < ownerComplete.seq,
     }).toEqual({
-      outcome: { status: 'success', value: 'ok' },
+      outcome: { status: 'defect', error: expect.objectContaining({ name: 'UnjoinedFiberError' }) },
       log: ['handler slept; owner true', 'handler shielded', 'shield done', 'complete'],
       bodyFirst: true,
     });
@@ -657,6 +657,7 @@ describe('reentrant shutdown and failure accounting', () => {
                 });
                 forked.resolve();
                 yield* wait(observerGate.promise); // an observe body: not halted, it runs on
+                yield* result(f); // the observer still returns successfully, so it accounts for its child
               },
               { name: 'observer', interrupt: 'observe' },
             ),

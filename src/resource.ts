@@ -42,6 +42,11 @@ export class FiberNotAwaitableError extends Error {
   override name = 'FiberNotAwaitableError';
 }
 
+/** A body returned successfully without joining or explicitly aborting every fork it owns. */
+export class UnjoinedFiberError extends Error {
+  override name = 'UnjoinedFiberError';
+}
+
 /**
  * The awaited work was aborted: a fiber joined, called or awaited through an op's `then` ended `aborted`
  * (DESIGN.md §4.12). A halted body never sees it for its own interruption, which is `return()`, never an error.
@@ -87,7 +92,7 @@ export class PoolFullError extends Error {
 
 /**
  * The abort reason ramme itself produces: a parent's body exited under
- * `childrenOnExit: 'interrupt'`, or an entry was released at its turn by an
+ * `childrenOnExit: 'interrupt'` or with an unjoined-fork defect, or an entry was released at its turn by an
  * owner that was not itself aborted. Never thrown.
  */
 export class OwnerInterrupt extends Error {

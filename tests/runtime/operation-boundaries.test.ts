@@ -486,7 +486,7 @@ describe('operation boundaries during interruption', () => {
       );
     const types = ev.typesOf(outerId);
     expect({ outer: outer.status === 'defect' ? outer.error : outer.status, later, last: types[types.length - 1] }).toEqual({
-      outer: boom, // surfaced once, from the receiver's completion (I11)
+      outer: expect.objectContaining({ name: 'SuppressedError', error: boom, suppressed: expect.objectContaining({ name: 'UnjoinedFiberError' }) }), // surfaced once, from the receiver's completion (I11)
       later: { join: 'NodeCompletedError', result: 'NodeCompletedError', call: 'NodeCompletedError' },
       last: 'node:complete',
     });
