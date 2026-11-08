@@ -51,7 +51,7 @@ const SKIP = new Set([
   'scripts/check-docs.mjs',
   'scripts/check-doc-blocks.mjs',
   'scripts/doc-references.mjs',
-  'src/test/scripts.test.ts',
+  'tests/tooling/scripts.test.ts',
 ]);
 /** The extensions of the files the cross-reference rules read. */
 const SCANNED = /\.(md|ts|mts|cts|js|mjs|cjs|json)$/;

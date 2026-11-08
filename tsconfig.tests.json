@@ -3,10 +3,15 @@
   "compilerOptions": {
     "noEmit": true,
     "lib": ["ES2024", "ESNext.Disposable", "DOM"],
-    // src/test/surface.check.ts imports the package by name: here that is the source surface;
-    // scripts/tsconfig.surface.json compiles the same probe against dist/index.d.ts (D-110).
-    "paths": { "ramme": ["./src/index.ts"] }
+    "rootDir": ".",
+    // tests/contracts/surface.check.ts imports the package by name: here that is the source surface;
+    // scripts/tsconfig.surface.json compiles the same probe against dist/index.d.ts.
+    "paths": {
+      "ramme": ["./src/index.ts"],
+      "ramme/result": ["./src/result.ts"],
+      "ramme/platform": ["./src/platform.ts"]
+    }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "tests/**/*"],
   "exclude": []
 }

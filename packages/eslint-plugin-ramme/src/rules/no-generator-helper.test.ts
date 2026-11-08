@@ -1,4 +1,4 @@
-// The pins of no-generator-helper (stage 6a, decision 5), written before the rule: ramme has no helpers, so a
+// Tests for no-generator-helper (D44, decision 5): ramme has no helpers, so a
 // generator function is a task body (free or bound, named or inline in `fork`/`attempt`), a `promised` body or an
 // `own(value, function* (v) {…})` release entry, and nothing else. Reported: a generator declaration, a generator
 // method (class or object literal), and a generator expression assigned to a variable or property or passed to
@@ -47,7 +47,7 @@ ruleTester.run('no-generator-helper', noGeneratorHelper, {
       name: 'a plain function and an async function are no generators',
       code: `${imports}export function parse(s: string) { return s; }\nexport async function load() { return 1; }\nexport const f = () => 1;`,
     },
-    // Beyond the pins: the other body positions, and what the rule leaves alone (the plugin README).
+    // the other body positions, and what the rule leaves alone (the plugin README).
     {
       name: 'an inline shield, unshield or node’s call body, and an onFailure handler',
       code: `${imports}declare const app: { call(b: () => Generator): Promise<unknown> };\nexport const main = task(function* main() { yield* shield(function* () { yield* unshield(function* () { yield* sleep(1); }); }); }, { onFailure: function* (e) { void e; yield* sleep(1); } });\nawait app.call(function* main() { yield* sleep(1); });`,
@@ -89,7 +89,7 @@ ruleTester.run('no-generator-helper', noGeneratorHelper, {
       code: `${imports}export const helpers = {\n  *parse() { yield* sleep(1); },\n};`,
       errors: [{ message, line: 3 }],
     },
-    // Beyond the pins: a method named onFailure that is no option of a call.
+    // a method named onFailure that is no option of a call.
     {
       name: 'a generator method named onFailure of a class, and a computed one: no failure handler’s option',
       code: `${imports}export class Handlers {\n  *onFailure() { yield* sleep(1); }\n}\nexport const h = {\n  *['onFailure']() { yield* sleep(1); },\n};`,

@@ -7,9 +7,8 @@
 //
 // Run it on a tree that still has the free `call` and the `Task` methods: it
 // type-checks the project with tsconfig.tests.json and reads, for every call,
-// the declaration it resolves to. With no files it rewrites src/*.test.ts and
-// src/test/*.ts, less src/stage6-pin.test.ts (written in the new form). In each
-// file:
+// the declaration it resolves to. With no files it rewrites the TypeScript
+// files under tests/. In each file:
 //
 // - the free `call(t, …args)` (`call` imported, or `ns.call` on a namespace
 //   import) becomes `t(…args)` when `t` is a task, and `task(body)(…args)`
@@ -39,28 +38,23 @@ const root = path.resolve(new URL('..', import.meta.url).pathname);
 const args = process.argv.slice(2);
 const dry = args.includes('--dry');
 const named = args.filter((a) => !a.startsWith('--')).map((f) => path.resolve(f));
-const SKIP = new Set([path.join(root, 'src', 'stage6-pin.test.ts')]);
 const files =
   named.length > 0
     ? named
-    : [
-        ...readdirSync(path.join(root, 'src'))
-          .filter((f) => f.endsWith('.test.ts'))
-          .map((f) => path.join(root, 'src', f)),
-        ...readdirSync(path.join(root, 'src', 'test'))
-          .filter((f) => f.endsWith('.ts'))
-          .map((f) => path.join(root, 'src', 'test', f)),
-      ].filter((f) => !SKIP.has(f));
+    : readdirSync(path.join(root, 'tests'), { recursive: true })
+        .filter((f) => f.endsWith('.ts'))
+        .map((f) => path.join(root, 'tests', f))
+        .sort();
 
 const configPath = path.join(root, 'tsconfig.tests.json');
 const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} });
 const program = ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options });
 const checker = program.getTypeChecker();
 
-/** ramme's own sources: src/, less the tests and the test helpers. */
+/** ramme's implementation sources. */
 function isRammeFile(fileName) {
   const f = path.resolve(fileName);
-  return f.startsWith(path.join(root, 'src') + path.sep) && !f.endsWith('.test.ts') && !f.includes(`${path.sep}src${path.sep}test${path.sep}`);
+  return f.startsWith(path.join(root, 'src') + path.sep);
 }
 
 function declName(decl) {

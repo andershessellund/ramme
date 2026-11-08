@@ -5,7 +5,7 @@
 //
 //   node scripts/codemod-generator-bodies.mjs [--dry] [files…]
 //
-// With no files it rewrites src/*.test.ts. It type-checks the project with
+// With no files it rewrites tests/**/*.test.ts. It type-checks the project with
 // tsconfig.tests.json and, in each file:
 //
 // - rewrites an `async` function in a body position to a `function*`: the
@@ -50,9 +50,10 @@ const named = args.filter((a) => !a.startsWith('--')).map((f) => path.resolve(f)
 const files =
   named.length > 0
     ? named
-    : readdirSync(path.join(root, 'src'))
+    : readdirSync(path.join(root, 'tests'), { recursive: true })
         .filter((f) => f.endsWith('.test.ts'))
-        .map((f) => path.join(root, 'src', f));
+        .map((f) => path.join(root, 'tests', f))
+        .sort();
 
 const configPath = path.join(root, 'tsconfig.tests.json');
 const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} });
@@ -61,10 +62,10 @@ const checker = program.getTypeChecker();
 
 /** The verbs whose first argument is a body. */
 const BODY_VERBS = new Set(['task', 'fork', 'call', 'attempt', 'shield', 'unshield', 'promised']);
-/** ramme's own sources: src/, less the tests and the test helpers. */
+/** ramme's implementation sources. */
 function isRammeFile(fileName) {
   const f = path.resolve(fileName);
-  return f.startsWith(path.join(root, 'src') + path.sep) && !f.endsWith('.test.ts') && !f.includes(`${path.sep}src${path.sep}test${path.sep}`);
+  return f.startsWith(path.join(root, 'src') + path.sep);
 }
 
 /** The declaration a call resolves to, if it is ramme's. */

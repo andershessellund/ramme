@@ -742,6 +742,27 @@ says what each rule flags, why, and where it is approximate.
   shutdown-aware tasks, release deadlines, lifecycle events).
 - [DECISIONS.md](DECISIONS.md): why it is this way and not another way.
 
+## Development
+
+Tests live in `tests/`, grouped by the behavior they cover:
+
+- `di/`: resolution, providers, scopes and service creation.
+- `runtime/` and `lifecycle/`: generator execution, interruption, node ownership and shutdown.
+- `tasks/`, `platform/`, `result/` and `observability/`: their respective APIs.
+- `integration/`: examples and behavior spanning several APIs.
+- `contracts/`: public API and TypeScript contracts.
+- `tooling/`: repository scripts; `support/`: shared fixtures and test setup.
+
+Put regression tests beside the behavior they exercise. The ESLint plugin's
+tests remain beside their rules in `packages/eslint-plugin-ramme/src/rules/`.
+
+Run `pnpm test` for the Node suite, or select a directory with
+`pnpm run test tests/di`. Run `pnpm typecheck`, `pnpm lint`,
+`pnpm check:docs` and `pnpm check:plugin` for the other repository checks.
+`pnpm test:browser` runs the browser suite in Chromium; install it first
+with `pnpm exec playwright install chromium`. After `pnpm build`,
+`pnpm check:package` checks the published package and its declarations.
+
 ## License
 
 Apache-2.0

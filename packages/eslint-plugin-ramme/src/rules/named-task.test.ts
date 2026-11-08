@@ -1,4 +1,4 @@
-// The pins of named-task (stage 6a, decision 10; the `style` preset), written before the rule: a node is named after
+// Tests for named-task (D44, decision 10; the `style` preset): a node is named after
 // its task's body (`body.name`) unless the options give a `name`, and a function expression passed as an argument has
 // no name of its own, so `const poll = task(function* () {…})` makes nodes named `anonymous`. Reported: a `task(…)`,
 // free or bound (`task(this, …)`), whose body is an anonymous generator or an arrow and whose options carry no `name`.
@@ -27,7 +27,7 @@ ruleTester.run('named-task', namedTask, {
     },
     { name: 'a body passed by name: it is named', code: `${imports}import { poll } from './poll';\nexport const t = task(poll);` },
     { name: 'an inline fork body is no task(…)', code: `${imports}export const main = task(function* main() { fork(function* () { yield* sleep(1); }); });` },
-    // Beyond the pins: options the syntax cannot read may carry a name (the plugin README).
+    // options the syntax cannot read may carry a name (the plugin README).
     {
       name: 'options spread or passed by name may carry a name',
       code: `${imports}declare const opts: { name: string };\nexport const a = task(function* () {}, { ...opts });\nexport const b = task(() => 1, opts);`,
@@ -55,7 +55,7 @@ ruleTester.run('named-task', namedTask, {
       code: `${imports}export class Api {\n  readonly get = task(this, function* (path: string) { yield* sleep(1); return path; });\n}`,
       errors: [{ message, line: 3 }],
     },
-    // Beyond the pins: what does not name it after the call.
+    // what does not name it after the call.
     {
       name: 'a with(…) chain that gives no name, a name given to another method, and a with that is not called',
       code: `${imports}export const poll = task(function* () { yield* sleep(1); }).with({ timeoutMs: 5 });\nexport const p = task(() => 1).bind({ name: 'p' });\ndeclare function wrap(f: unknown, o: unknown): unknown;\nexport const w = wrap(task(() => 2).with, { name: 'w' });`,

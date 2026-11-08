@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Which document a `§n` cross-reference names: the resolver of
 // scripts/check-docs.mjs (its rule 2), a module of its own so that
-// src/test/scripts.test.ts can test it. Dev-only.
+// tests/tooling/scripts.test.ts can test it. Dev-only.
 //
 // A reference names a section of DESIGN.md unless a document name (DESIGN,
 // DECISIONS, PROPOSAL, README, with or without `.md`) qualifies it in the same
