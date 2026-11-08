@@ -742,6 +742,33 @@ says what each rule flags, why, and where it is approximate.
   shutdown-aware tasks, release deadlines, lifecycle events).
 - [DECISIONS.md](DECISIONS.md): why it is this way and not another way.
 
+## Development
+
+Tests focused on a module live beside it: `src/result.test.ts` tests
+`src/result.ts`. Larger suites can use a descriptive suffix, such as
+`src/platform.fetch.test.ts`. The ESLint plugin follows the same convention
+in `packages/eslint-plugin-ramme/src/rules/`.
+
+Tests of behavior spanning modules live in `tests/`, grouped by concern:
+
+- `di/`: resolution, providers, scopes and service creation.
+- `runtime/` and `lifecycle/`: generator execution, interruption, node ownership and shutdown.
+- `tasks/`, `platform/` and `observability/`: interactions with the runtime and resource lifetimes.
+- `integration/`: examples and behavior spanning several APIs.
+- `contracts/`: public API and TypeScript contracts.
+- `tooling/`: repository scripts; `support/`: shared fixtures and test setup.
+
+Put regressions in the suite for the behavior they exercise. Keep module
+tests beside the implementation and cross-module scenarios in `tests/`.
+
+Run `pnpm test` for the Node suite, or select a file or directory with
+`pnpm run test src/result.test.ts` or `pnpm run test tests/di`.
+Run `pnpm typecheck`, `pnpm lint`,
+`pnpm check:docs` and `pnpm check:plugin` for the other repository checks.
+`pnpm test:browser` runs the browser suite in Chromium; install it first
+with `pnpm exec playwright install chromium`. After `pnpm build`,
+`pnpm check:package` checks the published package and its declarations.
+
 ## License
 
 Apache-2.0

@@ -1,5 +1,4 @@
-// topic.test.ts — topics are DI keys (DESIGN.md §3, §3.1). Ported from the
-// pre-redesign suite: `createContext({ parent })` → `root.child()`.
+// Topics are dependency-injection keys (DESIGN.md §3.1).
 import { describe, expect, it } from 'vitest';
 import { createRootContext, valueProvider } from './index.js';
 import { createTopic } from './topic.js';

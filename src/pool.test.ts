@@ -1,6 +1,4 @@
-// pool.test.ts — pools (DESIGN.md §4.10, D15).
-// The seven ported fiber-set cases (a pool created in a constructor on the
-// pending node) are at the end of the file.
+// Pool admission, concurrency, failure handling and constructor-owned workers (DESIGN.md §4.10).
 import { describe, expect, it, vi } from 'vitest';
 import { createInjectionKey } from './context-key.js';
 import type { Fiber, Pool } from './context.js';
@@ -10,7 +8,7 @@ import { factoryProvider, valueProvider } from './provider-util.js';
 import { NodeCompletedError, PoolClosedError, PoolFullError } from './resource.js';
 import { createScope } from './scope.js';
 import { lookup, own, wait } from './ambient.js';
-import { deferred, here, impl, tick, trace } from './test/util.js';
+import { deferred, here, impl, tick, trace } from '../tests/support/util.js';
 
 const quiet = { name: 'pool', onFailure: () => {} };
 
@@ -395,22 +393,10 @@ describe('pools (DESIGN.md §4.10)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ported from the pre-redesign fiber-set.test.ts: `createFiberSet` → `pool()` in a
-// constructor, on the value's pending node; `onError` → `onFailure`;
-// `ctx.dispose()` → `close()`; `fiberSet.context` → the pool node. The old
-// `setScope(Worker, RootScope)` is dropped so the pool really is created on a
-// pending node: Worker has no dependencies and is auto-hoisted to the root.
-//
-// One semantic change shapes these ports: a DI value's node is an unsubscribed
-// provided entry, so the root's close() *aborts* it at its turn (DESIGN.md §2.8, §2.7),
-// and its pool with it — a fork that has not run by then never runs. The
-// first case keeps the old "close waits for the drain" meaning with the
-// idiom that says so: an own() entry registered after the pool, released
-// before it (LIFO), that closes the pool gracefully. The others let their
-// forks run (`tick()`) before closing.
-// ---------------------------------------------------------------------------
+// A pool belongs to its DI value. The value is aborted at its release turn.
+// To drain the pool first, register a graceful-close entry after it (LIFO).
 
-describe('pools in a constructor (ported fiber-set cases)', () => {
+describe('pools in a constructor', () => {
   it("spawns fibers into the pool node; a graceful drain entry makes the owner's close wait for them", async () => {
     const results: number[] = [];
 
@@ -515,7 +501,7 @@ describe('pools in a constructor (ported fiber-set cases)', () => {
         return this.pool.fork(
           task(
             function* () {
-              // Long-running work, aborted through signal() (was withAbortSignal)
+              // Long-running work, aborted through signal()
               const signal = here().signal;
               yield* wait(new Promise<void>((resolve, reject) => {
                 const timer = setTimeout(resolve, 10_000);

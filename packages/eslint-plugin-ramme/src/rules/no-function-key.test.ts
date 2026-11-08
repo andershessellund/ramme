@@ -1,4 +1,4 @@
-// The pins of no-function-key (stage 6a, decision 10; the `style` preset), written before the rule: a function key is
+// Tests for no-function-key (D44, decision 10; the `style` preset): a function key is
 // accepted (DESIGN.md §3.1) but is not the ramme style, which keys a service by its class, or by a token
 // (`createInjectionKey`), or by `createKeyFor` over a class. Reported: `lookup`, `inject`, `createKeyFor`,
 // `valueProvider`, `factoryProvider`, `classProvider`, `aliasProvider` or `setScope` given, as the key, an identifier
@@ -31,7 +31,7 @@ ruleTester.run('no-function-key', noFunctionKey, {
       code: `${imports}const log = (e: unknown) => void e;\nexport const p = valueProvider(NodeTopic, log);`,
     },
     { name: 'a function called, not used as a key', code: `${imports}function makeConfig() { return {}; }\nexport const c = makeConfig();` },
-    // Beyond the pins (the plugin README): a call through a name of Object.prototype's is no key verb, and a `let`
+    // a call through a name of Object.prototype's is no key verb, and a `let`
     // may hold anything by the time it is used.
     { name: 'a method named like an object’s own', code: `${imports}function f() { return 1; }\nexport const s = f.toString() + String(f.valueOf());` },
     { name: 'a let, which may be reassigned', code: `${imports}let make = () => ({});\nmake = () => ({ x: 1 });\nexport const read = () => lookup(make);` },

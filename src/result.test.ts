@@ -3,7 +3,7 @@
 // of the shape; `$` is a generator helper whose `yield*` evaluates to the success value itself, unawaited, or yields
 // the failure's error as a `Fail`, which ends the body with that expected failure, as `yield* fail(e)` does. `gen`,
 // the async `?` operator of D38, is retired: a body is the scope (D42). The type-level half is
-// src/test/surface.check.ts.
+// tests/contracts/surface.check.ts.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fail, fork, join, never, pool, sleep, wait } from './ambient.js';
 import type { Failure, Result } from './context.js';
@@ -25,7 +25,7 @@ import {
   unwrap,
   unwrapOr,
 } from './result.js';
-import { deferred, tick, within } from './test/util.js';
+import { deferred, tick, within } from '../tests/support/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -172,7 +172,7 @@ describe('Result values (DESIGN.md §4.12, D38)', () => {
 
   it('fromThrowing over a function that may return a promise: the Result, or a promise of it, as the value turns out', async () => {
     const maybe = (later: boolean): number | Promise<number> => (later ? Promise.resolve(2) : 1);
-    const now = fromThrowing(() => maybe(false)); // typed as either (src/test/surface.check.ts)
+    const now = fromThrowing(() => maybe(false)); // typed as either (tests/contracts/surface.check.ts)
     const later = fromThrowing(() => maybe(true));
     expect(now).toEqual(success(1));
     expect(later).toBeInstanceOf(Promise);

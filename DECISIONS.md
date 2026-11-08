@@ -23,20 +23,12 @@ The guarantees G1–G4, contracts C1–C8, invariants I1–I27, assumptions
 A1–A7 and the numbered design laws cited here are defined in DESIGN.md
 §2.5, §2.6 and §10.
 
-Choices settled while implementing a redesign are recorded in the entry
-they refine, in its text or under "Settled while implementing it". Each
-redesign was specified in documents removed once it was implemented, which
-remain in git history: the lifecycle and concurrency redesign's proposal
-and implementation plan (added in commit 72a0448, last revised in
-19759ae), and the generator runtime's proposal, which D41 cites by its
-decision numbers ("D41, decision 12") and which lived at the repository
-root through the commits of PR #5 (added in 5da90d8, unrevised, and
-deleted when D41 was completed; read it at 5da90d8). Later stages of that
-PR were specified outside the repository: stage 6a made tasks callable
-(D44; commit a75ce3d) and stage 6b, the commit after it, rewrote the
-documents for it. So were PR #6's review fixes: D45, and the notes they
-added to D15, D24, D41, D42 and D43. Every decision here is complete without
-them.
+Each entry records a decision and its rationale, including refinements
+under "Settled while implementing it". Historical specifications remain
+in git: the lifecycle and concurrency design at commit 19759ae, and the
+generator runtime design at 5da90d8. D41 preserves the latter's decision
+numbers (for example, "D41, decision 12"). The entries here are
+self-contained.
 
 ## Shape
 
@@ -309,10 +301,9 @@ top-level code) a call starts when `then` is first called, a job after the
 A task is a function whose call is the lazy op of one run, it may bind a
 receiver, the combinators take its ops, every function that waits is one,
 an interface is keyed over its class with `createKeyFor`, and the README
-shows one style (DESIGN.md §3.1, §3.2, §4.4, §4.5, §4.8, §9). Stage 6a of PR #5
-made the change in the code (commit a75ce3d), and stage 6b, the commit after
-it, in the documents; the code cites the decisions below as "D44, decision
-n". This amends D8′, D35, D37, D4′ and D41's decisions 2, 4, 6 and 29.
+shows one style (DESIGN.md §3.1, §3.2, §4.4, §4.5, §4.8, §9). The code cites
+the decisions below as "D44, decision n". This amends D8′, D35, D37, D4′
+and D41's decisions 2, 4, 6 and 29.
 
 **1. A task is callable.** `t(…args)` is the lazy op `call(t, …args)` was,
 run by `yield*` as a call-shaped child, and "this is a node" is decided
@@ -548,7 +539,7 @@ missing service a compile error (D1′); ramme's DI is ambient and untyped. An
 `R` inferred through the yield union, as `E` is (D42), would move the
 failure to the start of the run and expose the requirements as data, but
 would not prove them without typed providers on the root, and would add a
-parameter to every `Task`, `Fiber` and `Op`. **Rejected,** for now: that
+parameter to every `Task`, `Fiber` and `Op`. **Rejected:** that
 `R`, and typed providers. **Cost.** A missing provider fails at the first
 `lookup` of its key, which may be deep in a run, and only a run that reaches
 it finds it.
@@ -1892,7 +1883,7 @@ code keeps the global `fetch`, or names a node through `wait`. A source stuck
 in a read holds a halted node until the read settles when the source queues
 its `return()` behind the read (an async generator does; `node:stalled`
 reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
-`bind` for observers) is not in this layer yet.
+`bind` for observers) is outside this layer.
 
 **Settled while implementing it.**
 
@@ -1947,9 +1938,9 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   headless Chromium* (DESIGN.md §7;
   `DOMException` and `console` are the core's: an abort's default reason,
   development-mode reports). `check:surface` makes it on dist/, and
-  src/test/browser-static.test.ts on src/ compiled for the test run (vitest's
-  global setup, src/test/build.ts), so `pnpm test` needs no build and never
-  reads a stale one; the smoke test, src/test/browser-smoke.test.ts, runs a
+  tests/platform/browser-globals.test.ts on src/ compiled for the test run (vitest's
+  global setup, tests/support/build.ts), so `pnpm test` needs no build and never
+  reads a stale one; the smoke test, tests/platform/browser-smoke.test.ts, runs a
   body of the core's verbs and README's search box ("The platform") through
   the public entries. `check:surface`
   also type-checks a Node consumer with no DOM library against every
@@ -1960,7 +1951,7 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   review it was added as development dependencies only
   (`@vitest/browser-playwright`, `playwright`): `pnpm test:browser` runs the
   smoke test unchanged in headless Chromium, as CI's `browser` job does, and
-  the static half, which reads files, moved to browser-static.test.ts.
+  the static half, which reads files, lives in `tests/platform/browser-globals.test.ts`.
 - *Decision 32 is settled as recommended*: a node's `[Symbol.asyncDispose]()`
   stays abort, then wait. `await using` ends a node the way an exception
   would, by interruption; to drain, call `close()`.
@@ -2770,7 +2761,7 @@ and ramme does not depend on it. **Rejected:** run-time checks for what the
 syntax shows, a cost to every program at run time; a runtime patch of the
 platform's globals, which changes what ramme does not own and costs every
 program that loads ramme (D43); a type-aware rule for an op kept in a
-variable, which the plugin's syntactic rules leave to a later variant (D41,
+variable, which the plugin's syntactic rules do not analyze (D41,
 decision 14); `no-bare-task`, the rule DESIGN.md §9 once listed for a
 function passed where a task belongs. `fork` and `attempt` accept inline
 bodies by design (DESIGN.md §4.5), and `all`, `race` and `settle` take ops,

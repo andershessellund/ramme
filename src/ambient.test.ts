@@ -1,12 +1,4 @@
-// ambient.test.ts — the free functions of ambient.ts (law 2, I21). Each is
-// `current().<method>(...)` (DESIGN.md §6); `current()` and
-// `signal()` read the current node in a fork, a call, a `run` frame, a
-// release, a creation and a failure handler; with storage registered and no
-// current node every one throws NoCurrentNodeError (the no-storage message
-// is tested in storage.test.ts, the one test file that imports no
-// context-storage adapter); `runSync`; `lookup` options; `own` (D16);
-// the creation-frame split of ambient.ts (I16; DESIGN.md §3.5); and the
-// `Context.run` suite ported from the pre-redesign push-context.test.ts.
+// Ambient operations, current-node frames, creation guards, ownership and synchronous entry (DESIGN.md §6).
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   all,
@@ -44,7 +36,7 @@ import {
   NoCurrentNodeError,
   NotOwnedError,
 } from './resource.js';
-import { deferred, impl, tick, trace } from './test/util.js';
+import { deferred, impl, tick, trace } from '../tests/support/util.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -327,7 +319,7 @@ describe('current() and signal() (DESIGN.md §2.4, §4.7, §6)', () => {
   });
 });
 
-describe('NoCurrentNodeError with storage registered (DESIGN.md §6)', () => {
+describe('NoCurrentNodeError outside a node (DESIGN.md §6)', () => {
   const ping = task(function* ping() {
     return 1;
   });
@@ -677,7 +669,7 @@ describe('in a creation frame (DESIGN.md §3.2, §3.3, §3.5, I16)', () => {
   });
 });
 
-describe('Context.run (ported from the pre-redesign push-context.test.ts)', () => {
+describe('Context.run', () => {
   it('runs a function with the node as current', () => {
     const KEY = createInjectionKey<string>('run-key');
     const ctx = createRootContext({ providers: [valueProvider(KEY, 'run-val')] });

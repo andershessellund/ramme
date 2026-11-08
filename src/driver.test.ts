@@ -1,241 +1,371 @@
-// driver.test.ts — the op protocol and the driver's subscription (DESIGN.md §4.2, D41), what managed.test.ts pinned
-// for managed promises restated for ops: a work op's `then` (run once per object, each consumer resumed in the
-// source's reaction with promise-handler semantics), a lifecycle op's promise (`.catch` and `.finally` through `then`,
-// derived promises plain, the resume step once per consumer), I10 for ops nobody consumes, A1 for a halted body's
-// dropped subscription, and decision 7's resumption in the source's reaction. The halt rows themselves are pinned in
-// generator-pin.test.ts and stage2-pin.test.ts.
-import { describe, expect, it } from 'vitest';
-import { current, join, never, wait } from './ambient.js';
-import { peekCurrentNode } from './context-storage.js';
-import type { Instruction } from './context.js';
+// Tests for runtime / generator driver.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { current, fork, interrupted, join, lookup, never, own, promised, signal, sleep, wait } from './ambient.js';
+import { createInjectionKey } from './context-key.js';
+import type { Context, Fiber, Instruction } from './context.js';
 import { createRootContext } from './create-context.js';
 import { task } from './fiber.js';
-import { LifecycleOp, WorkOp } from './managed.js';
-import { NodeCompletedError } from './resource.js';
-import { deferred, gcUntil, hasGc, tick, trace, unhandledRejectionGuard, within } from './test/util.js';
-import type { UnhandledRejectionGuard } from './test/util.js';
+import { Sub, isInstruction } from './managed.js';
+import type { InstructionImpl, WorkOp } from './managed.js';
+import { AsyncRunError, FiberAbortedError, FiberNotAwaitableError, NoCurrentNodeError, NodeCompletedError } from './resource.js';
+import { deferred, impl, tick, within } from '../tests/support/util.js';
 
-/** The setup file's unhandled-rejection guard (src/test/setup.ts). */
-function guard(): UnhandledRejectionGuard {
-  const g = unhandledRejectionGuard();
-  if (g === undefined) throw new Error('src/test/setup.ts is not installed (vitest.config.ts setupFiles)');
-  return g;
+const warnings: string[] = [];
+
+const roots: Context[] = [];
+
+beforeEach(() => {
+  warnings.length = 0;
+  vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => void warnings.push(String(args[0])));
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const r of roots.splice(0)) await within(r.close(), 1000).catch(() => {});
+});
+
+function app(opts: { releaseTimeoutMs?: number } = {}): Context {
+  const root = createRootContext(opts);
+  roots.push(root);
+  return root;
 }
 
-describe('a work op’s then (DESIGN.md §4.2, decisions 3, 4)', () => {
-  it('runs the op once, on the first then, and resumes every consumer in the source’s reaction: a non-callable handler passes the outcome through (a failure as a rejection), a throwing one rejects its derived promise, and a then after it settled is never synchronous', async () => {
-    const root = createRootContext();
-    let runs = 0;
-    const gate = deferred<number>();
-    const op = root.call(function* () {
-      runs++;
-      return yield* wait(gate.promise);
-    });
-    expect(runs).toBe(0); // lazy: nothing ran
-    const first = op.then((v) => v * 10);
-    const passThrough = op.then(); // no handlers: the value as it is
-    const throwing = op.then(() => {
-      throw new Error('handler threw');
-    });
-    expect(runs).toBe(1); // the first then ran it, synchronously; the others joined that run
-    gate.resolve(4);
-    const settledValues = await Promise.all([first, passThrough, throwing.then(undefined, (e: Error) => e.message)]);
-    let syncLate = 'not yet';
-    const late = op.then((v) => (syncLate = `late ${v}`));
-    const atCall = syncLate; // a then after the op settled resumes in a job, as a settled promise's then
-    await late;
-    const failing = root.call(function* () {
-      throw new Error('boom');
-    });
-    // No onRejected: the failure passes through as a rejection of the derived promise, consumed by the one run (D13′).
-    const failedThrough = await failing.then(() => 'fulfilled').then(undefined, (e: Error) => `rejected: ${e.message}`);
-    expect({ runs, settledValues, atCall, syncLate, failedThrough }).toEqual({
-      runs: 1,
-      settledValues: [40, 4, 'handler threw'],
-      atCall: 'not yet',
-      syncLate: 'late 4',
-      failedThrough: 'rejected: boom',
-    });
-    await root.close();
-  });
+/** A platform timer: a foreign promise. */
+function bare(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  it('then is a foreign awaiter: called inside a step, it runs the op under no frame, so wait’s function sees no current node there, where the step’s yield* of the same op runs it in the body’s frame', async () => {
-    const root = createRootContext();
-    const seen = await root.call(function* () {
-      const me = current() as unknown;
-      const seen: string[] = [];
-      const op = wait(() => {
-        const n = peekCurrentNode() as unknown;
-        seen.push(n === undefined ? 'no node' : n === me ? 'the body' : 'another node');
-        return Promise.resolve();
-      });
-      yield* op; // the driver runs it in the body's frame
-      const viaThen = op.then(); // run by then, synchronously, inside this step
-      yield* wait(viaThen);
-      return seen;
-    });
-    expect(seen).toEqual(['the body', 'no node']);
-    await root.close();
-  });
+const failing = (name: string, ms = 1) =>
+  task(
+    function* (): Generator<Instruction, never, unknown> {
+      yield* sleep(ms);
+      throw new Error(`${name} failed`);
+    },
+    { name },
+  );
 
-  it('guards run when the op is made (decision 17); what fails when it runs (wait’s function returning no promise, a receiver completed since it was made) lands at the yield*, where a catch sees it, or rejects then', async () => {
-    const root = createRootContext();
-    const done = root.child({ name: 'done' });
-    const madeOpen = done.call(function* () {
-      return 1;
-    }); // made while done is open: its guards pass
-    await done.close();
-    expect(() => done.call(function* () {})).toThrow(NodeCompletedError); // made on a completed node: refused at once
-    const inBody = await root.call(function* () {
-      const seen: string[] = [];
-      try {
-        yield* wait(() => 42 as unknown as Promise<number>); // the function form's value is checked when it runs
-      } catch (e) {
-        seen.push((e as Error).name);
-      }
-      try {
-        yield* madeOpen; // runs now, on a completed node
-      } catch (e) {
-        seen.push((e as Error).name);
-      }
-      return seen;
-    });
-    expect(inBody).toEqual(['TypeError', 'NodeCompletedError']);
-    await expect(madeOpen).rejects.toBeInstanceOf(NodeCompletedError); // and through then
-    await root.close();
-  });
-});
-
-describe('a lifecycle op is a promise (DESIGN.md §4.2, decision 2)', () => {
-  it('close() starts now and is a Promise subclass: .catch and .finally go through its then, derived promises are plain Promises, and each then is its own consumer, through the resume step once', async () => {
-    const root = createRootContext();
+describe('the driver: returned ops, handlers, refusals', () => {
+  it('an async release or failure handler is a bare wait: current until its first await, and one that uses ramme after it fails with NoCurrentNodeError naming the cause, reported as a release failure and a handler exception (D41, decision 5)', async () => {
+    const root = app();
+    const seen: string[] = [];
     const n = root.child({ name: 'n' });
-    const err = new Error('release failed');
-    n.own(() => {
-      throw err;
+    n.own({}, async () => {
+      seen.push(`release before its await: ${current().parent === n ? 'its fiber' : 'another node'}`);
+      await Promise.resolve();
+      lookup(createInjectionKey<string>('K')); // no current node after the first await
     });
-    const closing = n.close(); // eager: the close has run already (a synchronous release)
-    expect(n.state).toBe('complete');
-    const caught = closing.catch((e: unknown) => e);
-    const finallyRan: string[] = [];
-    const fin = closing.finally(() => void finallyRan.push('finally'));
-    expect({
-      lifecycleIsPromise: closing instanceof Promise,
-      lifecycleIsOp: closing instanceof LifecycleOp,
-      derivedPlain: [caught.constructor === Promise, fin.constructor === Promise],
-      iterable: typeof closing[Symbol.iterator],
-    }).toEqual({ lifecycleIsPromise: true, lifecycleIsOp: true, derivedPlain: [true, true], iterable: 'function' });
-    expect(await caught).toBe(err);
-    await expect(fin).rejects.toBe(err);
-    await expect(closing).rejects.toBe(err); // a third consumer: delivered again, never consumed into nothing
-    expect(finallyRan).toEqual(['finally']);
-    await expect(root.close()).resolves.toBeUndefined(); // the close's consumers consumed it: nothing surfaces
+    const released = await n.close().then(
+      () => 'closed clean',
+      (e: unknown) => e,
+    );
+    root.fork(
+      task(
+        function* (): Generator<Instruction, never, unknown> {
+          throw new Error('fails');
+        },
+        {
+          name: 'fails',
+          onFailure: async () => {
+            await Promise.resolve();
+            current(); // the handler has no current node here either
+          },
+        },
+      ),
+    );
+    const handled = await root.close().then(
+      () => 'closed clean',
+      (e: unknown) => e,
+    );
+    const describe = (e: unknown): string =>
+      e instanceof NoCurrentNodeError && /no async context/.test(e.message) && /async release or handler/.test(e.message)
+        ? 'NoCurrentNodeError naming the cause'
+        : String(e);
+    expect({ seen, released: describe(released), handled: describe(handled) }).toEqual({
+      seen: ['release before its await: its fiber'],
+      released: 'NoCurrentNodeError naming the cause',
+      handled: 'NoCurrentNodeError naming the cause',
+    });
   });
 
-  it('a work op is no Promise and no LifecycleOp: then only', async () => {
-    const root = createRootContext();
-    const op = root.sleep(0);
-    expect({ work: op instanceof WorkOp, promise: op instanceof Promise, lifecycle: op instanceof LifecycleOp }).toEqual({
-      work: true,
-      promise: false,
-      lifecycle: false,
+  it('a handler returning an op, or a generator handler, that waits for its parent’s close() does not hold the parent; a body or a release returning an op is driven', async () => {
+    const closed: Record<string, string> = {};
+    for (const shape of ['returns an op', 'generator'] as const) {
+      const root = createRootContext({ name: 'app' });
+      root.fork(
+        task(
+          function* (): Generator<Instruction, never, unknown> {
+            throw new Error('boom');
+          },
+          {
+            name: 'boom',
+            onFailure:
+              shape === 'returns an op'
+                ? () => root.close()
+                : function* () {
+                    yield* root.close();
+                  },
+          },
+        ),
+      );
+      closed[shape] = await Promise.race([impl(root).completion.then(() => 'completed'), bare(300).then(() => 'still open')]);
+    }
+    const root = app();
+    const leaf = task(function* () {
+      return 'leaf';
     });
-    await op;
-    await root.close();
-  });
-});
-
-describe('I10 and A1 for ops (DESIGN.md §10)', () => {
-  it('ops nobody consumes are never an unhandled rejection: a work op runs nothing, and a lifecycle op whose release fails surfaces from its owner instead', async () => {
-    const before = guard().seen.length;
-    const root = createRootContext();
-    const err = new Error('release failed, nobody waits');
-    let ran = false;
-    const out = await root.attempt(function* () {
-      void root.call(function* () {
-        ran = true;
-        throw new Error('never runs');
-      });
-      const x = root.own({}, () => {
-        throw err;
-      });
-      void root.release(x); // eager: it runs now; nobody waits for it
-      yield* wait(tick(2)); // the provisional hold (D16) ends: the failure is the owner's
-      return 'returned';
+    const returned = await root.attempt(task(() => leaf()));
+    const released = await root.attempt(
+      task(function* () {
+        own({}, () => sleep(5));
+      }),
+    );
+    expect({ closed, returned, released: released.status }).toEqual({
+      closed: { 'returns an op': 'completed', generator: 'completed' },
+      returned: { status: 'success', value: 'leaf' },
+      released: 'success',
     });
-    expect({ out, ran }).toEqual({ out: { status: 'success', value: 'returned' }, ran: false });
-    await expect(root.close()).rejects.toBe(err); // the owner, root, surfaces it once
-    await tick(2);
-    expect(guard().seen.length).toBe(before);
   });
 
-  it.skipIf(!hasGc)('a body halted on a join of a fiber in another tree is not retained by that fiber: its subscription is dropped and emptied, so the generator and what it held are collectable while the fiber runs on (A1)', async () => {
-    const other = createRootContext({ name: 'other' });
-    const long = other.fork(
+  it('a body that aborts itself mid-step is halted at its next yield*; an op yielded twice gives its value twice', async () => {
+    const log: string[] = [];
+    const root = app();
+    const o = await root.attempt(function* () {
+      current().abort(new Error('self'));
+      log.push('after abort');
+      try {
+        yield* sleep(1000);
+        log.push('unreachable');
+      } finally {
+        log.push('finally');
+      }
+    });
+    const twice = await root.call(function* () {
+      const p = task(function* () {
+        yield* sleep(1);
+        return 7;
+      })();
+      return [yield* p, yield* p];
+    });
+    expect({ o: o.status, log, twice }).toEqual({ o: 'aborted', log: ['after abort', 'finally'], twice: [7, 7] });
+  });
+
+  it('a body born delivered owns what its wait(p) produced: p finishes, the value is attached, and released with the node; a synchronous throw from making an op lands at its yield*', async () => {
+    const log: string[] = [];
+    const openTemp = (): Promise<{ name: string } & Disposable> =>
+      bare(5).then(() => ({ name: 'tmp-1', [Symbol.dispose]: () => void log.push('temp file removed') }));
+    const handle = task(
+      function* () {
+        const file = own(yield* wait(openTemp())); // started when evaluated: the halt lets it finish (decision 9, row 5)
+        log.push(`owns ${file.name}; delivered ${String(signal().aborted)}`);
+        yield* sleep(1); // halted here
+        log.push('unreachable');
+      },
+      { name: 'handle' },
+    );
+    const root = app();
+    let caught = '';
+    const parent = root.fork(
       task(
         function* () {
+          try {
+            yield* sleep(-1); // RangeError from making the op, in this step
+          } catch (e) {
+            caught = (e as Error).name;
+          }
+          current().abort(new Error('hang up'));
+          yield* join(fork(handle)); // a freeze fork of a delivered node: born delivered (D12); call-shaped join
+        },
+        { name: 'parent', onFailure: () => {} },
+      ),
+    );
+    const o = await within(root.result(parent));
+    expect({ o: o.status, caught, log }).toEqual({
+      o: 'aborted',
+      caught: 'RangeError',
+      log: ['owns tmp-1; delivered true', 'temp file removed'],
+    });
+  });
+
+  it('a generator failure handler’s failed wait is thrown into it, where its catch runs, and an observe body’s real failure is thrown in after its delivery, never a halt', async () => {
+    const log: string[] = [];
+    const root = app();
+    const parent = root.fork(
+      task(
+        function* () {
+          fork(
+            task(
+              function* (): Generator<Instruction, never, unknown> {
+                throw new Error('child failed');
+              },
+              {
+                name: 'child',
+                onFailure: function* () {
+                  try {
+                    yield* wait(Promise.reject(new Error('report failed')));
+                  } catch (e) {
+                    log.push(`handler caught ${(e as Error).message}`);
+                  }
+                },
+              },
+            ),
+          );
+          yield* sleep(5);
+        },
+        { name: 'parent', onFailure: () => {} },
+      ),
+    );
+    const observer = root.fork(
+      task(
+        function* () {
+          yield* interrupted(); // delivered: an observe body runs on
+          try {
+            yield* failing('step')();
+          } catch (e) {
+            return `observer caught ${(e as Error).message}`;
+          }
+        },
+        { name: 'observer', interrupt: 'observe', onFailure: () => {} },
+      ),
+    );
+    await tick();
+    observer.abort(new Error('hang up'));
+    const outcomes = await within(Promise.all([root.result(parent), root.result(observer)]));
+    expect({ log, outcomes }).toEqual({
+      log: ['handler caught report failed'],
+      outcomes: [
+        { status: 'success', value: undefined },
+        { status: 'success', value: 'observer caught step failed' },
+      ],
+    });
+  });
+
+  it('an op’s iterator: next() yields an instruction once, then returns what it is resumed with; return() drops the driver’s subscription, so a later settlement resumes nothing', async () => {
+    const src = deferred<number>();
+    const root = app();
+    const op = root.wait(src.promise) as unknown as WorkOp<number>;
+    const it = op[Symbol.iterator]();
+    const first = it.next();
+    const ins = first.value as unknown as InstructionImpl;
+    const resumed: unknown[] = [];
+    const owner = impl(root);
+    ins.sub = new Sub(op.start(owner, owner), (ok, x) => void resumed.push(ok, x)); // as the driver subscribes
+    const returned = it.return!(99);
+    src.resolve(1);
+    await tick();
+    const again = op[Symbol.iterator]();
+    expect({
+      first: { done: first.done, isInstruction: isInstruction(first.value), isTheOp: (first.value as unknown) === op },
+      returned,
+      resumed,
+      fresh: again.next(5).done === false && again.next(5).value === 5,
+    }).toEqual({
+      first: { done: false, isInstruction: true, isTheOp: false },
+      returned: { done: true, value: 99 },
+      resumed: [],
+      fresh: true,
+    });
+  });
+
+  it('refusals: a generator returning a fiber, an async generator body, wait of a non-promise, and run(fn) returning a generator', async () => {
+    const root = app();
+    const names: Record<string, string> = {};
+    const fiber = await root.attempt(function* () {
+      return current().fork(function* () {}) as unknown as Fiber<void>;
+    });
+    names.returnsFiber = fiber.status === 'defect' && fiber.error instanceof FiberNotAwaitableError ? 'FiberNotAwaitableError' : fiber.status;
+    const asyncGen = await root.attempt(task(async function* () {} as unknown as () => Generator<Instruction, void, unknown>));
+    names.asyncGenerator =
+      asyncGen.status === 'defect' && asyncGen.error instanceof TypeError && /async generator/.test(asyncGen.error.message) ? 'TypeError' : asyncGen.status;
+    const notAPromise = await root.attempt(function* () {
+      yield* wait(42 as unknown as Promise<number>);
+    });
+    names.waitOfANumber = notAPromise.status === 'defect' && notAPromise.error instanceof TypeError ? 'TypeError' : notAPromise.status;
+    const aFiber = await root.attempt(function* () {
+      const f = fork(function* () {});
+      yield* wait(f as unknown as Promise<void>); // never probes the fiber's `then` trap
+    });
+    names.waitOfAFiber = aFiber.status === 'defect' ? (aFiber.error as Error).name : aFiber.status;
+    try {
+      root.run(function* () {} as unknown as () => void);
+      names.runGenerator = 'nothing thrown';
+    } catch (e) {
+      names.runGenerator = e instanceof AsyncRunError ? 'AsyncRunError' : String(e);
+    }
+    expect(names).toEqual({
+      returnsFiber: 'FiberNotAwaitableError',
+      asyncGenerator: 'TypeError',
+      waitOfANumber: 'TypeError',
+      waitOfAFiber: 'TypeError',
+      runGenerator: 'AsyncRunError',
+    });
+  });
+
+  it('refusals: an async generator failure handler, which nothing can step, is a handler exception naming function*, so the failure it was handed is not lost', async () => {
+    const ran: string[] = [];
+    const root = app();
+    const o = await within(
+      root.attempt(function* () {
+        fork(
+          task(
+            function* (): Generator<Instruction, never, unknown> {
+              throw new Error('worker failed');
+            },
+            {
+              name: 'worker',
+              onFailure: async function* (e: unknown) {
+                ran.push((e as Error).message); // never runs: an async generator object is neither driven nor a thenable
+              },
+            },
+          ),
+        );
+        yield* sleep(5);
+        return 'owner done';
+      }),
+    );
+    expect({
+      status: o.status,
+      error: o.status === 'defect' && o.error instanceof TypeError && /async generator/.test(o.error.message) && /function\*/.test(o.error.message),
+      ran,
+    }).toEqual({ status: 'defect', error: true, ran: [] });
+  });
+
+  it('promised: a call after the captured node completed rejects with NodeCompletedError; ctx.wait at top level is a bare wait', async () => {
+    const root = createRootContext();
+    const late = root.promised(function* () {
+      return 1;
+    });
+    const bareWait = await root.wait(Promise.resolve('bare'));
+    await root.close();
+    const settled = await late().then(
+      () => 'resolved',
+      (e: unknown) => (e instanceof NodeCompletedError ? 'NodeCompletedError' : String(e)),
+    );
+    expect({ bareWait, settled }).toEqual({ bareWait: 'bare', settled: 'NodeCompletedError' });
+  });
+
+  it('a promised callback’s aborted child rejects its promise with FiberAbortedError, its reason the delivery’s', async () => {
+    const reason = new Error('hang up');
+    const root = app();
+    let p: Promise<string> | undefined;
+    const f = root.fork(
+      task(
+        function* () {
+          const cb = promised(function* () {
+            yield* never();
+            return 'unreachable';
+          });
+          p = cb();
           yield* never();
         },
         { onFailure: () => {} },
       ),
     );
-    const root = createRootContext();
-    const refs: WeakRef<object>[] = [];
-    const f = root.fork(
-      task(
-        function* (): Generator<Instruction, void, unknown> {
-          const held = { big: new Array<number>(100_000).fill(1) };
-          refs.push(new WeakRef(held));
-          yield* join(long); // not subscribed below this body: the halt returns it at once
-          void held.big.length;
-        },
-        { onFailure: () => {} },
-      ),
-    );
     await tick();
-    f.abort();
-    await within(root.result(f));
-    await gcUntil(() => refs.every((r) => r.deref() === undefined));
-    expect(long.state).toBe('running'); // the source, long's completion, is still pending
-    long.abort();
-    await other.close();
-    await root.close();
-  });
-});
-
-describe('decision 7: a body resumes in its source’s reaction (DESIGN.md §4.2)', () => {
-  it('a wait(p) resumes the body in p’s reaction, before a microtask queued after p settled, and never inside the step that made the op', async () => {
-    const t = trace();
-    const root = createRootContext();
-    const gate = deferred<string>();
-    const f = root.fork(
-      task(
-        function* () {
-          const v = yield* wait(gate.promise);
-          t.push(`resumed with ${v}`);
-        },
-        { onFailure: () => {} },
-      ),
-    );
-    await tick();
-    gate.resolve('v');
-    queueMicrotask(() => t.push('a microtask queued after p settled'));
-    t.push('after resolve, synchronously');
-    await within(root.result(f));
-    expect(t.log).toEqual(['after resolve, synchronously', 'resumed with v', 'a microtask queued after p settled']);
-    await root.close();
-  });
-});
-
-describe('the unhandled-rejection guard (I10, src/test/setup.ts)', () => {
-  // A real unhandled rejection would also fail the run through vitest's own reporter, so the probe drives the
-  // guard's listener directly and checks that it is the one Node calls.
-  it('is installed on the process and records what it hears', () => {
-    const g = guard();
-    expect(process.listeners('unhandledRejection')).toContain(g.listener);
-    const probe = new Error('guard probe');
-    g.listener(probe);
-    expect(g.seen).toContain(probe);
-    g.seen.splice(g.seen.indexOf(probe), 1); // consumed here, so the after-each check passes
+    f.abort(reason);
+    const e = await within(p!.then(() => undefined, (x: unknown) => x));
+    expect({ fiberAborted: e instanceof FiberAbortedError, reason: (e as FiberAbortedError).reason === reason }).toEqual({
+      fiberAborted: true,
+      reason: true,
+    });
   });
 });

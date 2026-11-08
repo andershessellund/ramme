@@ -21,16 +21,16 @@
 // `.`, `./platform` and `./result` only (D41, decision 18). The browser is a target (D41,
 // decision 19): dist/index.js and dist/platform.js, and every module they
 // import at run time, import nothing from `node:` or a Node builtin such as
-// `async_hooks` (src/stage4-pin.test.ts makes the same check), and touch no
+// `async_hooks` (tests/platform/browser-imports.test.ts makes the same check), and touch no
 // global beyond ES2022's but the host APIs of `browserGlobals`
-// (src/test/browser-static.test.ts makes the same check). Last, compiles a consumer outside
+// (tests/platform/browser-globals.test.ts makes the same check). Last, compiles a consumer outside
 // the package with `declaration` (`consumerSource`): a library's unannotated
 // helpers generic over `E` must emit, and a task's `E` must emit as the plain
 // union (D42). Then a Node consumer with no DOM library (`nodeConsumerSource`):
 // Node 22+ is a target, so every declaration the three entries reach must
 // type-check against @types/node's globals alone, with `skipLibCheck` off (a
 // DOM-only name such as `AddEventListenerOptions` is none there). The
-// type-level half is src/test/surface.check.ts.
+// type-level half is tests/contracts/surface.check.ts.
 // ---------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';

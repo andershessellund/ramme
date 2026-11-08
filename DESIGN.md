@@ -1637,8 +1637,8 @@ surface, so the layer can do nothing a user could not. No module either
 entry reaches imports a Node module, or reads a global beyond ES2022's but
 `queueMicrotask`, `setTimeout`, `clearTimeout`, `AbortController`,
 `AbortSignal`, `DOMException`, `console` and, in `platform`, `performance`
-(the browser is a target: `check:surface` and src/test/browser-static.test.ts
-check the build, and src/test/browser-smoke.test.ts runs the entries in
+(the browser is a target: `check:surface` and tests/platform/browser-globals.test.ts
+check the build, and tests/platform/browser-smoke.test.ts runs the entries in
 headless Chromium, `pnpm test:browser`, in CI).
 
 ### 7.1 Costs
@@ -1796,8 +1796,8 @@ delivered `freeze` or `restore` body is resumed once (by the wait in flight
 at the delivery, or the first `wait(p)` or lifecycle op it yields after it;
 a resume before the delivery is none), and after that only by lifecycle ops
 of release work: every other wait of its own flow, a `finally` that flow
-enters included, returns it (§4.2, D45). Each has a named test in `src/invariants.test.ts`;
-the last clause of I16 is tested in `src/creation.test.ts`.
+enters included, returns it (§4.2, D45). Each has a named test in `tests/lifecycle/invariants.test.ts`;
+the last clause of I16 is tested in `tests/di/creation-reentrancy.test.ts`.
 
 **Assumptions.** A1 abandoned promises are collectable (a `never()` nobody
 settles, `$`'s later `next()`, and the reactions, subscriptions and bodies

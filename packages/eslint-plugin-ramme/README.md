@@ -552,7 +552,7 @@ or a property is not checked, nor is a function given as a provider's value
 - The rest of the platform's catalogue (§9): observers
   (`new ResizeObserver(cb)` outside `own`), `requestIdleCallback` and
   `scheduler.postTask` are not flagged; their ramme spellings (`bind`,
-  `idle`) are not in `ramme/platform` yet.
+  `idle`) are not provided by `ramme/platform`.
 
 ## Development
 

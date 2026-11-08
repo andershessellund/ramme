@@ -16,6 +16,6 @@
     // stripped by stripInternal but still named by another declaration fails here.
     "skipLibCheck": false
   },
-  "files": ["../src/test/surface.check.ts"],
+  "files": ["../tests/contracts/surface.check.ts"],
   "include": []
 }
