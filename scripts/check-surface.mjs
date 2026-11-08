@@ -56,6 +56,7 @@ const expected = new Map([
     'Op',
     'Body',
     'Release',
+    'Resource',
     'Provider',
     'Public',
     'LookupOptions',
@@ -139,7 +140,7 @@ const expected = new Map([
  */
 const coreNames = [
   // the node and the free functions; a task's call is the task's own (D44), so there is no free `call`
-  'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
+  'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Resource', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'attempt', 'all', 'race', 'settle', 'shield',
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
   // an explicit key for an implementation, the seam between an interface and its class (D44)

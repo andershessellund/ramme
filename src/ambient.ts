@@ -45,6 +45,7 @@ import type {
   Pool,
   PoolOptions,
   Release,
+  Resource,
   SettleResult,
   Task,
 } from './context.js';
@@ -144,9 +145,9 @@ export function lookup<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
  * earlier with `release(x)`. Returns what it attached. `own(x)` with one
  * argument on an object the node already owns returns it (D16).
  */
-export function own<T extends Disposable | AsyncDisposable>(resource: T): T;
+export function own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
 export function own<T extends object>(value: T, release: Release<T>): T;
-export function own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void, unknown>)): T;
+export function own<T extends object>(defer: T & Release<void>): T;
 export function own(target: object, release?: Release<any>): object {
   const n = requireCurrent('own');
   return release === undefined ? n.own(target as Disposable) : n.own(target, release);

@@ -93,7 +93,59 @@ Danish rendering (*spindel*) is taken on npm. **Accepted:** one-letter
 adjacency to `samme`; they are different domains (codec vs DI) and rarely
 meet in an import block. Extraction-time decision.
 
+### D47. Native resource tasks, terminal retirement, and cleanup defects
+
+A native `Resource` exposes `release: Task<[], void>` and optionally a
+stable `released: AbortSignal`. Its release body runs directly in the
+owner's protected release fiber with its bound receiver. The task's
+providers and scopes apply, but the fiber supplies `observe` interruption
+and the owner's release deadline in place of the task's cancellation
+options. Deferred and explicit release tasks use the same execution path.
+The task's `onFailure` cannot consume the entry's cleanup defect. A direct
+call of `resource.release()` is an ordinary task call; owner-protected
+early cleanup goes through `release(resource)`.
+Standard disposables and promise-returning release callbacks remain
+adapters for foreign cleanup.
+
+Cleanup has no expected failures. `Release<T>` now takes only
+`Operation<void, never>`; native resources require a task with `E = never`.
+Exceptions and foreign promise rejections are defects. Untyped code that
+yields an expected failure also propagates it as the owner's defect. The
+runtime continues every remaining release, preserves the original body
+failure alongside cleanup defects, and propagates the result. It neither
+logs nor marks the isolate or root unusable. The consumer chooses recovery,
+telemetry, process draining, or shutdown at its error boundary.
+
+`released` fires only when all cleanup completed successfully, including
+independent completion. It removes a live entry immediately and detaches
+its listener; ownership of an already-completed resource is a no-op. Once
+release starts, a terminal signal cannot remove the entry: the owner must
+still await cleanup and propagate its defects. Subscribe before notifying
+ownership observers so a callback cannot create a completion race. An
+explicit `own(value, release)` replaces the native protocol, including its
+terminal signal. Retirement does not invalidate DI caches or account for
+unjoined child fibers, whose obligations are separate (D46).
+
+**Why.** Native cleanup needs a task's frame across waits and must be
+protected from owner cancellation. `E = never` expresses an implementation
+obligation, not an assurance that JavaScript cannot throw. Terminal
+notification prevents long-lived owners retaining resources that have
+already finished. An optional standard signal provides a terminal state
+and removable listeners without a new subscription abstraction.
+**Rejected:** mandatory fatal cleanup or default logging, because a server
+and a client need different responses; swallowing defects, which hides a
+broken resource guarantee; unregistering as soon as closing starts, which
+can skip unfinished cleanup; removing the standard disposable adapters.
+**Cost.** Resource authors must signal only successful terminal cleanup.
+A transport's close event alone is insufficient if listeners or tasks
+remain. The types cannot prevent throws or unsafe casts. An application
+that catches a cleanup defect may continue with a leaked resource; ramme
+cannot decide its operational policy. DESIGN.md §2.4, §2.6, §4.12.
+
 ### D3′. One release contract: `[Symbol.asyncDispose]`
+
+*Amended by D47:* native resources use a release task and optional terminal
+signal. Standard disposables remain foreign adapters.
 
 The resource protocol is the platform's: an entry is an `AsyncDisposable`
 (a `Disposable` is accepted and wrapped), and `own(value, release)` and
@@ -1858,9 +1910,9 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   `Fiber<T, E>` with the task's `E` and `Fiber<T>` is the fiber of a
   `Task<A, T>`; a failure handler is handed `Fiber<unknown, unknown>`.
   `Outcome`'s defaults to `unknown`, the outcome of any node.
-- *A release takes any `E`*: `Release<T>` may return `Operation<void,
-  unknown>`, since a release's expected failure, its own or a callee's
-  re-yielded, is its owner's release failure, a defect there.
+- *A release has no expected failures (D47)*: `Release<T>` may return
+  `Operation<void, never>`. Untyped cleanup that yields an expected failure
+  still propagates it as its owner's defect.
 - *`$` takes a `Result`, not a promise of one* (DESIGN.md §4.13).
 - *A failure handler's generator that fails* (its own `fail`, or a callee's
   re-yielded) is returned, its `finally` blocks run as the rest of the
@@ -1873,8 +1925,8 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   module-level `const notFound = fail(e)` is fine, and each `yield*` yields
   afresh, as an op's description does (D41, decision 3). What it returns is
   an instance of a private class, recognized as decision 28 recognizes an op
-  (DESIGN.md §4.5): `own(v, () => fail(e))` is the owner's release failure,
-  never a dropped value.
+  (DESIGN.md §4.5): untyped `own(v, () => fail(e))` is the owner's release
+  defect, never a dropped value; the public types refuse it (D47).
 
 ### D43. The platform layer: every wait and every callback has a ramme spelling
 

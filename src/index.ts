@@ -16,6 +16,7 @@ export type {
   Op,
   Body,
   Release,
+  Resource,
   Provider,
   Public,
   LookupOptions,

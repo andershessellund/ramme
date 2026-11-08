@@ -131,14 +131,26 @@ export type Body<T, A extends unknown[] = [], E = never> = (
 ) => Generator<Instruction | Fails<E>, T, unknown> | Op<T, E> | Plain<T>;
 
 /**
- * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). A generator
- * function, or a function returning an op or a `fail(e)`, is driven in the release fiber (DESIGN.md §4.5). One returning a promise
- * (an `async` release) is waited for as a bare wait: the release fiber is current only until its first `await`, after
- * which ramme throws `NoCurrentNodeError`; write a release that waits for ramme work as `function*`. Any `E`: a
- * release's expected failure, its own `yield* fail(e)` or a callee's re-yielded, is a release failure of its owner,
- * which amends the owner's outcome to a `defect` (D42).
+ * The release half of `own(value, release)`, protected from owner cancellation. A task or generator runs in the
+ * release fiber. Promise-returning callbacks adapt foreign cleanup; their ambient frame ends at the first await.
+ * Cleanup has no expected failures. An escaping exception is a defect, propagated after the remaining cleanup.
  */
-export type Release<T> = (value: T) => void | Promise<void> | Operation<void, unknown>;
+export type Release<T> = (value: T) => void | Promise<void> | Operation<void>;
+
+/**
+ * A native resource. Its release task runs in the owner's protected release fiber, with the task's bound receiver.
+ * Owner cancellation cannot halt it; its signal is the owner's release deadline. Cleanup must not fail: any
+ * escaping error is a defect, propagated after the remaining releases, without logging or a shutdown policy.
+ */
+export interface Resource {
+  readonly release: Task<[], void>;
+  /**
+   * Optional, stable terminal signal. Fire only after all cleanup has completed successfully, not when closing
+   * starts. An already-fired signal makes ownership a no-op. Natural completion removes the ownership entry;
+   * it does not interrupt or hide the result of a release already running, or invalidate a DI cache entry.
+   */
+  readonly released?: AbortSignal;
+}
 
 /**
  * A binding of `key` on the node it is registered on (`providers`, `addProvider`). Its value is stored on that
@@ -314,11 +326,11 @@ export interface Context {
 
   // --- attachment: the explicit stack (DESIGN.md §2.6) ---
   /** The contract: attach a resource; it is released by this node (C1: before `own` returns). */
-  own<T extends Disposable | AsyncDisposable>(resource: T): T;
+  own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
   /** Sugar: attach `value` with a release function. */
   own<T extends object>(value: T, release: Release<T>): T;
   /** Sugar: attach a deferred function, run at release; a generator function is driven there (DESIGN.md §4.5). */
-  own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void, unknown>)): T;
+  own<T extends object>(defer: T & Release<void>): T;
   /** Release `value` now, exactly once (C7): eager, so its op only waits; a promise as well (DESIGN.md §4.2). */
   release(value: object): Op<void> & Promise<void>;
   releaseAll(): Op<void> & Promise<void>;

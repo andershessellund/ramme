@@ -102,9 +102,10 @@ at construction.
 An **entry** is what a stack holds. A *node entry* is a child node (a
 fiber, a `child()`, a pool, a DI value's node); its release is `abort()`
 or `close()` followed by waiting for its completion. A *passive entry* is
-anything else: an `AsyncDisposable` or `Disposable`, or the release that
-`own(value, release)` or `own(deferFn)` builds. It has no signal or state
-of its own, and its release is one call of its dispose.
+anything else: a native `Resource`, an `AsyncDisposable` or `Disposable`,
+or the release that `own(value, release)` or `own(deferFn)` builds. It has
+no node of its own. A native resource may expose a terminal `released`
+signal so its completed entry can leave the stack immediately (D47).
 
 ### 2.2 The three bits (D19, D20)
 
@@ -195,6 +196,23 @@ release fiber as a linked signal delivers any node (§4.1), a shield and a
 halted body's unwind fiber (§4.2) included, each `observe` (§4.3). Nothing
 is abandoned (D21).
 
+Native resources expose `release: Task<[], void>` (D47). The task body runs
+directly in this release fiber with its bound receiver, providers and
+scopes. The release fiber overrides the task's `interrupt`, `signal` and
+`timeoutMs`: cancellation comes only from the owner's release deadline,
+in `observe` mode. Tasks passed as `own(defer)` or `own(value, task)` run
+the same way. Standard disposal methods and promise-returning callbacks
+are foreign adapters, whose promises are waited for as bare waits.
+The task's `onFailure` destination is replaced by the entry's defect
+propagation. Early cleanup uses `release(resource)`; a direct call of
+`resource.release()` remains an ordinary task call.
+
+Cleanup has no expected failure channel. `Release<T>` only permits
+`Operation<void, never>`; an escaping exception, rejected promise, or an
+expected failure from untyped cleanup is a defect of the owner. The loop
+continues its remaining releases and propagates all errors (§4.12).
+Ramme does not log cleanup defects, poison a root, or impose shutdown.
+
 ### 2.5 What the order guarantees (D16)
 
 - **G1** Anything code or its descendants read from a node's provided values
@@ -229,8 +247,8 @@ stack, so the provided value outlives what it uses.
 ### 2.6 Ownership
 
 **`own` and `release`.** `own(x)` attaches to the current node; `ctx.own(x)`
-to a named one. The overloads are the contract (`own(resource)` for an
-`AsyncDisposable` or `Disposable`; a node itself), and two sugars that wrap
+to a named one. The overloads are the contract (`own(resource)` for a native
+`Resource`, `AsyncDisposable` or `Disposable`; a node itself), and two sugars that wrap
 it: `own(value, release)` and `own(deferFn)`. Every overload returns what
 it attached; attached values must be objects so that `release(x)` finds the
 entry by identity. `own(x)` with one argument on a passive object this node
@@ -240,6 +258,18 @@ its owner's explicit stack, so `own(node)` attaches nothing: it makes a
 subscribed child unsubscribed (§2.3), and a second `own` of it is
 `AlreadyOwnedError`. There is no bare detach and no transfer of an entry
 between owners (D1′).
+
+A native `Resource` has a `release` task with no arguments and no expected
+failures. Its optional, stable `released: AbortSignal` fires only after
+successful terminal cleanup. An already-fired signal makes `own` a no-op;
+otherwise ramme listens for it and physically unlinks the entry when it
+fires, emitting `entry:released`. It removes the listener when the entry
+leaves the stack. Once an owner-driven release starts, only that release
+can finish the entry: a terminal signal cannot hide later defects or let
+the owner finish before cleanup. Natural retirement changes neither a DI
+cache nor a fork's separate join obligation. Native release takes
+precedence over standard disposal methods. An explicit release callback
+overrides the whole native protocol, including automatic retirement.
 
 ```ts
 const owner = current();
@@ -278,7 +308,9 @@ An asynchronous variant takes the lease at first use with `this.#node` as
 its owner and registers the `own(this, …)` entry after it, so that LIFO
 still commits before the connection is returned. `commit` and `rollback`
 are `task(this, …)` fields, whose op the release returns (`Release<T>` is
-`(value: T) => void | Promise<void> | Operation<void, unknown>`, §4.5).
+`(value: T) => void | Promise<void> | Operation<void>`, §4.5). These tasks
+must have no expected failures. A commit with an expected rejection must
+instead run explicitly before cleanup; a cleanup exception is a defect.
 
 *What the release sees.* `o === undefined` means the entry is released while
 the request still runs, in one of two ways. Either it is released without a
@@ -1078,8 +1110,9 @@ and the runtime fails the node with a `TypeError` naming `function*`, every
 node kind but an entry's release fiber. The runtime decides by what the
 body returned: an op is driven as the body's own `yield*` of it, in its
 frame, so a body returning an op, `task(() => leaf(x))`, works (decision
-28), and so is a `fail(e)` (D42), so a release or a handler that returns one
-fails as one that yields it does; a generator object is driven; a thenable
+28), and so is a `fail(e)` (D42), so untyped cleanup or a handler returning
+one fails as one yielding it does (typed cleanup excludes expected
+failures, D47); a generator object is driven; a thenable
 is refused; an `async function*` is refused; anything else is the value. A generator's own return value is a value: `return yield* op`, never
 `return op`. A release may be a generator function or return an op
 (`own(tx, function* (tx) { … })`), driven in its release fiber, and so may a
@@ -1638,7 +1671,7 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` (marked as a redirect through `inject.ts`) |
 | `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, `Provider`, `Public`, `Op`, `Operation`, `Instruction`, `Fail`, … |
 | `result.ts` | the `ramme/result` subpath: free functions over plain `Result` objects, and `$`, the operation that yields a held `Result`'s failure as a `Fail` |
-| `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (the `own` overloads into one dispose) |
+| `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (native resource tasks and foreign adapters into one release action) |
 | `context-storage.ts` | the `Frame` and the synchronous slot: `runInFrame`, `runDetached`, current-frame reads (§6) |
 | `disposal-symbols.ts` | the floor's guard: `Symbol.dispose` and `Symbol.asyncDispose` where a runtime lacks them (the one side-effect module, §1.2) |
 | `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, the keys its factory injected itself, pin), resolve results (with the redirect an alias followed), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed), and the type machinery that reads a body's `E` off its yield union (D42) |
@@ -1656,7 +1689,8 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `platform.ts` | the `ramme/platform` subpath (§4.9): `fetch`, `listen`, `nextFrame`, `each`, over the public surface |
 
 Runtime import graph (type-only imports not shown; no evaluation-order
-cycles): `scope`, `resource`, `internal-context` and `context` are leaves;
+cycles): `scope`, `internal-context` and `context` are leaves;
+`resource` sits over `internal-context` for the task brand;
 `result` is a leaf: it imports only types from `context`; `context-key` sits
 over `scope` (a key's declared scope, D32); `topic` sits over `context-key`,
 and `lifecycle-events` over `topic`; `context-storage` is a leaf at runtime;

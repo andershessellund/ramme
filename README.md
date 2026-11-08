@@ -70,8 +70,8 @@ What the example shows:
   `Api` has no provider, so the class is its own default factory: it is built
   on first use and placed as deep in the tree as its dependencies require,
   here at the root.
-- **Acquisition is ownership.** `own(x)` attaches `x` (an `AsyncDisposable`
-  or `Disposable`) to the current node, which releases it. In a constructor
+- **Acquisition is ownership.** `own(x)` attaches a native `Resource`,
+  `AsyncDisposable` or `Disposable` to the current node, which releases it. In a constructor
   that node is the service's own, so the pool lives exactly as long as `Api`.
 - **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
   the *current node*, which ramme sets while a body runs, on every platform,
@@ -509,6 +509,67 @@ borrowed. Two more things to know about libraries:
   it, for as long as it hangs: `releaseTimeoutMs` only signals. Give such
   cleanup a driver-level timeout, or hand it the deadline:
   `yield* wait((signal) => conn.query('ROLLBACK', signal))`.
+
+## Resources
+
+A native `Resource` has a `release: Task<[], void>` and, optionally, a
+`released: AbortSignal`. Ramme runs the task in a protected release fiber:
+owner cancellation cannot cut cleanup short, and ambient operations keep
+working across its waits. Use `task(this, function* …)` for a release that
+needs the resource's receiver.
+
+```ts
+import { task, wait } from 'ramme';
+import type { Resource } from 'ramme';
+
+class Connection implements Resource {
+  readonly #completed = new AbortController();
+  readonly released = this.#completed.signal;
+
+  constructor(readonly closeTransport: () => Promise<void>) {}
+
+  readonly release = task(this, function* release() {
+    yield* wait(this.closeTransport());
+    this.#completed.abort();
+  });
+}
+```
+
+Attach it with `own(connection)`; for early cleanup, use
+`yield* release(connection)` so ramme supplies the protected release
+fiber. Calling `connection.release()` directly is an ordinary task call.
+The optional `released` signal lets a
+resource report successful terminal cleanup, including when it finishes
+independently. Ramme then removes its ownership entry immediately. Signal
+only after **all** cleanup is done: a transport closing does not suffice if
+listeners or background tasks still need cleanup. A completed resource is
+not registered again. A signal fired during an owner-driven release does
+not bypass that release's completion or its defects. Retirement does not
+invalidate a DI cache or satisfy a fiber's explicit join obligation.
+
+Cleanup has no expected failure channel (`E = never`). A thrown error or
+rejected foreign cleanup promise is a **defect**. Ramme continues the
+remaining releases, then propagates the defect, preserving any original
+body failure alongside it. The application can catch it and decide what
+to do; ramme neither logs it nor shuts down the application. Fallible
+business operations, such as a commit that may be rejected normally,
+belong in an explicit task before cleanup.
+
+`own(value, release)` and `own(defer)` accept tasks or inline release
+bodies with no expected failures. Promise-returning callbacks and standard
+`Disposable`/`AsyncDisposable` objects remain foreign adapters; an async
+callback has no ambient node after its first `await`. A native `release`
+task takes precedence over the standard disposal methods. An explicit
+`own(value, release)` overrides the native protocol, including its
+retirement signal.
+
+The release fiber supplies cancellation policy even if the task has its
+own `interrupt`, `signal` or `timeoutMs` options: its signal is the owner's
+`releaseTimeoutMs` deadline, which signals without abandoning cleanup.
+Pass that signal to a driver when it needs a deadline. Other task options,
+such as providers and scopes, remain available during release. The task's
+`onFailure` option does not intercept cleanup defects; they propagate
+through the ownership entry.
 
 ## The platform
 

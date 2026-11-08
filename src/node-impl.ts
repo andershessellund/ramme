@@ -53,6 +53,7 @@ import type {
   PoolOptions,
   Provider,
   Release,
+  Resource,
   SettleResult,
   Task,
   TaskOptions,
@@ -1313,28 +1314,26 @@ export class NodeImpl implements Context {
     e.done = promise; // exists BEFORE any dispose code runs (D16)
     const n = e.node;
     const action: () => unknown = n !== undefined ? () => this.releaseNodeEntry(n) : e.dispose; // a generator or an op is driven (DESIGN.md §4.5)
-    const rf = new NodeImpl({
-      kind: 'release',
-      parent: this,
-      subscribed: false,
-      stack: 'none',
-      opts: { name: `release:${e.name}`, interrupt: 'observe', signal: deadline },
-      body: { fn: action, args: [], destination: noop, taskName: `release:${e.name}` },
-    });
-    rf.startBody(); // synchronous up to the first await; rf is current inside `action`
     // Never throws (I2, I10): it runs inside releaseLoop, fire() and settle reactions, where an exception
     // would strand the loop, skip the rest of a delivery or reject unhandled. The event text cannot
     // throw (errorText), the entry is released before any of it is built, and e.done settles whatever
     // happens: a loop that finds the entry 'releasing' waits on e.done, so the two must change together.
-    const finish = (): void => {
+    const finish = (o: Outcome<unknown>): void => {
       try {
-        const o = rf.outcome!;
-        if (failed(o)) {
+        let failure = failed(o) ? { error: o.error } : undefined;
+        const detach = e.detach;
+        e.detach = undefined;
+        try {
+          detach?.();
+        } catch (error) {
+          failure = { error: failure === undefined ? error : new SuppressedErrorCtor(error, failure.error) };
+        }
+        if (failure !== undefined) {
           if (e.early) {
             // D16: delivered to release()/releaseAll()'s awaiter, or surfaced by the owner's completion.
-            e.failure = { error: o.error, consumed: false };
+            e.failure = { error: failure.error, consumed: false };
             this.unconsumed.add(e.failure);
-          } else this.extraErrors.push(o.error); // C6: continue (DESIGN.md §4.12)
+          } else this.extraErrors.push(failure.error); // C6: continue (DESIGN.md §4.12)
         }
         e.state = 'released';
         e.stack.unlink(e); // physical removal: no retention after unlink
@@ -1342,17 +1341,33 @@ export class NodeImpl implements Context {
           type: 'entry:released',
           entryName: e.name,
           stack: e.stack.kind,
-          error: failed(o) ? errorText(o.error) : undefined,
+          error: failure === undefined ? undefined : errorText(failure.error),
         });
       } finally {
         resolve();
       }
     };
-    if (rf.state === 'complete') {
-      finish(); // all-synchronous release (DESIGN.md §2.4)
+    let rf: NodeImpl;
+    try {
+      rf = new NodeImpl({
+        kind: 'release',
+        parent: this,
+        subscribed: false,
+        stack: 'none',
+        opts: { ...e.options, name: `release:${e.name}`, interrupt: 'observe', signal: deadline, timeoutMs: undefined },
+        body: { fn: action, args: [], destination: noop, taskName: `release:${e.name}` },
+      });
+      rf.startBody(); // synchronous up to the first await; rf is current inside `action`
+    } catch (error) {
+      // Invalid native task options or provider placement are cleanup defects too; never strand the release loop.
+      finish({ status: 'defect', error });
       return undefined;
     }
-    outsideFrames(() => void rf.completion.then(finish)); // not in a creation frame that started the release (DESIGN.md §6)
+    if (rf.state === 'complete') {
+      finish(rf.outcome!); // all-synchronous release (DESIGN.md §2.4)
+      return undefined;
+    }
+    outsideFrames(() => void rf.completion.then(() => finish(rf.outcome!))); // not in a creation frame that started the release (DESIGN.md §6)
     return promise;
   }
 
@@ -2310,9 +2325,9 @@ export class NodeImpl implements Context {
     (this.providers ??= new Map()).set(provider.key, provider as Provider<unknown>);
   }
 
-  own<T extends Disposable | AsyncDisposable>(resource: T): T;
+  own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
   own<T extends object>(value: T, release: Release<T>): T;
-  own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void, unknown>)): T;
+  own<T extends object>(defer: T & Release<void>): T;
   own(target: object, release?: Release<any>): object {
     this.assertOpen('own'); // C3; pending and delivered (C2) allowed
     if (isNodeImpl(target)) {
@@ -2334,9 +2349,40 @@ export class NodeImpl implements Context {
         `${describe(target)} is already owned by ${describeNode(this)}: own(x, release) would register a second release`,
       ); // C8
     }
-    const dispose = toDispose(target, release); // TypeError if nothing applies (C1: synchronous)
+    const { dispose, options, released } = toDispose(target, release); // TypeError if nothing applies (C1: synchronous)
+    if (released?.aborted) return target; // cleanup already completed; no ownership obligation remains
     const name = nameOf(target);
-    this.explicit.push({ target, name, node: undefined, dispose, state: 'live', done: undefined, failure: undefined, early: false });
+    const entry = this.explicit.push({ target, name, node: undefined, dispose, options, state: 'live', done: undefined, failure: undefined, early: false });
+    if (released !== undefined) {
+      const retire = (): void => {
+        if (entry.state !== 'live') return; // an in-flight release still owns completion and error propagation
+        // Listener removal can re-enter the owner. Keep the entry pending until its cleanup and diagnostics end.
+        const done = Promise.withResolvers<void>();
+        entry.state = 'releasing';
+        entry.done = done.promise;
+        const detach = entry.detach;
+        entry.detach = undefined;
+        let failure: { error: unknown } | undefined;
+        try {
+          detach?.();
+        } catch (error) {
+          failure = { error };
+          this.extraErrors.push(error);
+        }
+        entry.state = 'released';
+        entry.stack.unlink(entry);
+        this.emit({ type: 'entry:released', entryName: name, stack: 'explicit', error: failure === undefined ? undefined : errorText(failure.error) });
+        done.resolve();
+      };
+      entry.detach = () => released.removeEventListener('abort', retire);
+      released.addEventListener('abort', retire, { once: true });
+      if (released.aborted) retire(); // includes completion during listener registration
+      if (entry.state !== 'live') {
+        released.removeEventListener('abort', retire);
+        entry.detach = undefined;
+      }
+    }
+    // Subscribe before publishing ownership: an observer can complete the resource and then close its owner.
     this.emit({ type: 'entry:registered', entryName: name, stack: 'explicit' });
     return target;
   }

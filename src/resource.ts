@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
 // Error types (DESIGN.md §4.12, D17) and entry wrapping for `own`.
 //
-// A leaf module: no runtime imports, so every other module can throw these.
+// Depends only on the task brand, so every other module can throw these.
 // Every class sets `name` to its class name; DESIGN.md §4.12 lists
 // exactly when each is thrown.
 // ---------------------------------------------------------------------------
 
-import type { Context } from './context.js';
+import type { Context, Resource, TaskOptions } from './context.js';
+import { isTask } from './internal-context.js';
+import type { TaskLike } from './internal-context.js';
 
 /**
  * A free function, or an op through one, was called outside any node: at top level, or in plain async code after its
@@ -137,32 +139,46 @@ export const SuppressedErrorCtor: new (error: unknown, suppressed: unknown, mess
   (globalThis as { SuppressedError?: SuppressedErrorConstructor }).SuppressedError ?? SuppressedErrorShim;
 
 // ---------------------------------------------------------------------------
-// toDispose — the three `own` overloads as one dispose function (DESIGN.md §2.6)
+// toDispose — native resources and foreign adapters as one release action.
 // ---------------------------------------------------------------------------
 
+/** A task body or foreign adapter, with native task options and optional retirement. */
+export interface ReleaseAction {
+  readonly dispose: () => unknown;
+  readonly options?: TaskOptions;
+  readonly released?: AbortSignal;
+}
+
+function action(fn: TaskLike | ((value: any) => unknown), args: unknown[]): ReleaseAction {
+  // Run tasks directly in the protected fiber, including their bound receiver. Calling the task normally would
+  // introduce a child with its own interrupt policy and could halt cleanup before it finishes.
+  if (isTask(fn)) return { dispose: () => Reflect.apply(fn.body, fn.self, args), options: fn.opts };
+  return { dispose: () => Reflect.apply(fn, undefined, args) };
+}
+
 /**
- * Wraps what `own` was given into the function the release loop calls.
- * Throws `TypeError` synchronously when nothing applies, so `own` fails at
- * the call site (C1).
- *
- * - `release` given → `() => release(target)`
- * - `target[Symbol.asyncDispose]` is a function → `() => target[Symbol.asyncDispose]()`
- * - `target[Symbol.dispose]` is a function → `() => target[Symbol.dispose]()`
- * - `target` is a function → `target` (the defer overload)
- *
- * What the function returns is the release fiber's body result (DESIGN.md §2.4, §4.5): a generator object or an op
- * is driven in the release fiber; a promise (a foreign `[Symbol.asyncDispose]()`, an `async` release) is waited for
- * as a bare wait, and the release fiber is current only until its first `await`; anything else is done.
+ * Normalize explicit cleanup, a native resource, a standard disposable, or a deferred body, in that order.
+ * Throws synchronously for an invalid resource. Generators and operations are driven in the release fiber;
+ * foreign promises are bare waits whose ambient frame ends at the first await.
  */
-export function toDispose(target: object, release?: (value: any) => unknown): () => unknown {
+export function toDispose(target: object, release?: (value: any) => unknown): ReleaseAction {
   if (release !== undefined) {
     if (typeof release !== 'function') throw new TypeError('own(value, release): release must be a function');
-    return () => release(target);
+    return action(release, [target]);
+  }
+  const native = target as Partial<Resource>;
+  const task = native.release;
+  if (isTask(task)) {
+    const released = native.released;
+    if (released !== undefined && (typeof released.aborted !== 'boolean' ||
+      typeof released.addEventListener !== 'function' || typeof released.removeEventListener !== 'function'))
+      throw new TypeError('own(): resource.released must be an AbortSignal');
+    return { ...action(task, []), released };
   }
   const t = target as Partial<AsyncDisposable & Disposable>;
   // The lib types asyncDispose as PromiseLike; the release loop treats any thenable as pending (isPromise is duck-typed).
-  if (typeof t[Symbol.asyncDispose] === 'function') return () => t[Symbol.asyncDispose]!();
-  if (typeof t[Symbol.dispose] === 'function') return () => t[Symbol.dispose]!();
-  if (typeof target === 'function') return target as () => unknown;
-  throw new TypeError('own(): value is neither Disposable nor AsyncDisposable; pass a release function');
+  if (typeof t[Symbol.asyncDispose] === 'function') return { dispose: () => t[Symbol.asyncDispose]!() };
+  if (typeof t[Symbol.dispose] === 'function') return { dispose: () => t[Symbol.dispose]!() };
+  if (typeof target === 'function') return action(target as () => unknown, []);
+  throw new TypeError('own(): value is not a Resource, Disposable or AsyncDisposable; pass a release function');
 }

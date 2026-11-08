@@ -47,6 +47,7 @@ import type {
   Provider,
   Public,
   Release,
+  Resource,
   Result,
   SettleResult,
   Success,
@@ -246,8 +247,8 @@ export function generatorReleases(ctx: Context): void {
 }
 
 /**
- * The core's values, exactly: 57 of the 88 names the surface check lists (scripts/check-surface.mjs), which also
- * checks the 31 types, which a namespace object does not carry.
+ * The core's values, exactly: 57 of the 89 names the surface check lists (scripts/check-surface.mjs), which also
+ * checks the 32 types, which a namespace object does not carry.
  */
 type _CoreValues = Expect<
   Equal<
@@ -485,14 +486,29 @@ export class Repo {
 }
 type _This = Expect<Equal<ReturnType<Repo['load']>, Generator<Fail<UserNotFound>, string, unknown>>>;
 
-/** A release may yield any `E`: its expected failure is a release failure of its owner, a defect there (D42). */
-export function releasesTakeAnyE(ctx: Context, t: Task<[], void, UserNotFound>): void {
+/** Cleanup has no expected failures, including failures re-yielded by a callee. */
+export function releasesCannotFail(ctx: Context, t: Task<[], void, UserNotFound>): void {
+  // @ts-expect-error -- cleanup cannot propagate a callee's expected failure
   ctx.own({ id: 1 }, function* () {
     yield* t();
   });
+  // @ts-expect-error -- cleanup cannot yield an expected failure
   const _release: Release<object> = function* () {
     yield* fail(new UserNotFound());
   };
+  // @ts-expect-error -- a deferred task cannot have expected failures
+  ctx.own(t);
+  // @ts-expect-error -- the ambient overload has the same constraint
+  ramme.own(t);
+  // @ts-expect-error -- a native resource's task cannot have expected failures
+  const _fallible: Resource = { release: t };
+  // @ts-expect-error -- native release is a task, not a promise-returning function
+  const _async: Resource = { release: async () => {} };
+  // @ts-expect-error -- native release is a task, not a bare generator
+  const _generator: Resource = { release: function* () {} };
+  const native: Resource = { release: ramme.task(function* () { yield* ramme.sleep(1); }) };
+  const _identity: Resource = ctx.own(native);
+  ramme.own(native);
 }
 
 /** `join` and `result` default `E` to `never`: a written `join<T>(f)` is the join of a fiber with no expected failure. */
