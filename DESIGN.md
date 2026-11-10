@@ -56,7 +56,7 @@ package.json names exactly that file); the floor is A2 (§10).
 | --- | --- |
 | `task` and a task's call `t(…)`, `task(this, …)`, `fork`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its functions and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | generator bodies (§4.2, §4.5): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback; `ramme/platform`'s `fetch`, `listen`, `nextFrame` and `each` (§4.9) | `Operation<T, E>`, the type of what a body may `yield*`: an op; `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of an annotated body |
-| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
+| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `Resource` and its `[Resource.release]()`, a release declared on a value's class, and `own(child())`, a resource with a lifetime of its own (§2.6, D47); `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`; `createKeyFor`, an interface's key over its class (§3.1); `valueProvider`; `aliasProvider`, a key bound to an implementation that keeps its own scope (a test fake); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`, `runSync`; keys with default factories (§8) |
 
 The **work verbs**, whose op is lazy (§4.2), are a task's call (`t(…)`, a
@@ -102,10 +102,9 @@ at construction.
 An **entry** is what a stack holds. A *node entry* is a child node (a
 fiber, a `child()`, a pool, a DI value's node); its release is `abort()`
 or `close()` followed by waiting for its completion. A *passive entry* is
-anything else: a native `Resource`, an `AsyncDisposable` or `Disposable`,
+anything else: a `Resource` (§2.6), an `AsyncDisposable` or `Disposable`,
 or the release that `own(value, release)` or `own(deferFn)` builds. It has
-no node of its own. A native resource may expose a terminal `released`
-signal so its completed entry can leave the stack immediately (D47).
+no signal or state of its own, and its release is one call of its dispose.
 
 ### 2.2 The three bits (D19, D20)
 
@@ -196,22 +195,25 @@ release fiber as a linked signal delivers any node (§4.1), a shield and a
 halted body's unwind fiber (§4.2) included, each `observe` (§4.3). Nothing
 is abandoned (D21).
 
-Native resources expose `release: Task<[], void>` (D47). The task body runs
-directly in this release fiber with its bound receiver, providers and
-scopes. The release fiber overrides the task's `interrupt`, `signal` and
-`timeoutMs`: cancellation comes only from the owner's release deadline,
-in `observe` mode. Tasks passed as `own(defer)` or `own(value, task)` run
-the same way. Standard disposal methods and promise-returning callbacks
-are foreign adapters, whose promises are waited for as bare waits.
-The task's `onFailure` destination is replaced by the entry's defect
-propagation. Early cleanup uses `release(resource)`; a direct call of
-`resource.release()` remains an ordinary task call.
+**What a release is, and what it may not do (D47).** An entry's release is
+the function `own` was given, a `Resource`'s `[Resource.release]()` method,
+or a platform dispose method (§2.6); a task given as the release is called as
+any task is (§4.5), so it runs as a child of the release fiber with its own
+options. A release has no expected failures: `Release<T>` and `Resource` are
+typed with `E = never`, so a release that yields `fail(e)`, or calls an
+operation that may, does not compile. What a release throws, what a promise
+it returns rejects with, and an expected failure that untyped code yields
+there are all release failures of the owner, a defect (§4.12). The loop goes
+on with the remaining entries (C6), and the owner reports every failure at
+its completion; ramme logs none of them and shuts nothing down.
 
-Cleanup has no expected failure channel. `Release<T>` only permits
-`Operation<void, never>`; an escaping exception, rejected promise, or an
-expected failure from untyped cleanup is a defect of the owner. The loop
-continues its remaining releases and propagates all errors (§4.12).
-Ramme does not log cleanup defects, poison a root, or impose shutdown.
+**What hears the deadline.** An `observe` node forwards a delivery only to
+its `restore` subscribers (§4.3), so the deadline reaches the release's own
+waits, through `signal()` and `wait((signal) => p)`, and of the tasks a
+release calls only a `restore` one, which it halts: that call throws
+`FiberAbortedError` in the release, a release failure unless the release
+catches it. Any other callee's signal is its own, fired by its own
+`timeoutMs` or `signal`.
 
 ### 2.5 What the order guarantees (D16)
 
@@ -247,29 +249,17 @@ stack, so the provided value outlives what it uses.
 ### 2.6 Ownership
 
 **`own` and `release`.** `own(x)` attaches to the current node; `ctx.own(x)`
-to a named one. The overloads are the contract (`own(resource)` for a native
-`Resource`, `AsyncDisposable` or `Disposable`; a node itself), and two sugars that wrap
-it: `own(value, release)` and `own(deferFn)`. Every overload returns what
-it attached; attached values must be objects so that `release(x)` finds the
-entry by identity. `own(x)` with one argument on a passive object this node
-already owns is a no-op that returns `x` (D16); `own(x, release)` for it is
-`AlreadyOwnedError` (a second release). A child node is already an entry on
-its owner's explicit stack, so `own(node)` attaches nothing: it makes a
-subscribed child unsubscribed (§2.3), and a second `own` of it is
-`AlreadyOwnedError`. There is no bare detach and no transfer of an entry
-between owners (D1′).
-
-A native `Resource` has a `release` task with no arguments and no expected
-failures. Its optional, stable `released: AbortSignal` fires only after
-successful terminal cleanup. An already-fired signal makes `own` a no-op;
-otherwise ramme listens for it and physically unlinks the entry when it
-fires, emitting `entry:released`. It removes the listener when the entry
-leaves the stack. Once an owner-driven release starts, only that release
-can finish the entry: a terminal signal cannot hide later defects or let
-the owner finish before cleanup. Natural retirement changes neither a DI
-cache nor a fork's separate join obligation. Native release takes
-precedence over standard disposal methods. An explicit release callback
-overrides the whole native protocol, including automatic retirement.
+to a named one. The overloads are the contract (`own(resource)` for a
+`Resource`, an `AsyncDisposable` or a `Disposable`; a node itself), and two
+sugars that wrap it: `own(value, release)` and `own(deferFn)`. Every
+overload returns what it attached; attached values must be objects so that
+`release(x)` finds the entry by identity. `own(x)` with one argument on a
+passive object this node already owns is a no-op that returns `x` (D16);
+`own(x, release)` for it is `AlreadyOwnedError` (a second release). A child
+node is already an entry on its owner's explicit stack, so `own(node)`
+attaches nothing: it makes a subscribed child unsubscribed (§2.3), and a
+second `own` of it is `AlreadyOwnedError`. There is no bare detach and no
+transfer of an entry between owners (D1′).
 
 ```ts
 const owner = current();
@@ -308,9 +298,10 @@ An asynchronous variant takes the lease at first use with `this.#node` as
 its owner and registers the `own(this, …)` entry after it, so that LIFO
 still commits before the connection is returned. `commit` and `rollback`
 are `task(this, …)` fields, whose op the release returns (`Release<T>` is
-`(value: T) => void | Promise<void> | Operation<void>`, §4.5). These tasks
-must have no expected failures. A commit with an expected rejection must
-instead run explicitly before cleanup; a cleanup exception is a defect.
+`(value: T) => void | Promise<void> | Operation<void>`, §4.5), so neither has
+an expected failure (D47): a commit that may be refused as a matter of course
+is an operation the body calls, with that failure in its `E`, and what the
+release's own commit throws is a defect.
 
 *What the release sees.* `o === undefined` means the entry is released while
 the request still runs, in one of two ways. Either it is released without a
@@ -359,12 +350,42 @@ one release error, or an `AggregateError` when several failed (§4.12).
 Two nodes owning the same passive object each run its dispose once;
 idempotence of a passive entry is its author's responsibility.
 
+**The native protocol (D47).** A `Resource` is a value whose class defines a
+`[Resource.release]()` method, and `own(value)` is
+`own(value, (v) => v[Resource.release]())`: the method is the entry's release
+(§2.4), run once, with the value as `this`. `Resource.release` is a symbol
+(`Symbol.for('ramme.release')`), as the platform's `Symbol.asyncDispose` is:
+a member a class names `release` is nothing to `own`, and the method is
+reached by no name, so nothing but the owner calls it and early release is
+`release(value)` (C7). `own` takes the native method before
+`[Symbol.asyncDispose]` and `[Symbol.dispose]`, which a class may keep for
+`using` outside ramme, and `own(value, release)` replaces all three for that
+entry. README's first `Connection` is the example
+([README](README.md#resources)).
+
 **Producers attach before they return.** A function that returns a newly
 acquired resource attaches it before returning and returns a handle whose
 `release()` goes through the owner. The owner defaults to the current node;
 a producer that grants later, inside some other fiber, holds the owner and
 uses the method form, `acquire(owner: Context = current()): Promise<Lease>`,
 which calls `owner.own(lease)` before it returns.
+
+**A resource that finishes on its own is a node (D47).** A passive entry has
+no state (§2.1): its owner cannot tell that the thing behind it is gone, and
+keeps the entry until its own release. A resource that can complete by
+itself (a connection whose peer hangs up, a subscription that ends) is
+therefore given a node, `own(child())`, which holds the resource's own
+entries and which the resource closes when it is done, as README's second
+`Connection` does ([README](README.md#resources)). The node is an
+unsubscribed entry (§2.3): it is released at its turn, as a passive entry is
+(G2), where a subscribed `child()`, a scope of the work, is ended by its
+owner's body exit before the entries attached after it (§2.4, step 1). A
+node that completes leaves its owner's stack (§2.4, step 4), so a long-lived
+owner keeps nothing for it; `close()` of a complete node is a no-op (§2.7),
+so an owner's early close and the natural end never collide; and its release
+failure, when no body waited for the close, surfaces from its owner's
+completion (§4.12). There is still no bare detach: an entry leaves a stack
+only by being released.
 
 **Early release, `finally` and `catch`.** A body may release anything it
 attached at any time; an interrupted body is halted (§4.2), which is no
@@ -1110,11 +1131,12 @@ and the runtime fails the node with a `TypeError` naming `function*`, every
 node kind but an entry's release fiber. The runtime decides by what the
 body returned: an op is driven as the body's own `yield*` of it, in its
 frame, so a body returning an op, `task(() => leaf(x))`, works (decision
-28), and so is a `fail(e)` (D42), so untyped cleanup or a handler returning
-one fails as one yielding it does (typed cleanup excludes expected
-failures, D47); a generator object is driven; a thenable
-is refused; an `async function*` is refused; anything else is the value. A generator's own return value is a value: `return yield* op`, never
-`return op`. A release may be a generator function or return an op
+28), and so is a `fail(e)` (D42), so a handler that returns one fails as one
+that yields it does, and so does a release that untyped code makes return
+one (a typed release has no expected failures, D47); a generator object is
+driven; a thenable is refused; an `async function*` is refused; anything
+else is the value. A generator's own return value is a value:
+`return yield* op`, never `return op`. A release may be a generator function or return an op
 (`own(tx, function* (tx) { … })`), driven in its release fiber, and so may a
 failure handler (§4.7). A release or a failure handler may still return a
 promise (a foreign `[Symbol.asyncDispose]()`, `async (x) => x.close()`): it
@@ -1671,7 +1693,7 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `provider-util.ts` | `classProvider`, `factoryProvider`, `valueProvider`, `aliasProvider` (marked as a redirect through `inject.ts`) |
 | `context.ts` | public types: `Context`, `NodeOptions`, `Task`, `Fiber`, `Result`, `Outcome`, `Pool`, `Provider`, `Public`, `Op`, `Operation`, `Instruction`, `Fail`, … |
 | `result.ts` | the `ramme/result` subpath: free functions over plain `Result` objects, and `$`, the operation that yields a held `Result`'s failure as a `Fail` |
-| `resource.ts` | the error classes, `SuppressedErrorCtor`, `toDispose` (native resource tasks and foreign adapters into one release action) |
+| `resource.ts` | the error classes, `SuppressedErrorCtor`, `Resource` (the native release protocol's key and its type, D47), `toDispose` (the `own` overloads into one dispose) |
 | `context-storage.ts` | the `Frame` and the synchronous slot: `runInFrame`, `runDetached`, current-frame reads (§6) |
 | `disposal-symbols.ts` | the floor's guard: `Symbol.dispose` and `Symbol.asyncDispose` where a runtime lacks them (the one side-effect module, §1.2) |
 | `internal-context.ts` | shared internal types: node kinds, cache entries (value, storage node, `deps(V)`, the keys its factory injected itself, pin), resolve results (with the redirect an alias followed), the task brand (the marker that identifies a `Task`), failure records (an error and whether it was consumed), and the type machinery that reads a body's `E` off its yield union (D42) |
@@ -1689,8 +1711,7 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `platform.ts` | the `ramme/platform` subpath (§4.9): `fetch`, `listen`, `nextFrame`, `each`, over the public surface |
 
 Runtime import graph (type-only imports not shown; no evaluation-order
-cycles): `scope`, `internal-context` and `context` are leaves;
-`resource` sits over `internal-context` for the task brand;
+cycles): `scope`, `resource`, `internal-context` and `context` are leaves;
 `result` is a leaf: it imports only types from `context`; `context-key` sits
 over `scope` (a key's declared scope, D32); `topic` sits over `context-key`,
 and `lifecycle-events` over `topic`; `context-storage` is a leaf at runtime;
@@ -1757,7 +1778,9 @@ whose waits are ops that hand the driver the signal
 re-enters the node that registered it (`listen`, `node.run`); and each async
 callback the library hands a driver is a `promised` body (§4.5). A body
 calls an operation, `yield* lib.query(q)`, and top-level code runs one
-through a node it names, `await app.call(lib.query, q)`. `Instruction` and
+through a node it names, `await app.call(lib.query, q)`. A resource the
+library hands out says how it is released, as a `Resource`, and one that can
+finish on its own holds a node (§2.6, D47). `Instruction` and
 `Fail` are public so that a body can be annotated
 (`Generator<Instruction | Fail<E>, T, unknown>`) and a declaration that
 spells a generator's type can be emitted (§1.3).

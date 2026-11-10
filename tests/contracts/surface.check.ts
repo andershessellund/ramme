@@ -30,6 +30,7 @@ import {
   factoryProvider,
   fail,
   promised,
+  Resource,
   settle,
   valueProvider,
   wait,
@@ -47,7 +48,6 @@ import type {
   Provider,
   Public,
   Release,
-  Resource,
   Result,
   SettleResult,
   Success,
@@ -247,8 +247,8 @@ export function generatorReleases(ctx: Context): void {
 }
 
 /**
- * The core's values, exactly: 57 of the 89 names the surface check lists (scripts/check-surface.mjs), which also
- * checks the 32 types, which a namespace object does not carry.
+ * The core's values, exactly: 58 of the 89 names the surface check lists (scripts/check-surface.mjs), which also
+ * checks the 31 types, which a namespace object does not carry. `Resource` is a value and a type under one name (D47).
  */
 type _CoreValues = Expect<
   Equal<
@@ -258,6 +258,7 @@ type _CoreValues = Expect<
     | 'race' | 'settle' | 'shield' | 'unshield' | 'pool' | 'child' | 'join' | 'result' | 'interrupted' | 'never'
     | 'sleep' | 'wait' | 'promised' | 'fail' | 'runSync'
     | 'inject' | 'ContextKey'
+    | 'Resource'
     | 'NoCurrentNodeError' | 'NodeCompletedError' | 'PendingNodeError' | 'NotOwnedError' | 'AlreadyOwnedError'
     | 'FiberNotAwaitableError' | 'UnjoinedFiberError' | 'FiberAbortedError' | 'PoolClosedError'
     | 'PoolFullError' | 'CreationViolationError' | 'FactoryReturnedUndefinedError' | 'AsyncRunError'
@@ -486,13 +487,13 @@ export class Repo {
 }
 type _This = Expect<Equal<ReturnType<Repo['load']>, Generator<Fail<UserNotFound>, string, unknown>>>;
 
-/** Cleanup has no expected failures, including failures re-yielded by a callee. */
+/** A release has no expected failures (D47), a callee's re-yielded included: `Release`'s `E` is `never`. */
 export function releasesCannotFail(ctx: Context, t: Task<[], void, UserNotFound>): void {
-  // @ts-expect-error -- cleanup cannot propagate a callee's expected failure
+  // @ts-expect-error -- a release cannot pass on a callee's expected failure
   ctx.own({ id: 1 }, function* () {
     yield* t();
   });
-  // @ts-expect-error -- cleanup cannot yield an expected failure
+  // @ts-expect-error -- a release cannot yield an expected failure
   const _release: Release<object> = function* () {
     yield* fail(new UserNotFound());
   };
@@ -500,15 +501,64 @@ export function releasesCannotFail(ctx: Context, t: Task<[], void, UserNotFound>
   ctx.own(t);
   // @ts-expect-error -- the ambient overload has the same constraint
   ramme.own(t);
-  // @ts-expect-error -- a native resource's task cannot have expected failures
-  const _fallible: Resource = { release: t };
-  // @ts-expect-error -- native release is a task, not a promise-returning function
-  const _async: Resource = { release: async () => {} };
-  // @ts-expect-error -- native release is a task, not a bare generator
-  const _generator: Resource = { release: function* () {} };
-  const native: Resource = { release: ramme.task(function* () { yield* ramme.sleep(1); }) };
-  const _identity: Resource = ctx.own(native);
-  ramme.own(native);
+  // a task with none is a release, and a deferred one
+  const quiet = ramme.task(function* quiet() {
+    yield* ramme.sleep(1);
+  });
+  ctx.own({ id: 1 }, quiet);
+  ctx.own(quiet);
+}
+
+/**
+ * The native release protocol (D47): a `Resource` is a value with a `[Resource.release]()` method, a release declared
+ * on its class. `Resource.release` is a unique symbol, so no member a class names `release` is one.
+ */
+export function nativeResources(ctx: Context, t: Task<[], void, UserNotFound>, quiet: Task<[], void>): void {
+  type _Key = Expect<Equal<(typeof Resource)['release'] extends symbol ? true : false, true>>;
+  type _Member = Expect<Equal<Resource[typeof Resource.release], () => void | Promise<void> | Operation<void>>>;
+  // @ts-expect-error -- the key is a constant
+  Resource.release = Symbol('other');
+
+  class Connection implements Resource {
+    readonly #open = true;
+    *[Resource.release]() {
+      yield* ramme.sleep(this.#open ? 1 : 0);
+    }
+  }
+  const owned = ctx.own(new Connection());
+  type _Identity = Expect<Equal<typeof owned, Connection>>;
+  const _ambient: Connection = ramme.own(owned);
+  // every form a release takes: synchronous, an op, a promise, an async method, an object literal's method
+  const forms: Resource[] = [
+    { [Resource.release]() {} },
+    { [Resource.release]: () => quiet() },
+    { [Resource.release]: () => Promise.resolve() },
+    { async [Resource.release]() {} },
+    { *[Resource.release]() { yield* quiet(); } },
+  ];
+  for (const r of forms) ctx.own(r);
+
+  // @ts-expect-error -- a native release cannot yield an expected failure
+  const _fails: Resource = { *[Resource.release]() { yield* fail(new UserNotFound()); } };
+  // @ts-expect-error -- nor pass on a callee's
+  const _passesOn: Resource = { *[Resource.release]() { yield* t(); } };
+  // @ts-expect-error -- nor return the op of a task that has one
+  const _returns: Resource = { [Resource.release]: () => t() };
+  // @ts-expect-error -- a member named `release` is no native release, whatever it is
+  const _named: Resource = { release: quiet };
+  // @ts-expect-error -- so a value with nothing but one is not a resource `own` takes
+  ctx.own({ release: quiet });
+  // while a `Disposable` that also has an operation named `release` is still owned as the `Disposable` it is
+  class Semaphore implements Disposable {
+    readonly release = ramme.task(this, function* release(permit: number) {
+      yield* ramme.sleep(permit);
+    });
+    [Symbol.dispose](): void {}
+  }
+  const semaphore = ctx.own(new Semaphore());
+  type _Semaphore = Expect<Equal<typeof semaphore, Semaphore>>;
+  // @ts-expect-error -- and it is no `Resource`
+  const _notNative: Resource = semaphore;
 }
 
 /** `join` and `result` default `E` to `never`: a written `join<T>(f)` is the join of a fiber with no expected failure. */

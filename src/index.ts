@@ -16,7 +16,6 @@ export type {
   Op,
   Body,
   Release,
-  Resource,
   Provider,
   Public,
   LookupOptions,
@@ -64,7 +63,9 @@ export {
   runSync,
 } from './ambient.js';
 export { inject, ContextKey } from './inject.js';
+// `Resource` is a type and a value under one name: the interface, and the object whose `release` is the protocol's key (D47).
 export {
+  Resource,
   NoCurrentNodeError,
   NodeCompletedError,
   PendingNodeError,

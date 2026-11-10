@@ -70,9 +70,10 @@ What the example shows:
   `Api` has no provider, so the class is its own default factory: it is built
   on first use and placed as deep in the tree as its dependencies require,
   here at the root.
-- **Acquisition is ownership.** `own(x)` attaches a native `Resource`,
-  `AsyncDisposable` or `Disposable` to the current node, which releases it. In a constructor
-  that node is the service's own, so the pool lives exactly as long as `Api`.
+- **Acquisition is ownership.** `own(x)` attaches `x` (an `AsyncDisposable`,
+  a `Disposable`, or a `Resource`, [below](#resources)) to the current node,
+  which releases it. In a constructor that node is the service's own, so the
+  pool lives exactly as long as `Api`.
 - **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
   the *current node*, which ramme sets while a body runs, on every platform,
   with no setup: ramme has no async context.
@@ -512,64 +513,89 @@ borrowed. Two more things to know about libraries:
 
 ## Resources
 
-A native `Resource` has a `release: Task<[], void>` and, optionally, a
-`released: AbortSignal`. Ramme runs the task in a protected release fiber:
-owner cancellation cannot cut cleanup short, and ambient operations keep
-working across its waits. Use `task(this, function* …)` for a release that
-needs the resource's receiver.
+A value that says how it is released is a `Resource`: its class defines a
+`[Resource.release]()` method, and `own(value)` needs no second argument.
 
 ```ts
-import { task, wait } from 'ramme';
-import type { Resource } from 'ramme';
+import { Resource, own, task, wait } from 'ramme';
 
 class Connection implements Resource {
-  readonly #completed = new AbortController();
-  readonly released = this.#completed.signal;
+  constructor(readonly socket: Socket) {}
+  *[Resource.release]() {                           // the release, declared once, on the class
+    yield* wait(this.socket.end());
+  }
+}
 
-  constructor(readonly closeTransport: () => Promise<void>) {}
+const session = task(function* session(socket: Socket) {
+  const connection = own(new Connection(socket));   // released when the session ends, however it ends
+  yield* serve(connection);
+});
+```
 
-  readonly release = task(this, function* release() {
-    yield* wait(this.closeTransport());
-    this.#completed.abort();
-  });
+- `own(connection)` is `own(connection, (c) => c[Resource.release]())`. The
+  method is the entry's release: it runs once, with the connection as `this`,
+  in a release fiber of the owner, which no interruption of the owner cuts.
+  A generator method is driven there as a body is, so `yield*`, `own` and
+  `signal()` work across its waits; the method may also be synchronous, or
+  return an op or a promise.
+- The key is a symbol, as the platform's `Symbol.asyncDispose` is: a member
+  a class happens to name `release` is nothing to `own`, and the method is
+  the owner's to call, never a body's. `yield* release(connection)` releases
+  early: now, exactly once.
+- A class may keep `[Symbol.asyncDispose]` or `[Symbol.dispose]` for `using`
+  outside ramme: `own` takes the native method first, and
+  `own(value, release)` replaces all three for that entry.
+- **A release has no expected failures.** One that yields `fail(e)`, or calls
+  an operation that may, is a type error. What a release throws is a defect
+  of its owner, reported once the remaining entries are released, beside the
+  body's own failure. ramme neither logs it nor shuts anything down: the
+  caller's error boundary decides. An operation that may be refused as a
+  matter of course, a commit, runs in the body, before the release.
+- `signal()` in a release is the owner's release deadline
+  (`releaseTimeoutMs`), which signals and abandons nothing. The release's own
+  waits hear it, so hand it on there:
+  `yield* wait((signal) => socket.end({ signal }))`. A task the release calls
+  has a signal of its own, which the deadline fires only when the task is
+  `interrupt: 'restore'`, halting it. A task given as the release itself
+  (`own(tx, rollback)`) is called as any task is, so its own `timeoutMs`
+  bounds it.
+
+**A resource that can finish on its own is a node.** An entry has no state:
+its owner cannot tell that the connection behind it is gone, and keeps it
+until its own end. A connection whose peer may hang up, a subscription that
+completes, a watcher that ends gets a node of its own instead, with
+`own(child())`. The node is one entry of whoever opened it, released at its
+turn like any other, and a node that completes leaves its owner's stack:
+
+```ts
+import { Resource, child, own, wait } from 'ramme';
+import { listen } from 'ramme/platform';
+
+class Connection implements Resource {
+  readonly #node = own(child({ name: 'connection' }));   // a lifetime of its own, below whoever opened it
+  constructor(readonly socket: Socket) {
+    this.#node.own(this);                                // released by [Resource.release] when the node ends
+    this.#node.run(() => listen(socket, 'close', () => void this.#node.close()));   // the peer hung up: the node ends now
+  }
+  *[Resource.release]() {
+    yield* wait(this.socket.end());
+  }
+  close() {
+    return this.#node.close();                           // early: yield* connection.close()
+  }
 }
 ```
 
-Attach it with `own(connection)`; for early cleanup, use
-`yield* release(connection)` so ramme supplies the protected release
-fiber. Calling `connection.release()` directly is an ordinary task call.
-The optional `released` signal lets a
-resource report successful terminal cleanup, including when it finishes
-independently. Ramme then removes its ownership entry immediately. Signal
-only after **all** cleanup is done: a transport closing does not suffice if
-listeners or background tasks still need cleanup. A completed resource is
-not registered again. A signal fired during an owner-driven release does
-not bypass that release's completion or its defects. Retirement does not
-invalidate a DI cache or satisfy a fiber's explicit join obligation.
-
-Cleanup has no expected failure channel (`E = never`). A thrown error or
-rejected foreign cleanup promise is a **defect**. Ramme continues the
-remaining releases, then propagates the defect, preserving any original
-body failure alongside it. The application can catch it and decide what
-to do; ramme neither logs it nor shuts down the application. Fallible
-business operations, such as a commit that may be rejected normally,
-belong in an explicit task before cleanup.
-
-`own(value, release)` and `own(defer)` accept tasks or inline release
-bodies with no expected failures. Promise-returning callbacks and standard
-`Disposable`/`AsyncDisposable` objects remain foreign adapters; an async
-callback has no ambient node after its first `await`. A native `release`
-task takes precedence over the standard disposal methods. An explicit
-`own(value, release)` overrides the native protocol, including its
-retirement signal.
-
-The release fiber supplies cancellation policy even if the task has its
-own `interrupt`, `signal` or `timeoutMs` options: its signal is the owner's
-`releaseTimeoutMs` deadline, which signals without abandoning cleanup.
-Pass that signal to a driver when it needs a deadline. Other task options,
-such as providers and scopes, remain available during release. The task's
-`onFailure` option does not intercept cleanup defects; they propagate
-through the ownership entry.
+- When the peer hangs up, the node closes: its listener is removed, the
+  connection is released, and its owner keeps nothing for it, however long
+  the owner lives.
+- `close()` of a node that has completed is a no-op, so the owner's
+  `yield* connection.close()` and the peer's hang-up never collide: whichever
+  comes first releases the connection, once.
+- A release failure of a connection that closed by itself, with no body
+  waiting for it, surfaces from its owner's completion.
+- `own(child())`, not `child()` alone: a bare `child()` is a scope of the
+  work, which a body's exit ends first, before the entries attached after it.
 
 ## The platform
 

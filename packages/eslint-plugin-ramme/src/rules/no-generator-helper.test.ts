@@ -1,9 +1,10 @@
 // Tests for no-generator-helper (D44, decision 5): ramme has no helpers, so a
-// generator function is a task body (free or bound, named or inline in `fork`/`attempt`), a `promised` body or an
-// `own(value, function* (v) {…})` release entry, and nothing else. Reported: a generator declaration, a generator
-// method (class or object literal), and a generator expression assigned to a variable or property or passed to
-// anything but `task`, `promised`, `fork`, `attempt` and `own`. Every case imports from ramme, so the cases hold
-// whether or not the rule looks at the file's imports.
+// generator function is a task body (free or bound, named or inline in `fork`/`attempt`), a `promised` body, an
+// `own(value, function* (v) {…})` release entry or a `[Resource.release]` method (a release declared on the value's
+// class, D47), and nothing else. Reported: a generator declaration, any other generator method (class or object
+// literal), and a generator expression assigned to a variable or property or passed to anything but `task`,
+// `promised`, `fork`, `attempt` and `own`. Every case imports from ramme, so the cases hold whether or not the rule
+// looks at the file's imports.
 import { assertionOptions, ruleTester } from '../test/rule-tester.js';
 import { noGeneratorHelper } from './no-generator-helper.js';
 
@@ -61,6 +62,10 @@ ruleTester.run('no-generator-helper', noGeneratorHelper, {
       name: 'the iterator protocol’s generator methods',
       code: `${imports}export class Bag {\n  *[Symbol.iterator]() { yield 1; }\n  async *[Symbol.asyncIterator]() { yield 1; }\n}\nexport const it = { *[Symbol.iterator]() { yield 2; } };`,
     },
+    {
+      name: 'a native release: the [Resource.release] method of a class, and of an object literal (D47)',
+      code: `import { Resource, sleep, wait } from 'ramme';\nexport class Connection implements Resource {\n  constructor(readonly end: () => Promise<void>) {}\n  *[Resource.release]() { yield* wait(this.end()); }\n}\nexport const lease: Resource = { *[Resource.release]() { yield* sleep(1); } };`,
+    },
     { name: 'a file that does not import ramme is not checked', code: 'export function* range(n: number) { for (let i = 0; i < n; i++) yield i; }' },
   ],
   invalid: [
@@ -95,6 +100,16 @@ ruleTester.run('no-generator-helper', noGeneratorHelper, {
       code: `${imports}export class Handlers {\n  *onFailure() { yield* sleep(1); }\n}\nexport const h = {\n  *['onFailure']() { yield* sleep(1); },\n};`,
       errors: [
         { message, line: 3 },
+        { message, line: 6 },
+      ],
+    },
+    // a release is found under ramme's key, never by a name: these are methods like any other.
+    {
+      name: 'a generator method named release, one keyed by a string, and one under another object’s release: no native release',
+      code: `import { Resource, sleep } from 'ramme';\ndeclare const Other: { readonly release: unique symbol };\nexport class Lock {\n  *release() { yield* sleep(1); }\n  *['Resource.release']() { yield* sleep(1); }\n  *[Other.release]() { yield* sleep(1); }\n}\nexport const r: Resource = { [Resource.release]() {} };`,
+      errors: [
+        { message, line: 4 },
+        { message, line: 5 },
         { message, line: 6 },
       ],
     },

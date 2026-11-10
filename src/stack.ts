@@ -9,7 +9,6 @@
 // ---------------------------------------------------------------------------
 
 import type { FailureRecord } from './internal-context.js';
-import type { TaskOptions } from './context.js';
 import type { NodeImpl } from './node-impl.js';
 import { AlreadyOwnedError } from './resource.js';
 
@@ -23,10 +22,6 @@ export interface Entry {
   readonly node: NodeImpl | undefined;
   /** Passive entries; node entries use the release loop's node path. Its result is the release fiber's body result (DESIGN.md §4.5). */
   readonly dispose: () => unknown;
-  /** Native task options; the release fiber supplies its own cancellation policy. */
-  readonly options?: TaskOptions;
-  /** Removes a native resource's completion listener; cleared when the entry leaves the stack. */
-  detach?: () => void;
   state: EntryState;
   /**
    * Created when the release starts, before any dispose code runs; settles

@@ -10,11 +10,14 @@
 // `task(this, function* …)`, a `.with(…)` chain after it included), to `fork`,
 // `attempt`, `shield`, `unshield` or a node's `call` (an inline body), to
 // `promised` (a library's async callback), to `own` (a release entry:
-// `own(tx, function* (tx) { … })`), and as an `onFailure` handler (a value or an
-// object literal's generator method, `{ *onFailure(e) { … } }`). Reported: a
-// generator declaration, a generator method of a class or an object literal,
-// and a generator expression anywhere else (assigned to a variable or a
-// property, passed to anything else), in a file that imports from ramme.
+// `own(tx, function* (tx) { … })`), as an `onFailure` handler (a value or an
+// object literal's generator method, `{ *onFailure(e) { … } }`), and as a
+// `[Resource.release]` method of a class or an object literal (D47): a release
+// declared on the value's class, which is the body of its release fiber as the
+// function `own` takes is, and no helper. Reported: a generator declaration,
+// any other generator method of a class or an object literal, and a generator
+// expression anywhere else (assigned to a variable or a property, passed to
+// anything else), in a file that imports from ramme.
 // An `async function*` is no ramme generator and is not reported (no-async-body
 // reports one passed as a body); neither is a `[Symbol.iterator]` or
 // `[Symbol.asyncIterator]` method, the iterator protocol's.
@@ -48,6 +51,18 @@ function isIteratorKey(method: NodeOf<'MethodDefinition' | 'Property'>): boolean
   return o.type === 'Identifier' && o.name === 'Symbol' && p.type === 'Identifier' && (p.name === 'iterator' || p.name === 'asyncIterator');
 }
 
+/**
+ * Whether a method's key is `Resource.release` (D47): the native release of the value, driven in its release fiber.
+ * Matched by name, as the verbs are: the computed key `[Resource.release]`, never a member named `release`.
+ */
+function isReleaseKey(method: NodeOf<'MethodDefinition' | 'Property'>): boolean {
+  const k = method.key as EsNode;
+  if (!method.computed || k.type !== 'MemberExpression' || k.computed) return false;
+  const o = k.object as EsNode;
+  const p = k.property as EsNode;
+  return o.type === 'Identifier' && o.name === 'Resource' && p.type === 'Identifier' && p.name === 'release';
+}
+
 /** Where a generator function expression sits: a body position (`'allowed'`), a method, or anywhere else. */
 function position(fn: NodeOf<'FunctionExpression'>): 'allowed' | 'method' | 'iterator' | 'other' {
   const { node, parent } = outerParent(fn as EsNode);
@@ -60,6 +75,7 @@ function position(fn: NodeOf<'FunctionExpression'>): 'allowed' | 'method' | 'ite
     if (keyName === 'onFailure') return 'allowed';
   }
   if (parent.type === 'MethodDefinition' || (parent.type === 'Property' && (parent.method || parent.kind !== 'init'))) {
+    if (isReleaseKey(parent)) return 'allowed';
     return isIteratorKey(parent) ? 'iterator' : 'method';
   }
   if (parent.type === 'CallExpression' && parent.callee !== node) {

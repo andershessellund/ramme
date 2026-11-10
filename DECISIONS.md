@@ -93,59 +93,113 @@ Danish rendering (*spindel*) is taken on npm. **Accepted:** one-letter
 adjacency to `samme`; they are different domains (codec vs DI) and rarely
 meet in an import block. Extraction-time decision.
 
-### D47. Native resource tasks, terminal retirement, and cleanup defects
+### D47. A release declared on the class: `Resource.release`; no expected failures; a self-completing resource is a node
 
-A native `Resource` exposes `release: Task<[], void>` and optionally a
-stable `released: AbortSignal`. Its release body runs directly in the
-owner's protected release fiber with its bound receiver. The task's
-providers and scopes apply, but the fiber supplies `observe` interruption
-and the owner's release deadline in place of the task's cancellation
-options. Deferred and explicit release tasks use the same execution path.
-The task's `onFailure` cannot consume the entry's cleanup defect. A direct
-call of `resource.release()` is an ordinary task call; owner-protected
-early cleanup goes through `release(resource)`.
-Standard disposables and promise-returning release callbacks remain
-adapters for foreign cleanup.
+A value says how it is released by defining a `[Resource.release]()` method:
+`own(value)` is `own(value, (v) => v[Resource.release]())`, so the method is
+the entry's release, run once, with the value as `this`, in a release fiber
+of the owner (D3′), and it may be whatever a release may be: a generator
+method, driven there, a synchronous function, or one that returns an op or a
+promise. `Resource.release` is a registered symbol,
+`Symbol.for('ramme.release')`, a member of the object `Resource`, which
+shares its name with the interface. `own` takes the native method before
+`[Symbol.asyncDispose]` and `[Symbol.dispose]`, and `own(value, release)`
+replaces all three for that entry. A release has no expected failures:
+`Release<T>` and `Resource` are typed `Operation<void, never>`, and what a
+release throws, what a promise it returns rejects with, and an expected
+failure that untyped code yields there are the owner's defect, reported once
+the remaining entries are released and beside the body's own failure; ramme
+neither logs it nor shuts anything down. A task given as a release is called
+as any task is. And a resource that can finish on its own is given a node,
+`own(child())`, which leaves its owner's stack when it completes: no passive
+entry leaves a stack but by being released.
 
-Cleanup has no expected failures. `Release<T>` now takes only
-`Operation<void, never>`; native resources require a task with `E = never`.
-Exceptions and foreign promise rejections are defects. Untyped code that
-yields an expected failure also propagates it as the owner's defect. The
-runtime continues every remaining release, preserves the original body
-failure alongside cleanup defects, and propagates the result. It neither
-logs nor marks the isolate or root unusable. The consumer chooses recovery,
-telemetry, process draining, or shutdown at its error boundary.
+**Why.** A class written for ramme had no way to say how it is released.
+`[Symbol.asyncDispose]` is typed to return a promise, so a release that needs
+the release fiber across its waits (`yield*`, `own`, the deadline in
+`signal()`) could only be handed over at every `own(value, release)`. The
+method is that function, declared once, on the class: the protocol adds a
+place to write a release and no semantics of its own, so everything
+DESIGN.md §2.4 says of a release holds of it, and the method costs nothing
+per instance. A symbol, because the name `release` is taken twice over: a
+producer's handle has a `release()` that goes through its owner (DESIGN.md
+§2.6), and services have operations named `release`, a semaphore's or a
+lock's; a protocol found by that name would run either as cleanup. And
+because a member reached by a name is called by it: nothing calls
+`[Resource.release]()` but the owner, so the one early release is
+`release(value)`, protected and exactly once (C7). `E = never` states what
+was already so: a release failure always amended its owner's outcome to a
+defect (D42), so `Operation<void, unknown>` typed a channel that led
+nowhere, and an operation that may be refused as a matter of course, a
+commit, belongs in the body, where its failure has a type and a reader. The
+defect is the owner's to report and nobody's to act on by default, since a
+server and a client answer a failed release differently. A resource that
+finishes on its own needs what a passive entry lacks by definition, a state
+its owner can read (DESIGN.md §2.1), and a node is the thing in the tree that
+has one: its completion takes it off its owner's stack, `close()` of a
+complete node is a no-op, and its failure is routed as any child's is
+(DESIGN.md §2.4, §2.7, §4.12). It is `own(child())` and not `child()`
+because a subscribed child is a scope of the work, ended at its owner's body
+exit ahead of the entries attached after it, and an unsubscribed one hears
+at its turn (D18, D19).
 
-`released` fires only when all cleanup completed successfully, including
-independent completion. It removes a live entry immediately and detaches
-its listener; ownership of an already-completed resource is a no-op. Once
-release starts, a terminal signal cannot remove the entry: the owner must
-still await cleanup and propagate its defects. Subscribe before notifying
-ownership observers so a callback cannot create a completion race. An
-explicit `own(value, release)` replaces the native protocol, including its
-terminal signal. Retirement does not invalidate DI caches or account for
-unjoined child fibers, whose obligations are separate (D46).
+**Rejected:** *a member named `release`, a `Task<[], void>` found by its
+brand*, this entry's first form. `own(x)` ran any task called `release` in
+place of `x`'s `[Symbol.dispose]`, with no arguments, for a value that was no
+`Resource` by its type; a handle whose `release` task goes through its owner
+deadlocked, its release waiting for its own entry; `yield* x.release()`
+compiled and ran the cleanup as an ordinary call, cut by the caller's
+interruption and run again at the owner's exit; and the task was a field,
+made per instance. *Running a task given as a release directly in the release
+fiber, its `interrupt`, `signal` and `timeoutMs` overridden*: options dropped
+without a word, so `own(tx, rollback.with({ timeoutMs }))`, bounded until
+then, could hang; a child of the `observe` release fiber is not reached by
+the owner's interruption in any case (D20), and a task is a task wherever it
+is called. *A terminal `released: AbortSignal` that unlinks a live entry when
+it fires*, automatic retirement: a bare detach, which D1′ refuses, in the
+hands of whoever holds the controller; `release(x)` of a resource that had
+finished by itself became `NotOwnedError`, a race between the peer and its
+owner's own early release; each resource carried an `AbortController` and a
+listener, removed on every path by code that existed for that alone; and a
+node gives the same without any of it. Its one extra was a resource retired
+from several owners at once, and two owners that ended together still ran its
+release twice. *A generator returned from `[Symbol.asyncDispose]`*: the
+platform types a promise there, and `await using` outside ramme would be
+handed a generator. *A fatal release failure, or one logged by default*; and
+*a swallowed one*, which hides a broken guarantee. *Dropping the platform's
+dispose methods*: they stay the contract for foreign resources (D3′).
+**Cost.** `Resource` is a type and a value under one name. A release that
+calls an operation with expected failures turns them into defects itself,
+with `attempt` and a rethrow. A class that keeps a platform dispose method
+beside the native one has two releases to keep in step. The lint takes a
+`[Resource.release]` generator method for a release by its key's spelling
+(D44, decision 5). A self-completing resource costs a node (DESIGN.md §7.1),
+and is made where a node is current. The types refuse an expected failure,
+not a throw: a caller that catches a release's defect may go on with a
+resource that was never released. DESIGN.md §2.1, §2.4, §2.6, §4.12, §8.
 
-**Why.** Native cleanup needs a task's frame across waits and must be
-protected from owner cancellation. `E = never` expresses an implementation
-obligation, not an assurance that JavaScript cannot throw. Terminal
-notification prevents long-lived owners retaining resources that have
-already finished. An optional standard signal provides a terminal state
-and removable listeners without a new subscription abstraction.
-**Rejected:** mandatory fatal cleanup or default logging, because a server
-and a client need different responses; swallowing defects, which hides a
-broken resource guarantee; unregistering as soon as closing starts, which
-can skip unfinished cleanup; removing the standard disposable adapters.
-**Cost.** Resource authors must signal only successful terminal cleanup.
-A transport's close event alone is insufficient if listeners or tasks
-remain. The types cannot prevent throws or unsafe casts. An application
-that catches a cleanup defect may continue with a leaked resource; ramme
-cannot decide its operational policy. DESIGN.md §2.4, §2.6, §4.12.
+**Settled while implementing it.**
+
+- *The symbol's type is the property's own*: `Resource` is declared
+  `{ readonly release: unique symbol }`, not as an object naming a constant
+  of that type. A library's declaration emit writes the key of an inferred
+  type that holds the member (an object literal that is a resource, a
+  factory's return) as `[Resource.release]`, through the `Resource` its file
+  imports; a constant the package's entry does not export could not be named
+  there, and the emit failed (TS4023). `check:surface` compiles such a
+  library.
+- *A `Disposable` with an operation named `release` is owned as the
+  `Disposable` it is*, and a value with nothing but such a member is no
+  resource: `own` refuses it, by type and with its `TypeError`.
+- *`[Resource.release]()` may return a promise*, as `Release<T>` may: it is
+  the same function, so an `async` method is a bare wait, current only until
+  its first `await` (DESIGN.md §4.5).
 
 ### D3′. One release contract: `[Symbol.asyncDispose]`
 
-*Amended by D47:* native resources use a release task and optional terminal
-signal. Standard disposables remain foreign adapters.
+*Amended by D47: a value may declare its release natively, under
+`Resource.release`; the platform's dispose methods stay the contract for
+foreign resources.*
 
 The resource protocol is the platform's: an entry is an `AsyncDisposable`
 (a `Disposable` is accepted and wrapped), and `own(value, release)` and
@@ -454,8 +508,9 @@ task's call runs with no options of its own.
 **5. No helpers.** Every function that waits is a task, a synchronous
 function is a plain function, and there is no third kind; the lint
 `no-generator-helper` refuses a generator function not written inline as a
-task body, `promised` body, release or failure handler, and the lost-halt detector
-stays (DESIGN.md §4.4, §4.5). **Why.** The tree is the call tree. A helper,
+task body, `promised` body, release or failure handler, or as a
+`[Resource.release]` method, a release declared on its value's class (D47),
+and the lost-halt detector stays (DESIGN.md §4.4, §4.5). **Why.** The tree is the call tree. A helper,
 a generator function a body runs with `yield*`, shares its caller's node:
 its temporaries are the caller's, it is not interrupted, timed or seen on
 its own, and a trace has a hole where it ran. A node per operation costs
@@ -1910,9 +1965,10 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   `Fiber<T, E>` with the task's `E` and `Fiber<T>` is the fiber of a
   `Task<A, T>`; a failure handler is handed `Fiber<unknown, unknown>`.
   `Outcome`'s defaults to `unknown`, the outcome of any node.
-- *A release has no expected failures (D47)*: `Release<T>` may return
-  `Operation<void, never>`. Untyped cleanup that yields an expected failure
-  still propagates it as its owner's defect.
+- *A release has no expected failures* (D47): `Release<T>` may return
+  `Operation<void, never>`, where it once took any `E`. A release's
+  expected failure was always its owner's release failure, a defect there,
+  and one that untyped code yields still is.
 - *`$` takes a `Result`, not a promise of one* (DESIGN.md §4.13).
 - *A failure handler's generator that fails* (its own `fail`, or a callee's
   re-yielded) is returned, its `finally` blocks run as the rest of the
@@ -1925,8 +1981,9 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   module-level `const notFound = fail(e)` is fine, and each `yield*` yields
   afresh, as an op's description does (D41, decision 3). What it returns is
   an instance of a private class, recognized as decision 28 recognizes an op
-  (DESIGN.md §4.5): untyped `own(v, () => fail(e))` is the owner's release
-  defect, never a dropped value; the public types refuse it (D47).
+  (DESIGN.md §4.5): `own(v, () => fail(e))`, which the types refuse (D47),
+  is the owner's release failure when untyped code writes it, never a
+  dropped value.
 
 ### D43. The platform layer: every wait and every callback has a ramme spelling
 

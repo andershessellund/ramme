@@ -17,6 +17,7 @@
 
 import type { InjectionKey } from './context-key.js';
 import type { AnyMember, BodyOf, ErrorOf, FailedWith, Plain, TASK, ValueOf, Yields } from './internal-context.js';
+import type { Resource } from './resource.js';
 import type { Scope } from './scope.js';
 
 /** The brand of an `Instruction`. Declared only: no value outside ramme carries it. */
@@ -131,26 +132,16 @@ export type Body<T, A extends unknown[] = [], E = never> = (
 ) => Generator<Instruction | Fails<E>, T, unknown> | Op<T, E> | Plain<T>;
 
 /**
- * The release half of `own(value, release)`, protected from owner cancellation. A task or generator runs in the
- * release fiber. Promise-returning callbacks adapt foreign cleanup; their ambient frame ends at the first await.
- * Cleanup has no expected failures. An escaping exception is a defect, propagated after the remaining cleanup.
+ * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4), which no
+ * interruption of the owner cuts. A generator function, or a function returning an op, is driven in the release fiber
+ * (DESIGN.md §4.5). One returning a promise (an `async` release) is waited for as a bare wait: the release fiber is
+ * current only until its first `await`, after which ramme throws `NoCurrentNodeError`; write a release that waits for
+ * ramme work as `function*`. A release has no expected failures (D47): its `E` is `never`, so one that yields
+ * `fail(e)`, or calls an operation that may, is a type error. What it throws is a release failure of its owner, which
+ * amends the owner's outcome to a `defect` (DESIGN.md §4.12); so is an expected failure that untyped code yields
+ * there (D42). A `Resource`'s `[Resource.release]()` method is the same thing, declared on the value's class.
  */
 export type Release<T> = (value: T) => void | Promise<void> | Operation<void>;
-
-/**
- * A native resource. Its release task runs in the owner's protected release fiber, with the task's bound receiver.
- * Owner cancellation cannot halt it; its signal is the owner's release deadline. Cleanup must not fail: any
- * escaping error is a defect, propagated after the remaining releases, without logging or a shutdown policy.
- */
-export interface Resource {
-  readonly release: Task<[], void>;
-  /**
-   * Optional, stable terminal signal. Fire only after all cleanup has completed successfully, not when closing
-   * starts. An already-fired signal makes ownership a no-op. Natural completion removes the ownership entry;
-   * it does not interrupt or hide the result of a release already running, or invalidate a DI cache entry.
-   */
-  readonly released?: AbortSignal;
-}
 
 /**
  * A binding of `key` on the node it is registered on (`providers`, `addProvider`). Its value is stored on that
@@ -325,7 +316,10 @@ export interface Context {
   addProvider<T>(provider: Provider<T>): void;
 
   // --- attachment: the explicit stack (DESIGN.md §2.6) ---
-  /** The contract: attach a resource; it is released by this node (C1: before `own` returns). */
+  /**
+   * The contract: attach a resource; it is released by this node (C1: before `own` returns). A `Resource` is
+   * released by its `[Resource.release]()` method (D47), taken before the platform's dispose methods.
+   */
   own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
   /** Sugar: attach `value` with a release function. */
   own<T extends object>(value: T, release: Release<T>): T;

@@ -45,7 +45,6 @@ import type {
   Pool,
   PoolOptions,
   Release,
-  Resource,
   SettleResult,
   Task,
 } from './context.js';
@@ -54,6 +53,7 @@ import type { AnyMember, BodyOf, ErrorOf, FailedWith, TaskLike, ValueOf, Yields 
 import { failOp } from './managed.js';
 import type { NodeImpl } from './node-impl.js';
 import { CreationViolationError, NoCurrentNodeError } from './resource.js';
+import type { Resource } from './resource.js';
 
 /**
  * @internal The current node for a free function: a body frame's node, or the value node of a creation
@@ -143,7 +143,9 @@ export function lookup<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
 /**
  * Attach to the current node; it is released when the node completes, or
  * earlier with `release(x)`. Returns what it attached. `own(x)` with one
- * argument on an object the node already owns returns it (D16).
+ * argument on an object the node already owns returns it (D16). A `Resource`
+ * is released by its `[Resource.release]()` method (D47); a release has no
+ * expected failures.
  */
 export function own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
 export function own<T extends object>(value: T, release: Release<T>): T;
