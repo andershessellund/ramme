@@ -329,6 +329,35 @@ export interface Context {
   release(value: object): Op<void> & Promise<void>;
   releaseAll(): Op<void> & Promise<void>;
 
+  // --- creating a resource for THIS node (DESIGN.md §2.6, D48) ---
+  /**
+   * Create a resource for this node, its owner: `wait(make)`, whose result is attached to this node, as `own(value)`
+   * or `own(value, release)`, in the step that receives it, and is the op's value. There is no free form: a function
+   * that creates a resource is handed its owner, and names it here (`owner.acquire(…)`; a body that acquires for
+   * itself writes `current().acquire(…)`).
+   *
+   * Lazy, as every work op: `make` is called when the op runs, handed a signal that fires when the creation should
+   * stop, and never by a consumer that is already interrupted. It is plain code under no node, as an `async` function
+   * is after its first `await`: it creates, and names no owner, so `current()`, `own` and a task's call throw
+   * `NoCurrentNodeError` there, and ramme work is reached through a node it names (`() => owner.call(open)`). It may
+   * return a promise (an `async` function is the form for a creation of several steps, which nothing cuts between
+   * them), an op, or the value itself. A consumer
+   * interrupted while the creation runs is halted once it has completed, as on a task's call; a creation that was
+   * interrupted (its consumer's interruption, a lost `race`, this node's own) lets `make` finish and releases what it
+   * made at once, so this node never holds an entry nobody was handed, and the consumer of a creation that was
+   * aborted for any other reason hears `FiberAbortedError`. When this node has completed meanwhile, the value is
+   * released and the consumer hears `NodeCompletedError`. What `make` throws, or its promise rejects with, is thrown
+   * at the `yield*` and nothing is attached; an op's expected failure is re-yielded (D42).
+   *
+   * One signature for each arity, with `make`'s three results in one union: a second pair of overloads for an op
+   * would type a `release` written as `(c) => …` from the first of them, since TypeScript assigns a function's
+   * parameter types once, at the first overload it tries.
+   */
+  acquire<T extends Resource | Disposable | AsyncDisposable, E = never>(
+    make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>,
+  ): Op<T, E>;
+  acquire<T extends object, E = never>(make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>, release: Release<T>): Op<T, E>;
+
   // --- running bodies in a child of THIS node (DESIGN.md §4.5); E is the body's expected failures (D42) ---
   /** A body must join/result or explicitly abort each fork before returning successfully, even one already complete. */
   fork<T, A extends unknown[], Y extends Yields = never, E = never>(t: Task<A, T, E> | BodyOf<T, A, Y>, ...args: A): Fiber<T, FailedWith<Y> | E>;

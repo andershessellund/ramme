@@ -103,6 +103,10 @@ const ENVIRONMENT = new Map([
   ['Orders', 'declare class Orders { readonly place: import("ramme").Task<[req: Request], unknown>; }'],
   ['Api', 'declare class Api { readonly getUser: import("ramme").Task<[id: string], User, NotFound>; }'],
   ['SmtpClient', 'declare class SmtpClient { deliver(to: string, body: string): Promise<void>; }'],
+  // The resource examples (README, 'Resources'; DESIGN.md §2.6): a transport that ends and says when its peer did, and
+  // the driver that connects one, both handed a signal.
+  ['Socket', 'interface Socket extends EventTarget { end(opts?: { signal?: AbortSignal }): Promise<void>; }'],
+  ['Driver', 'declare class Driver { connect(opts?: { signal?: AbortSignal }): Promise<Socket>; }'],
 ]);
 /** The diagnostics that name an identifier nothing declares. */
 const UNRESOLVED = new Set([2304, 2552, 2580, 2581, 2582, 2583, 2584, 2591, 2592, 2593]);

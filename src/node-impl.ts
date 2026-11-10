@@ -2042,6 +2042,68 @@ export class NodeImpl implements Context {
     }, { name: 'shield' });
   }
 
+  /**
+   * D48: an asynchronous creation attached to this node, the owner its caller names. `wait(make)` in a fiber of its
+   * own, the creation's, whose result that fiber attaches to this node in the step that receives it, as
+   * `own(value, release)` or `own(value)`, and resolves with. Lazy, as every work op: `make` is called when the op
+   * runs, under no node, handed the creation's signal, and never by a consumer that is already interrupted. The creation is
+   * call-shaped: a consumer interrupted while it runs is halted once it has completed, and a creation that was
+   * delivered (its consumer's interruption, a lost race, this node's own) lets `make` finish and attaches the result
+   * to itself instead, so the value is released when the creation ends and this node never holds an entry nobody was
+   * handed. When this node has completed meanwhile, which only a creation not run under it can find (a member of a
+   * group, a fork), the value is released the same way and the consumer hears `NodeCompletedError`.
+   *
+   * The op is marked as a task's call is (`taskCall`), so `fork`, the groups and a pool run the creation as their own
+   * fiber and no second node stands for the op; yielded, it is a child of this node, which therefore waits for it.
+   */
+  acquire<T extends Resource | Disposable | AsyncDisposable, E = never>(
+    make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>,
+  ): Op<T, E>;
+  acquire<T extends object, E = never>(make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>, release: Release<T>): Op<T, E>;
+  acquire<T extends object>(make: (signal: AbortSignal) => unknown, release?: Release<T>): Op<T, unknown> {
+    this.assertBodyShaped('acquire');
+    if (typeof make !== 'function')
+      throw new TypeError('acquire(make): make must be a function of the signal that creates the resource');
+    if (release !== undefined && typeof release !== 'function') throw new TypeError('acquire(make, release): release must be a function');
+    const attach = (to: NodeImpl, value: T): void => void (release === undefined ? to.own(value as T & Disposable) : to.own(value, release));
+    const attachToOwner = (value: T): void => attach(this, value);
+    const creation: TaskLike<[], T> = {
+      [TASK]: true,
+      name: 'acquire',
+      opts: { name: 'acquire' },
+      body: function* (): Generator<Instruction, T, unknown> {
+        const self = currentFrame()!.node!; // the creation's fiber
+        // What `make` returned that is no wait (a synchronous creation, an idle resource a pool hands back) is boxed:
+        // `wait(fn)` takes a promise or an op, and a value is never probed for a `then` (a fiber's getter throws).
+        let boxed = false;
+        const made: unknown = yield* self.wait((signal: AbortSignal): PromiseLike<unknown> => {
+          // Under no node: the creation's fiber is no owner for what `make` creates (it ends when `make` is done), so
+          // an ambient `own` or a producer's defaulted owner there fails loudly instead of attaching to it (I22).
+          const m = outsideFrames(() => make(signal));
+          if (isOp(m) || (!isNodeImpl(m) && isPromise(m))) return m;
+          boxed = true;
+          return Promise.resolve({ value: m });
+        });
+        const value = (boxed ? (made as { readonly value: unknown }).value : made) as T;
+        // The same step as the resume: nothing waits between the value's arrival and its owner.
+        if (self.delivered) attach(self, value); // nobody will be handed it: it ends with this fiber
+        else {
+          try {
+            attachToOwner(value);
+          } catch (e) {
+            if (e instanceof NodeCompletedError) attach(self, value); // the owner is gone: released here, and the consumer hears why
+            throw e;
+          }
+        }
+        return value;
+      },
+    };
+    return this.callOp<T>(creation, [], (child) => (_, applied) => take<T>(child, !applied), {
+      name: 'acquire',
+      taskCall: { task: creation, args: [] },
+    });
+  }
+
   all<const T extends readonly AnyMember[]>(tasks: T, opts?: NodeOptions): Op<AllResult<T>, ErrorOf<T[number]>> {
     this.assertBodyShaped('all');
     const members = tasks.map(asJoinMember);

@@ -111,8 +111,8 @@ failure that untyped code yields there are the owner's defect, reported once
 the remaining entries are released and beside the body's own failure; ramme
 neither logs it nor shuts anything down. A task given as a release is called
 as any task is. And a resource that can finish on its own is given a node,
-`own(child())`, which leaves its owner's stack when it completes: no passive
-entry leaves a stack but by being released.
+`owner.own(owner.child())`, which leaves its owner's stack when it
+completes: no passive entry leaves a stack but by being released.
 
 **Why.** A class written for ramme had no way to say how it is released.
 `[Symbol.asyncDispose]` is typed to return a promise, so a release that needs
@@ -138,10 +138,10 @@ finishes on its own needs what a passive entry lacks by definition, a state
 its owner can read (DESIGN.md §2.1), and a node is the thing in the tree that
 has one: its completion takes it off its owner's stack, `close()` of a
 complete node is a no-op, and its failure is routed as any child's is
-(DESIGN.md §2.4, §2.7, §4.12). It is `own(child())` and not `child()`
-because a subscribed child is a scope of the work, ended at its owner's body
-exit ahead of the entries attached after it, and an unsubscribed one hears
-at its turn (D18, D19).
+(DESIGN.md §2.4, §2.7, §4.12). The node is owned, `own(child())` and not
+`child()` alone, because a subscribed child is a scope of the work, ended at
+its owner's body exit ahead of the entries attached after it, and an
+unsubscribed one hears at its turn (D18, D19).
 
 **Rejected:** *a member named `release`, a `Task<[], void>` found by its
 brand*, this entry's first form. `own(x)` ran any task called `release` in
@@ -194,6 +194,83 @@ resource that was never released. DESIGN.md §2.1, §2.4, §2.6, §4.12, §8.
 - *`[Resource.release]()` may return a promise*, as `Release<T>` may: it is
   the same function, so an `async` method is a bare wait, current only until
   its first `await` (DESIGN.md §4.5).
+
+### D48. A function that creates a resource takes its owner; `ctx.acquire` attaches an asynchronous creation
+
+A function that creates a resource is handed the node the resource belongs
+to, as an argument and never as a default, and attaches what it creates
+before handing it over. A synchronous creation attaches with
+`owner.own(value)`. An asynchronous one is `owner.acquire(make, release?)`:
+`wait(make)` in a fiber of its own, the creation's, whose result that fiber
+attaches to `owner`, as `own(value)` or `own(value, release)`, in the step
+that receives it. `make` is called when the op runs, under no node, handed
+the creation's signal, and returns a promise, an op or the value. A creation
+that was delivered, by its consumer's interruption, a lost `race` or the
+owner's own, lets `make` finish and attaches the value to itself, so it is
+released when the creation ends; one whose owner has completed does the same
+and its consumer hears `NodeCompletedError`. `acquire` is a method only
+(DESIGN.md §2.6).
+
+**Why.** Acquisition is ownership (law 1), and a function that returns a
+resource is where the two come apart. The owner is an argument because "the
+caller's node" cannot be read from inside the function. In a task
+`current()` is the task's own node, which ends when it returns, so a
+producer written as a task released its connection before its caller used
+it; `parent` is the caller for a call and the group under `all`; and a body
+cannot tell whether it was forked or called (DESIGN.md §4.6). An argument is
+one rule for every producer, a task included, and it writes the owner where
+the resource is made. The verb exists because attaching by hand after a wait
+is right only while somebody still waits for the value. A producer that
+does `owner.own(yield* wait(p))` also attaches the value of a creation that
+lost a race, or whose consumer was interrupted: the owner then holds an
+entry nobody was handed until it ends, one per attempt for a retry loop on a
+long-lived owner; and an owner that has completed leaves the value with no
+owner at all. Both are known in the step that receives the value, to the
+fiber that waited for it, so the verb owns that step and that fiber. `make`
+runs under no node because the creation's fiber is no owner for what `make`
+makes: an ambient `own` there, or a producer's defaulted owner, would attach
+to a node that ends when `make` is done, and fails loudly instead (I22). A
+method only, because a free `acquire` is `current().acquire`, the defaulted
+owner again in the one place the default is wrong.
+
+**Rejected:** *a defaulted owner*, `acquire(owner = current())`, the
+producer of DESIGN.md §2.6 until now: right in a plain function, whose
+default is read in the caller's step, and wrong in a task, two rules told
+apart by whether the producer waits. *Handing the body its caller's node*,
+`parent` or the node whose step made the op: it finds an owner and not the
+moment, and the value nobody is handed is attached all the same.
+*Ownership handed over when the value is delivered*, the callee's until its
+caller's resume step: the transfer D1′ refuses, which would also have to
+pass through every wrapper a value travels in, an `all` tuple or an outcome.
+*`make` as a generator body*: a halt between its steps leaves what the
+first steps made, where an `async` function finishes, and it is one more
+place a body may be written (D44, decision 5). *`make` in the creation's
+frame* (above). *Holding an owner open for a creation run elsewhere*: one
+more hold on the release loop (D23), for a case that is an error. *A lint
+for a dropped `owner.acquire(…)`*: the name is common, and a creation whose
+value nobody uses is rare (D35).
+**Cost.** Call sites spell the owner, `yield* db.connect(current())`, which
+brings `current()` into a body that acquires for itself. A node per
+asynchronous creation (DESIGN.md §7.1). `make` is all or nothing: what it
+made before it threw is its own to undo. A consumer of a creation for an
+owner that is closing is handed a value that owner is about to release, as
+`own` on that owner would attach it (DESIGN.md §2.7). A body that acquires
+for itself may still write `own(yield* wait(p))`, which D45's grant keeps
+safe there, so that case has two spellings, and README's request handler
+and `transfer` keep the older one. DESIGN.md §1.3, §2.3, §2.6, §4.2, §8.
+
+**Settled while implementing it.**
+
+- *The creation's op is marked as a task's call is* (D44, decision 4), so
+  `fork`, the groups and a pool run it as their own fiber, and no second
+  node stands for the op; yielded, it is a child of the owner, which waits
+  for it as for any subscriber.
+- *A value `make` returns that is no wait is taken as it is*: an idle
+  resource a pool hands back needs no promise, and is never probed for a
+  `then` (DESIGN.md §4.5).
+- *Only a completed owner sends the value back to the creation*: any other
+  refusal of `own` (a value with no release, one the owner already owns
+  with another) is thrown as it is.
 
 ### D3′. One release contract: `[Symbol.asyncDispose]`
 
@@ -2124,6 +2201,10 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   now removes it at once, and nothing is left on `opts.signal`.
 
 ### D45. A halt has one grant; a halted `finally`'s throw is a release failure
+
+*Amended by D48: a creation attached for another node goes through
+`ctx.acquire`, which never resumes an interrupted consumer with the value;
+the grant stays for a body that owns what it waited for.*
 
 Two rules of the halt (DESIGN.md §4.2), the first replacing D41's decision 8
 for a body resumed after its delivery, the second D24's discard.

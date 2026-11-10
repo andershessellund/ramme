@@ -189,7 +189,7 @@ import { RequestScope, current, inject, lookup, own, task, wait } from 'ramme';
 class UnitOfWork {
   static readonly scope = RequestScope;
   readonly #node = current();                     // this value's own node; its parent is the request's node
-  readonly #lease = inject(DbPool).acquire();     // a synchronous acquire(owner = current()): owned by #node, returned after the commit
+  readonly #lease = inject(DbPool).acquire(this.#node);   // a synchronous acquire(owner): owned by #node, returned after the commit
   constructor() {
     own(this, () => {
       const o = this.#node.parent!.outcome;       // how the request ended
@@ -514,23 +514,54 @@ borrowed. Two more things to know about libraries:
 ## Resources
 
 A value that says how it is released is a `Resource`: its class defines a
-`[Resource.release]()` method, and `own(value)` needs no second argument.
+`[Resource.release]()` method. A function that creates a resource takes its
+owner, the node the resource belongs to, and attaches it there before
+handing it over:
 
 ```ts
-import { Resource, own, task, wait } from 'ramme';
+import { Resource, current, inject, lookup, task, wait, type Context } from 'ramme';
 
 class Connection implements Resource {
   constructor(readonly socket: Socket) {}
-  *[Resource.release]() {                           // the release, declared once, on the class
+  *[Resource.release]() {                             // the release, declared once, on the class
     yield* wait(this.socket.end());
   }
 }
 
-const session = task(function* session(socket: Socket) {
-  const connection = own(new Connection(socket));   // released when the session ends, however it ends
+class Connections {
+  readonly #driver = inject(Driver);
+  open(owner: Context) {                              // the caller says whose connection it is
+    return owner.acquire(async (signal) => new Connection(await this.#driver.connect({ signal })));
+  }
+}
+
+const session = task(function* session() {
+  const connection = yield* lookup(Connections).open(current());   // this task's: released when it ends, however it ends
   yield* serve(connection);
 });
 ```
+
+**Creating.**
+
+- **The owner is an argument, never a default.** `open(current())` is a
+  connection of the calling task; `open(app)` one that outlives it. A default
+  would be read where `open` runs, and inside a task that is the task's own
+  node, which ends when it returns.
+- **`owner.acquire(make, release?)`** waits for `make` and attaches what it
+  returns to `owner`, as `own(value)` or `own(value, release)` would. `make`
+  is called when the op is yielded and is handed a signal for the driver. It
+  is plain code under no node, so it creates and attaches nothing itself; an
+  `async` function is the form for a creation of several steps, which nothing
+  cuts between them.
+- **A connection nobody is handed is released at once.** A task interrupted
+  while the driver connects is halted once the connection has arrived and
+  been released, and one whose connect loses a `race` holds nothing for it
+  afterwards. Attached by hand, `own(yield* …)` in a producer, each such
+  connection would stay on its owner until the owner ends.
+- **A synchronous creation** attaches with `owner.own(value)`: the caller
+  holds the value in the same step.
+
+**Releasing.**
 
 - `own(connection)` is `own(connection, (c) => c[Resource.release]())`. The
   method is the entry's release: it runs once, with the connection as `this`,
@@ -563,25 +594,26 @@ const session = task(function* session(socket: Socket) {
 **A resource that can finish on its own is a node.** An entry has no state:
 its owner cannot tell that the connection behind it is gone, and keeps it
 until its own end. A connection whose peer may hang up, a subscription that
-completes, a watcher that ends gets a node of its own instead, with
-`own(child())`. The node is one entry of whoever opened it, released at its
-turn like any other, and a node that completes leaves its owner's stack:
+completes, a watcher that ends gets a node of its own instead, below its
+owner. The node is one entry of the owner, released at its turn like any
+other, and a node that completes leaves its owner's stack:
 
 ```ts
-import { Resource, child, own, wait } from 'ramme';
+import { Resource, wait, type Context } from 'ramme';
 import { listen } from 'ramme/platform';
 
 class Connection implements Resource {
-  readonly #node = own(child({ name: 'connection' }));   // a lifetime of its own, below whoever opened it
-  constructor(readonly socket: Socket) {
-    this.#node.own(this);                                // released by [Resource.release] when the node ends
+  readonly #node: Context;
+  constructor(owner: Context, readonly socket: Socket) {
+    this.#node = owner.own(owner.child({ name: 'connection' }));   // a lifetime of its own, below its owner
+    this.#node.own(this);                                          // released by [Resource.release] when the node ends
     this.#node.run(() => listen(socket, 'close', () => void this.#node.close()));   // the peer hung up: the node ends now
   }
   *[Resource.release]() {
     yield* wait(this.socket.end());
   }
   close() {
-    return this.#node.close();                           // early: yield* connection.close()
+    return this.#node.close();                                     // early: yield* connection.close()
   }
 }
 ```
@@ -594,8 +626,9 @@ class Connection implements Resource {
   comes first releases the connection, once.
 - A release failure of a connection that closed by itself, with no body
   waiting for it, surfaces from its owner's completion.
-- `own(child())`, not `child()` alone: a bare `child()` is a scope of the
-  work, which a body's exit ends first, before the entries attached after it.
+- `owner.own(owner.child())`, not `owner.child()` alone: a bare `child()` is
+  a scope of the work, which a body's exit ends first, before the entries
+  attached after it.
 
 ## The platform
 

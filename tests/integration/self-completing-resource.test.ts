@@ -1,11 +1,13 @@
 // README's 'Resources': a resource that can finish on its own is a node (DESIGN.md §2.6, D47). `Connection` is the
-// README's class: it opens a node of its own with `own(child())`, an unsubscribed entry on whoever constructed it, owns
-// itself there as a native `Resource`, and closes that node when its socket reports that the peer hung up. A node that
+// README's class: it opens a node of its own with `owner.own(owner.child())`, an unsubscribed entry on the owner it is
+// handed (D48), owns itself there as a native `Resource`, and closes that node when its socket reports that the peer
+// hung up. A node that
 // completes leaves its owner's stack (DESIGN.md §2.4), so a long-lived owner keeps no entry for a connection that is
 // gone, with no protocol beyond the tree's: its cleanup ran in release fibers of its own node, a later `close()` is a
 // no-op (DESIGN.md §2.7), and a cleanup failure nobody waited for surfaces from its owner (DESIGN.md §4.12).
 import { describe, expect, it } from 'vitest';
 import { child, current, own, sleep, wait } from '../../src/ambient.js';
+import type { Context } from '../../src/context.js';
 import { createRootContext } from '../../src/create-context.js';
 import { listen } from '../../src/platform.js';
 import { Resource } from '../../src/resource.js';
@@ -35,8 +37,12 @@ class FakeSocket extends EventTarget {
 
 /** README's `Connection`, verbatim but for its socket's type. */
 class Connection implements Resource {
-  readonly #node = own(child({ name: 'connection' })); // a lifetime of its own: released at its owner's turn, or when it closes
-  constructor(readonly socket: FakeSocket) {
+  readonly #node: Context;
+  constructor(
+    owner: Context,
+    readonly socket: FakeSocket,
+  ) {
+    this.#node = owner.own(owner.child({ name: 'connection' })); // a lifetime of its own, below its owner
     this.#node.own(this); // released by [Resource.release] when the node ends
     this.#node.run(() => listen(socket, 'close', () => void this.#node.close())); // the peer hung up: the node ends now
   }
@@ -48,14 +54,14 @@ class Connection implements Resource {
   }
 }
 
-describe('a resource that can finish on its own is a node: own(child())', () => {
+describe('a resource that can finish on its own is a node: owner.own(owner.child())', () => {
   it('it is released at its turn in its owner’s release order, after what was attached later and may still use it', async () => {
     const t = trace();
     const root = createRootContext();
     await within(
       root.call(function* () {
         own(t.at('attached before'));
-        new Connection(new FakeSocket(t));
+        new Connection(current(), new FakeSocket(t));
         own(t.at('uses the connection'));
         yield* sleep(0);
       }),
@@ -86,7 +92,7 @@ describe('a resource that can finish on its own is a node: own(child())', () => 
     await within(
       root.call(function* () {
         const owner = impl(current());
-        const connection = new Connection(socket);
+        const connection = new Connection(current(), socket);
         entries.push(owner.explicit.size);
         socket.hangUp(); // a platform callback: no body waits for the close it starts
         yield* sleep(0);
@@ -109,7 +115,7 @@ describe('a resource that can finish on its own is a node: own(child())', () => 
     const socket = new FakeSocket(t);
     await within(
       root.call(function* () {
-        const connection = new Connection(socket);
+        const connection = new Connection(current(), socket);
         yield* connection.close();
         t.push('closed');
         socket.hangUp();
@@ -126,7 +132,7 @@ describe('a resource that can finish on its own is a node: own(child())', () => 
     const socket = new FakeSocket(t);
     socket.gate = deferred();
     const session = root.child({ name: 'session' });
-    session.run(() => new Connection(socket));
+    new Connection(session, socket); // a function that creates a resource takes its owner: no node need be current
     session.abort();
     const closed = session.close().then(() => t.push('session complete'));
     await tick();
@@ -146,7 +152,7 @@ describe('a resource that can finish on its own is a node: own(child())', () => 
       root.attempt(function* () {
         const socket = new FakeSocket(t);
         socket.failure = failure;
-        new Connection(socket);
+        new Connection(current(), socket);
         socket.hangUp();
         yield* sleep(0);
         return 'done';
@@ -157,7 +163,7 @@ describe('a resource that can finish on its own is a node: own(child())', () => 
       root.attempt(function* () {
         const socket = new FakeSocket(t);
         socket.failure = failure;
-        const connection = new Connection(socket);
+        const connection = new Connection(current(), socket);
         try {
           yield* connection.close();
         } catch (e) {

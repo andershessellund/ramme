@@ -561,6 +561,51 @@ export function nativeResources(ctx: Context, t: Task<[], void, UserNotFound>, q
   const _notNative: Resource = semaphore;
 }
 
+/**
+ * `ctx.acquire(make, release?)` (D48): a creation attached to the node it is made through. A method only: a function
+ * that creates a resource is handed its owner, so there is no free form.
+ */
+export function acquisitions(ctx: Context, open: Task<[], Resource, UserNotFound>, idle: Resource[]): void {
+  class Connection implements Resource {
+    [Resource.release](): void {}
+  }
+  const _viaPromise = ctx.acquire((signal) => Promise.resolve(signal.aborted ? new Connection() : new Connection()));
+  const _viaAsync = ctx.acquire(async () => new Connection());
+  const _viaOp = ctx.acquire(() => ctx.call(open));
+  const _viaValue = ctx.acquire(() => new Connection());
+  const _eitherWay = ctx.acquire(() => idle.pop() ?? Promise.resolve<Resource>(new Connection()));
+  const _withRelease = ctx.acquire(
+    () => Promise.resolve({ id: 1 }),
+    (v) => void v.id,
+  );
+  const _disposable = ctx.acquire(() => Promise.resolve({ [Symbol.dispose]() {} }));
+  type _Promise = Expect<Equal<typeof _viaPromise, Op<Connection>>>;
+  type _Async = Expect<Equal<typeof _viaAsync, Op<Connection>>>;
+  type _Op = Expect<Equal<typeof _viaOp, Op<Resource, UserNotFound>>>;
+  type _Value = Expect<Equal<typeof _viaValue, Op<Connection>>>;
+  type _Either = Expect<Equal<typeof _eitherWay, Op<Resource>>>;
+  type _Release = Expect<Equal<typeof _withRelease, Op<{ id: number }>>>;
+  // a `make` that takes the signal is context-sensitive, as the release is: both are typed from the one signature
+  const _contextual = ctx.acquire(
+    (signal) => Promise.resolve({ id: signal.aborted ? 1 : 2 }),
+    (v) => void v.id.toFixed(),
+  );
+  const _contextualOp = ctx.acquire(
+    (signal) => (signal.aborted ? ctx.call(open) : ctx.call(open)),
+    (r) => r[Resource.release](),
+  );
+  type _Contextual = Expect<Equal<typeof _contextual, Op<{ id: number }>>>;
+  type _ContextualOp = Expect<Equal<typeof _contextualOp, Op<Resource, UserNotFound>>>;
+  // @ts-expect-error -- a value with no release of its own needs one
+  ctx.acquire(() => Promise.resolve({ id: 1 }));
+  // @ts-expect-error -- a release has no expected failures, here as anywhere (D47)
+  ctx.acquire(() => Promise.resolve({ id: 1 }), function* () { yield* fail(new UserNotFound()); });
+  // @ts-expect-error -- make is a function: a promise that already exists was started with nobody to own its value
+  ctx.acquire(Promise.resolve(new Connection()));
+  // @ts-expect-error -- there is no free acquire: the owner is named
+  void ramme.acquire;
+}
+
 /** `join` and `result` default `E` to `never`: a written `join<T>(f)` is the join of a fiber with no expected failure. */
 export function joinTypeArguments(ctx: Context, f: Fiber<number>, g: Fiber<number, UserNotFound>): void {
   const _join = ramme.join<number>(f);

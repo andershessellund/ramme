@@ -56,14 +56,15 @@ package.json names exactly that file); the floor is A2 (§10).
 | --- | --- |
 | `task` and a task's call `t(…)`, `task(this, …)`, `fork`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its functions and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | generator bodies (§4.2, §4.5): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback; `ramme/platform`'s `fetch`, `listen`, `nextFrame` and `each` (§4.9) | `Operation<T, E>`, the type of what a body may `yield*`: an op; `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of an annotated body |
-| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `Resource` and its `[Resource.release]()`, a release declared on a value's class, and `own(child())`, a resource with a lifetime of its own (§2.6, D47); `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
+| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `Resource` and its `[Resource.release]()`, a release declared on a value's class, and `own(child())`, a resource with a lifetime of its own (§2.6, D47); `ctx.acquire(make)`, an asynchronous creation attached to the owner its caller names (§2.6, D48); `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
 | `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`; `createKeyFor`, an interface's key over its class (§3.1); `valueProvider`; `aliasProvider`, a key bound to an implementation that keeps its own scope (a test fake); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`, `runSync`; keys with default factories (§8) |
 
 The **work verbs**, whose op is lazy (§4.2), are a task's call (`t(…)`, a
 task-call op, and `ctx.call(t, …)` through a node), `attempt`, `all`,
 `race`, `settle`, `shield`, `unshield`, `join`, `result`, `sleep`,
-`interrupted`, `never` and `wait`; the **lifecycle verbs**, which are
-eager, are `release`, `releaseAll`, `close` and `[Symbol.asyncDispose]`.
+`interrupted`, `never`, `wait` and `ctx.acquire`, a method only (§2.6); the
+**lifecycle verbs**, which are eager, are `release`, `releaseAll`, `close`
+and `[Symbol.asyncDispose]`.
 
 ---
 
@@ -125,6 +126,7 @@ Nodes differ in three independent bits, plus a `kind` tag (`context`,
 | `child(opts)` | context | explicit / yes | no | a request scope |
 | `t(…)` / `ctx.call(t, …)` | fiber, joined | explicit / yes | yes | starts synchronously at its `yield*` (§4.6) |
 | `attempt(t, …)` / `attempt(t(…))` | fiber, joined | explicit / yes | yes | as a call; resolves with the outcome (§4.5) |
+| `ctx.acquire(make)` | fiber, joined | explicit / yes | yes | a creation for `ctx`: as a call, on `ctx`; its body waits for `make` and attaches the value (§2.6) |
 | `unshield(t, …)` | fiber, joined | explicit / yes | yes | as `attempt`, inside a shield; also linked to the signal of the shield's owner (§4.2) |
 | `fork(t, …)` / `fork(t(…))` | fiber | explicit / yes | yes | starts in a microtask, or after placement in creation; with a call, handlers, workers, sessions |
 | `own(fork(t, …))` | fiber | explicit / **no** | yes | an owned fiber (§2.6 C5): a reaper |
@@ -290,10 +292,11 @@ ended, not how its work ended (§4.12): under `await using` (§2.7) every unit
 of work on it rolls back, and after `close()` every one commits, even when a
 task run on it failed and the error was caught.
 
-*`acquire()` is synchronous*: `acquire(owner: Context = current()): Lease`
-hands out a lease and attaches it to the current node, the value's node. A
-field initializer cannot wait for the `Promise<Lease>` of the producer form
-below (D26), so the idiom, and its LIFO order, need the synchronous form.
+*`acquire()` is synchronous*: `acquire(owner: Context): Lease` hands out a
+lease and attaches it to the node it is given, here the value's
+(`this.#node`), with `owner.own(lease)`. A field initializer cannot wait for
+an asynchronous producer's op (D26), so the idiom, and its LIFO order, need
+the synchronous form.
 An asynchronous variant takes the lease at first use with `this.#node` as
 its owner and registers the `own(this, …)` entry after it, so that LIFO
 still commits before the connection is returned. `commit` and `rollback`
@@ -363,20 +366,63 @@ reached by no name, so nothing but the owner calls it and early release is
 entry. README's first `Connection` is the example
 ([README](README.md#resources)).
 
-**Producers attach before they return.** A function that returns a newly
-acquired resource attaches it before returning and returns a handle whose
-`release()` goes through the owner. The owner defaults to the current node;
-a producer that grants later, inside some other fiber, holds the owner and
-uses the method form, `acquire(owner: Context = current()): Promise<Lease>`,
-which calls `owner.own(lease)` before it returns.
+**A function that creates a resource takes its owner (D48).** The owner is
+an argument, never a default: `connect(owner: Context)`, called as
+`yield* db.connect(current())` by a body that acquires for itself. A default
+would be read where the function runs, and inside a task that is the task's
+own node, which ends when it returns (§4.5), so the resource would be
+released before its caller used it; `parent` is no better a guess, since
+under `all` it is the group (§4.8). What the function returns is attached
+before it is handed over, by one of two forms.
+
+*A synchronous creation* attaches with `owner.own(value)`, in the step that
+made the value (C1): README's `DbPool.acquire(owner)` above, a constructor
+that takes its owner. The caller holds the value in the same step, so
+nothing is ever owned that nobody was handed.
+
+*An asynchronous creation* is `owner.acquire(make, release?)`: `wait(make)`
+in a fiber of its own, the creation's, whose result that fiber attaches to
+`owner`, as `own(value)` or `own(value, release)`, in the step that receives
+it. `make` is called when the op runs, handed the creation's signal; it is
+plain code under no node, so it creates and names no owner (`own`,
+`current()` and a task's call throw `NoCurrentNodeError` there, and ramme
+work is reached through a node it names, `() => owner.call(open)`), and it
+returns a promise, an op or the value. An `async` function is the form for a
+creation of several steps: nothing cuts it between them. The verb is a
+method only, so the owner is written wherever a resource is made, and it is
+what a producer returns:
+
+```ts
+class Database {
+  readonly #driver = inject(Driver);
+  connect(owner: Context) {
+    return owner.acquire((signal) => this.#driver.connect({ signal }), (c) => c.end());
+  }
+}
+```
+
+It is `acquire` and not `own` after a wait because the two steps come apart
+exactly when nobody is left to hold the value. The creation is call-shaped
+(§4.2): a consumer interrupted while it runs is halted once it has
+completed, and is never resumed with the value. A creation that was
+delivered, by its consumer's interruption, a lost `race` or the owner's own,
+lets `make` finish and attaches the value to itself, so it is released when
+the creation ends and the owner holds no entry for a value nobody was
+handed; a consumer that goes on hears `FiberAbortedError`. A consumer
+already interrupted never calls `make`. Yielded, the creation is a child of
+`owner`, which therefore waits for it; run by `fork`, a group or a pool it
+is their fiber (§4.8), and an owner that has completed meanwhile gets
+nothing: the value is released as above and the consumer hears
+`NodeCompletedError`. Otherwise the value is attached as `own` would attach
+it (§2.7), to a delivered owner included.
 
 **A resource that finishes on its own is a node (D47).** A passive entry has
 no state (§2.1): its owner cannot tell that the thing behind it is gone, and
 keeps the entry until its own release. A resource that can complete by
 itself (a connection whose peer hangs up, a subscription that ends) is
-therefore given a node, `own(child())`, which holds the resource's own
-entries and which the resource closes when it is done, as README's second
-`Connection` does ([README](README.md#resources)). The node is an
+therefore given a node, `owner.own(owner.child())`, which holds the
+resource's own entries and which the resource closes when it is done, as
+README's second `Connection` does ([README](README.md#resources)). The node is an
 unsubscribed entry (§2.3): it is released at its turn, as a passive entry is
 (G2), where a subscribed `child()`, a scope of the work, is ended by its
 owner's body exit before the entries attached after it (§2.4, step 1). A
@@ -421,7 +467,7 @@ hook, and not in a body, where `own` attaches the same `AsyncDisposable`.
 | --- | --- | --- | --- |
 | `lookup` / `get` | works | works | `NodeCompletedError` |
 | `own`, `release` | works | works; released at completion | `NodeCompletedError` |
-| `fork` / `call` / `child` / `pool` | works | works; a subscribed child is delivered at birth iff the parent would forward to it (§4.3); `pool.fork` throws `PoolClosedError` (§4.10) | `NodeCompletedError` |
+| `fork` / `call` / `acquire` / `child` / `pool` | works | works; a subscribed child is delivered at birth iff the parent would forward to it (§4.3); `pool.fork` throws `PoolClosedError` (§4.10) | `NodeCompletedError` |
 | a `yield*` of an op (§4.2) | settles | the body is halted as the op's shape says (`freeze`, `restore`; release work, and the `wait(p)` in flight, its grant, finish first) / settles (`observe`) | `NodeCompletedError` |
 | a released resource's handle | — | — | resource-defined; should throw |
 
@@ -595,9 +641,9 @@ when the factory first needs a current node: at the first `current()`,
 `promised` or `inject(ContextKey)`. A factory that calls none of them leaves
 its value without a node. An auto-hoisted value's node is **pending** until
 placement: it accepts `own`, `release`, `releaseAll`, `fork`, `pool` and
-`child`, while `parent`, `get`, `addProvider`, `call`, `join`, `result`,
-`interrupted`, `never`, `sleep`, `wait`, `run`, `runSync` (§4.11), `abort`,
-`close` and the `Symbol` methods throw `PendingNodeError`, so an
+`child`, while `parent`, `get`, `addProvider`, `call`, `acquire`, `join`,
+`result`, `interrupted`, `never`, `sleep`, `wait`, `run`, `runSync` (§4.11),
+`abort`, `close` and the `Symbol` methods throw `PendingNodeError`, so an
 auto-hoisted factory cannot read its placement (D33). At placement its
 parent becomes the storage node `S`, it is pushed on **`S`'s provided
 stack**, unsubscribed, and the forks made in the factory start. A
@@ -777,10 +823,11 @@ a `TypeError` at run time, below).
   `current().call(t, …)`, D44), so its receiver is fixed and
   its **guards** run then: the receiver is not complete
   (`NodeCompletedError`), not pending (`PendingNodeError`), no creation is
-  current (`CreationViolationError`; `lookup`, `get`, `call`, `attempt`, the
-  groups, `shield`, `unshield`, `run` and `runSync` also refuse a release a
-  factory started, §3.5), and `sleep`'s `ms` and `unshield`'s shield are
-  checked. Outside any frame a free-function op throws `NoCurrentNodeError`
+  current (`CreationViolationError`; `lookup`, `get`, `call`, `attempt`,
+  `acquire`, the groups, `shield`, `unshield`, `run` and `runSync` also
+  refuse a release a factory started, §3.5), and `sleep`'s `ms` and
+  `unshield`'s shield are checked.
+  Outside any frame a free-function op throws `NoCurrentNodeError`
   when made: `const pause = sleep(50)` at module level is illegal; make the
   op where it is yielded. What fails when the op runs lands at the `yield*`,
   or rejects the `then`: `wait`'s function returning no promise, a source
@@ -820,7 +867,7 @@ once, so it can `own` what it waited for, and at its next wait it stops.
 | The body waits on | Halted |
 | --- | --- |
 | `sleep`, `never`, its own `interrupted()`; a `join` or `result` of a fiber not subscribed below it (an owned fork, a pool's, another tree's); `wait(p, { abandon: true })`; a `close()` or `[Symbol.asyncDispose]()` of itself, an ancestor or an unrelated node; a `release` or `releaseAll` whose wait includes the body | at once: a job queued at the delivery under no frame, never inside `abort()`; a sleep's timer cleared |
-| a task's call, `attempt`, `unshield`, `all`, `race`, `settle`; a `join` or `result` of a fiber subscribed below it | once the awaited fiber has completed; its resume step does not run, so nothing is consumed and its failure surfaces from its holder (§4.12). A fiber the delivery did not reach (a `ctx.call` child of a node outside the delivered subtree, one below an `observe` node that has not exited, one born undelivered) is delivered then, with the body's reason |
+| a task's call, `attempt`, `unshield`, `ctx.acquire`, `all`, `race`, `settle`; a `join` or `result` of a fiber subscribed below it | once the awaited fiber has completed; its resume step does not run, so nothing is consumed and its failure surfaces from its holder (§4.12). A fiber the delivery did not reach (a `ctx.call` child of a node outside the delivered subtree, one below an `observe` node that has not exited, one born undelivered) is delivered then, with the body's reason |
 | the grant: release work (`release`, `releaseAll`, `close()` or `[Symbol.asyncDispose]()` of a node strictly below it, `shield`), `wait(p)` or `wait((signal) => p)` in flight at the delivery; with none in flight (delivered in its own step, or born delivered), the first `wait(p)` or lifecycle op of release work (`release`, `releaseAll`, `close()` or `[Symbol.asyncDispose]()` of a node strictly below it) it yields after it. A resume before the delivery is no grant | not at the delivery: the wait finishes. On success the body is resumed with the value, once; on failure it is halted there, the failure unconsumed (a release failure surfaces at completion, §4.12; `p`'s own is discarded, as a halted body's throw outside its `finally` is, D24) |
 | after the grant: any other op the body yields; before it, with none in flight, an op not yet started | not run: halted there. A task's call makes no child, a `shield` does not start (it is lazy: only one in flight at the delivery finishes), a `wait((signal) => p)` does not call its function, and a `wait(p)` abandons `p`, which runs on, its settlement ignored and its rejection handled. A lifecycle op of release work is the exception: it was started when made, it runs, and it resumes the body after it; a lifecycle op whose wait includes the body is the first row's |
 
@@ -1700,7 +1747,7 @@ not import ramme. The package's subpaths (§1.2) are `index.ts` (`ramme`),
 | `stack.ts` | `Entry`, `Stack`: the two stacks, fixed positions, LIFO release order |
 | `managed.ts` | ops (§4.2): the lazy `WorkOp` and its thenable, the eager `LifecycleOp` (a `Promise`), the iterator and its `Instruction`, a run's source, resume step and halt shape, the subscription (`Sub`), `sleep`'s timer; the `Fail` record `fail` yields and the resume step's signal for a child's expected failure (D42) |
 | `driver.ts` | the driver of generator bodies (§4.2): the step in the node's frame, the run and subscription at `yield*`, the halt rows (§4.2), the halted `finally` on the unwind fiber, the lost-halt report; a failure handler's generator |
-| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, `shield` and `unshield`, placement hooks, lifecycle, `fork`/`call`/`attempt`/`all`/`race`/`settle`, the ops' runs and their halt predicates, events |
+| `node-impl.ts` | `NodeImpl`: every node; delivery, body, release loop, release fibers, `shield` and `unshield`, placement hooks, lifecycle, `fork`/`call`/`attempt`/`acquire`/`all`/`race`/`settle`, the ops' runs and their halt predicates, events |
 | `pool.ts` | the pool's concurrency queue and intake rules |
 | `inject.ts` | `inject`, `ContextKey`, creation state, dependency tracking, the resolution walk, alias redirects, decided markers, placement by view, the value node's creation and placement |
 | `fiber.ts` | `task()` |
@@ -1780,7 +1827,9 @@ callback the library hands a driver is a `promised` body (§4.5). A body
 calls an operation, `yield* lib.query(q)`, and top-level code runs one
 through a node it names, `await app.call(lib.query, q)`. A resource the
 library hands out says how it is released, as a `Resource`, and one that can
-finish on its own holds a node (§2.6, D47). `Instruction` and
+finish on its own holds a node (§2.6, D47); a function that creates one
+takes its owner, and attaches an asynchronous creation with
+`owner.acquire` (§2.6, D48). `Instruction` and
 `Fail` are public so that a body can be annotated
 (`Generator<Instruction | Fail<E>, T, unknown>`) and a declaration that
 spells a generator's type can be emitted (§1.3).
