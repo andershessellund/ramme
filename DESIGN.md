@@ -54,9 +54,9 @@ package.json names exactly that file); the floor is A2 (§10).
 
 | Tier 1: application code | Tier 2: resource and library authors |
 | --- | --- |
-| `task` and a task's call `t(…)`, `task(this, …)`, `fork`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `own`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its functions and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
+| `task` and a task's call `t(…)`, `task(this, …)`, `fork`, `attempt`, `join`, `result`, `all`, `race`, `settle`, `lookup`, `release`, `shield`, `signal()`, `sleep`; `fail`, the fourth exit, an expected failure typed `E` on the task (§4.13, D42); `Result`, with its functions and `$` in `ramme/result` (§4.13) | `unshield`, the hole in a `shield` (§4.2); `own(fork(…))`, `pool`, `interrupt: 'observe' \| 'restore'`, `childrenOnExit` |
 | generator bodies (§4.2, §4.5): `function*` and `yield*`; `Op`; `wait`; `promised` for a library's async callback; `ramme/platform`'s `fetch`, `listen`, `nextFrame` and `each` (§4.9) | `Operation<T, E>`, the type of what a body may `yield*`: an op; `Instruction` and `Fail`, for `Generator<Instruction \| Fail<E>, T, unknown>`, the type of an annotated body |
-| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close` | `own(value, release)`; `Resource` and its `[Resource.release]()`, a release declared on a value's class, and `own(child())`, a resource with a lifetime of its own (§2.6, D47); `ctx.acquire(make)`, an asynchronous creation attached to the owner its caller names (§2.6, D48); `releaseAll`; `current()`; `ctx.own` on behalf; `owner.outcome` |
+| `inject` in constructors; `static readonly scope`; `createRootContext`; `await using`; `child()`, `abort`, `close`; `current()`, the owner a body names to a function that creates a resource (§2.6, D48) | `own`, the attaching verb of a function that creates a resource, with `own(value, release)` and `ctx.own` on behalf (§2.6); `Resource` and its `[Resource.release]()`, a release declared on a value's class, and `own(child())`, a resource with a lifetime of its own (§2.6, D47); `ctx.acquire(make)`, an asynchronous creation attached to the owner its caller names (§2.6, D48); `releaseAll`; `owner.outcome` |
 | `t.with`; the `name`, `signal`, `onFailure` and `providers` options; `createInjectionKey`; `createKeyFor`, an interface's key over its class (§3.1); `valueProvider`; `aliasProvider`, a key bound to an implementation that keeps its own scope (a test fake); `Public` | `interrupted`, `never`, `wait(p, { abandon: true })`, `releaseTimeoutMs`, `stallWarningMs`, topics, `ctx.run`, `runSync`; keys with default factories (§8) |
 
 The **work verbs**, whose op is lazy (§4.2), are a task's call (`t(…)`, a
@@ -65,6 +65,11 @@ task-call op, and `ctx.call(t, …)` through a node), `attempt`, `all`,
 `interrupted`, `never`, `wait` and `ctx.acquire`, a method only (§2.6); the
 **lifecycle verbs**, which are eager, are `release`, `releaseAll`, `close`
 and `[Symbol.asyncDispose]`.
+
+Tier 1 has no attaching verb. Application code names the owner of a
+resource, `yield* pool.acquire(current())`, and releases one early
+(`release`); the function that creates the resource attaches it, with `own`
+or `ctx.acquire` (§2.6, D48).
 
 ---
 
@@ -261,11 +266,13 @@ passive object this node already owns is a no-op that returns `x` (D16);
 node is already an entry on its owner's explicit stack, so `own(node)`
 attaches nothing: it makes a subscribed child unsubscribed (§2.3), and a
 second `own` of it is `AlreadyOwnedError`. There is no bare detach and no
-transfer of an entry between owners (D1′).
+transfer of an entry between owners (D1′). A release may read its owner's
+outcome, here for a value that is waited for, which `owner.acquire` attaches
+as `own(value, release)` would (below):
 
 ```ts
 const owner = current();
-const tx = own(yield* wait(db.begin()), (tx) =>
+const tx = yield* owner.acquire(() => db.begin(), (tx) =>
   owner.outcome === undefined || owner.outcome.status === 'success' ? tx.commit() : tx.rollback());
 ```
 
@@ -862,7 +869,8 @@ the body may run plain code, and everything it does is legitimate (I8).
 
 **The halt.** When it comes depends on what the body waits on (decision 8),
 and a halt has **one grant** (D45): the body is resumed after its delivery
-once, so it can `own` what it waited for, and at its next wait it stops.
+once, so it can `own` what it waited for, as the creation of `ctx.acquire`
+does (§2.6), and at its next wait it stops.
 
 | The body waits on | Halted |
 | --- | --- |
@@ -968,9 +976,9 @@ op runs on, so the halt aborts the work; a halted body never calls it
 outside its halted `finally`, where it is handed the unwind fiber's signal
 (above). `wait(p)` waits for a promise that already exists, which the halt lets
 finish when it is the wait in flight (the table's third row), so what `p`
-produced can still be owned (README's `transfer`): an interrupted body
-finishes the wait it is in, then stops at its next. `wait(p, { abandon: true
-})` stops waiting at the halt; `p` runs on. After the grant every `wait` of
+produced can still be owned (the creation of `ctx.acquire`, §2.6): an
+interrupted body finishes the wait it is in, then stops at its next.
+`wait(p, { abandon: true })` stops waiting at the halt; `p` runs on. After the grant every `wait` of
 the body's own flow behaves as the abandoning one (the table's last row). `p` exists when the op
 is made, so a halted body that yields `wait(p)` marks it handled, whether it
 waits (its grant) or not (after it); a promise only ramme holds, the function
@@ -1886,7 +1894,9 @@ spells a generator's type can be emitted (§1.3).
    never writes cleanup as control flow.
 2. **The ambient node is the default; name a node only to mean another.**
    The free functions act on the current node; the same operations as
-   `Context` methods exist for acting on behalf of another.
+   `Context` methods exist for acting on behalf of another. One node is
+   always named: the owner handed to a function that creates a resource,
+   `current()` when it is the caller's own (§2.6, D48).
 3. **The current node is the synchronous slot**: valid in a step, in what
    a step calls synchronously, in `node.run(fn)`, a `listen` handler and a
    `promised` body, and never after an `await`; ramme has no async context.

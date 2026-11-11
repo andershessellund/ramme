@@ -209,7 +209,10 @@ that was delivered, by its consumer's interruption, a lost `race` or the
 owner's own, lets `make` finish and attaches the value to itself, so it is
 released when the creation ends; one whose owner has completed does the same
 and its consumer hears `NodeCompletedError`. `acquire` is a method only
-(DESIGN.md §2.6).
+(DESIGN.md §2.6). Application code therefore names an owner and attaches
+nothing: `own` is the verb of the function that creates the resource, tier
+2, and `current()`, the owner a body names for itself, is tier 1 (DESIGN.md
+§1.3).
 
 **Why.** Acquisition is ownership (law 1), and a function that returns a
 resource is where the two come apart. The owner is an argument because "the
@@ -250,14 +253,17 @@ more hold on the release loop (D23), for a case that is an error. *A lint
 for a dropped `owner.acquire(…)`*: the name is common, and a creation whose
 value nobody uses is rare (D35).
 **Cost.** Call sites spell the owner, `yield* db.connect(current())`, which
-brings `current()` into a body that acquires for itself. A node per
-asynchronous creation (DESIGN.md §7.1). `make` is all or nothing: what it
-made before it threw is its own to undo. A consumer of a creation for an
-owner that is closing is handed a value that owner is about to release, as
-`own` on that owner would attach it (DESIGN.md §2.7). A body that acquires
-for itself may still write `own(yield* wait(p))`, which D45's grant keeps
-safe there, so that case has two spellings, and README's request handler
-and `transfer` keep the older one. DESIGN.md §1.3, §2.3, §2.6, §4.2, §8.
+brings `current()` into a body that acquires for itself, and into tier 1:
+law 2's default, the ambient node, has this one exception (DESIGN.md §10).
+A node per asynchronous creation (DESIGN.md §7.1). `make` is all or nothing:
+what it made before it threw is its own to undo. A consumer of a creation
+for an owner that is closing is handed a value that owner is about to
+release, as `own` on that owner would attach it (DESIGN.md §2.7). A body
+that acquires for itself may still write `own(yield* wait(p))`, which D45's
+grant keeps safe there, so that case has two spellings; README and DESIGN.md
+write the one, `owner.acquire`. A deferred cleanup of application code has
+no tier-1 verb: it is the release of a resource somebody writes, a few lines
+where `own(() => …)` was one. DESIGN.md §1.3, §2.3, §2.6, §4.2, §8, §10.
 
 **Settled while implementing it.**
 
@@ -2202,9 +2208,9 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
 
 ### D45. A halt has one grant; a halted `finally`'s throw is a release failure
 
-*Amended by D48: a creation attached for another node goes through
-`ctx.acquire`, which never resumes an interrupted consumer with the value;
-the grant stays for a body that owns what it waited for.*
+*Amended by D48: a creation goes through `ctx.acquire`, which never resumes
+an interrupted consumer with the value; the grant stays for a body that owns
+what it waited for, that verb's own creation first among them.*
 
 Two rules of the halt (DESIGN.md §4.2), the first replacing D41's decision 8
 for a body resumed after its delivery, the second D24's discard.
