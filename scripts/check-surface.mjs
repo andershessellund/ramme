@@ -25,8 +25,9 @@
 // global beyond ES2022's but the host APIs of `browserGlobals`
 // (tests/platform/browser-globals.test.ts makes the same check). Last, compiles a consumer outside
 // the package with `declaration` (`consumerSource`): a library's unannotated
-// helpers generic over `E` must emit, and a task's `E` must emit as the plain
-// union (D42). Then a Node consumer with no DOM library (`nodeConsumerSource`):
+// helpers generic over `E` must emit, a task's `E` must emit as the plain
+// union (D42), and a native resource's release as a `[Resource.release]()`
+// method (D47). Then a Node consumer with no DOM library (`nodeConsumerSource`):
 // Node 22+ is a target, so every declaration the three entries reach must
 // type-check against @types/node's globals alone, with `skipLibCheck` off (a
 // DOM-only name such as `AddEventListenerOptions` is none there). The
@@ -104,6 +105,8 @@ const expected = new Map([
   ].map((n) => [n, ['value', './ambient.js']]),
   ['inject', ['value', './inject.js']],
   ['ContextKey', ['value', './inject.js']],
+  // a type and a value under one name: the interface, and the object whose `release` is the protocol's key (D47)
+  ['Resource', ['value', './resource.js']],
   ...[
     'NoCurrentNodeError',
     'NodeCompletedError',
@@ -139,7 +142,7 @@ const expected = new Map([
  */
 const coreNames = [
   // the node and the free functions; a task's call is the task's own (D44), so there is no free `call`
-  'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Context',
+  'NodeState', 'InterruptMode', 'NodeOptions', 'Body', 'Release', 'Resource', 'Context',
   'current', 'signal', 'lookup', 'own', 'release', 'fork', 'attempt', 'all', 'race', 'settle', 'shield',
   'unshield', 'pool', 'child', 'join', 'result', 'interrupted', 'never', 'sleep',
   // an explicit key for an implementation, the seam between an interface and its class (D44)
@@ -388,7 +391,7 @@ if (JSON.stringify(subpaths) !== JSON.stringify(['.', './platform', './result'])
  * both calls a failing task and fails itself; its `E` must emit as the plain union, never wrapped (`NoInfer<…>`).
  * `Api` binds its tasks to the instance (`task(this, …)`, D44) and `ClockKey` keys an implementation: both must emit.
  */
-const consumerSource = `import { createKeyFor, fail, task } from 'ramme';
+const consumerSource = `import { Resource, createKeyFor, fail, task, wait } from 'ramme';
 import type { Result, Task } from 'ramme';
 import { $ } from 'ramme/result';
 
@@ -436,6 +439,19 @@ class SystemClock implements Clock {
   }
 }
 export const ClockKey = createKeyFor<Clock>(SystemClock);
+export class Connection implements Resource {
+  readonly #end: () => Promise<void>;
+  constructor(end: () => Promise<void>) {
+    this.#end = end;
+  }
+  *[Resource.release]() {
+    yield* wait(this.#end());
+  }
+}
+export const lease = { *[Resource.release]() { yield* wait(Promise.resolve()); } };
+export function connect(end: () => Promise<void>) {
+  return { open: true, [Resource.release]: () => end() };
+}
 `;
 
 /**
@@ -505,6 +521,12 @@ try {
     if (/NoInfer|internal-context/.test(emitted)) problems.push(`a library's emitted declarations name ramme's internals:\n${emitted}`);
     if (!/charge: Task<\[id: string\], string, (NotFound \| Declined|Declined \| NotFound)>/.test(emitted))
       problems.push(`a task's E does not emit as the plain union (charge: Task<[id: string], string, NotFound | Declined>):\n${emitted}`);
+    // A native release (D47) emits under the key `Resource.release`, through the `Resource` the file imports: for a
+    // class, which wrote that key, and for an inferred type (an object literal, a factory's return), which could not
+    // name a symbol declared apart from the property (TS4023).
+    const releases = emitted.match(/\[Resource\.release\]/g)?.length ?? 0;
+    if (releases !== 3 || /resource\.js|RELEASE/.test(emitted))
+      problems.push(`a native resource's release does not emit as [Resource.release] in a class, a literal and a factory's return:\n${emitted}`);
   }
   writeFileSync(join(consumer, 'node-consumer.ts'), nodeConsumerSource);
   writeFileSync(

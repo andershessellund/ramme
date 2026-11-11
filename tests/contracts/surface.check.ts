@@ -30,6 +30,7 @@ import {
   factoryProvider,
   fail,
   promised,
+  Resource,
   settle,
   valueProvider,
   wait,
@@ -246,8 +247,8 @@ export function generatorReleases(ctx: Context): void {
 }
 
 /**
- * The core's values, exactly: 57 of the 88 names the surface check lists (scripts/check-surface.mjs), which also
- * checks the 31 types, which a namespace object does not carry.
+ * The core's values, exactly: 58 of the 89 names the surface check lists (scripts/check-surface.mjs), which also
+ * checks the 31 types, which a namespace object does not carry. `Resource` is a value and a type under one name (D47).
  */
 type _CoreValues = Expect<
   Equal<
@@ -257,6 +258,7 @@ type _CoreValues = Expect<
     | 'race' | 'settle' | 'shield' | 'unshield' | 'pool' | 'child' | 'join' | 'result' | 'interrupted' | 'never'
     | 'sleep' | 'wait' | 'promised' | 'fail' | 'runSync'
     | 'inject' | 'ContextKey'
+    | 'Resource'
     | 'NoCurrentNodeError' | 'NodeCompletedError' | 'PendingNodeError' | 'NotOwnedError' | 'AlreadyOwnedError'
     | 'FiberNotAwaitableError' | 'UnjoinedFiberError' | 'FiberAbortedError' | 'PoolClosedError'
     | 'PoolFullError' | 'CreationViolationError' | 'FactoryReturnedUndefinedError' | 'AsyncRunError'
@@ -485,14 +487,123 @@ export class Repo {
 }
 type _This = Expect<Equal<ReturnType<Repo['load']>, Generator<Fail<UserNotFound>, string, unknown>>>;
 
-/** A release may yield any `E`: its expected failure is a release failure of its owner, a defect there (D42). */
-export function releasesTakeAnyE(ctx: Context, t: Task<[], void, UserNotFound>): void {
+/** A release has no expected failures (D47), a callee's re-yielded included: `Release`'s `E` is `never`. */
+export function releasesCannotFail(ctx: Context, t: Task<[], void, UserNotFound>): void {
+  // @ts-expect-error -- a release cannot pass on a callee's expected failure
   ctx.own({ id: 1 }, function* () {
     yield* t();
   });
+  // @ts-expect-error -- a release cannot yield an expected failure
   const _release: Release<object> = function* () {
     yield* fail(new UserNotFound());
   };
+  // @ts-expect-error -- a deferred task cannot have expected failures
+  ctx.own(t);
+  // @ts-expect-error -- the ambient overload has the same constraint
+  ramme.own(t);
+  // a task with none is a release, and a deferred one
+  const quiet = ramme.task(function* quiet() {
+    yield* ramme.sleep(1);
+  });
+  ctx.own({ id: 1 }, quiet);
+  ctx.own(quiet);
+}
+
+/**
+ * The native release protocol (D47): a `Resource` is a value with a `[Resource.release]()` method, a release declared
+ * on its class. `Resource.release` is a unique symbol, so no member a class names `release` is one.
+ */
+export function nativeResources(ctx: Context, t: Task<[], void, UserNotFound>, quiet: Task<[], void>): void {
+  type _Key = Expect<Equal<(typeof Resource)['release'] extends symbol ? true : false, true>>;
+  type _Member = Expect<Equal<Resource[typeof Resource.release], () => void | Promise<void> | Operation<void>>>;
+  // @ts-expect-error -- the key is a constant
+  Resource.release = Symbol('other');
+
+  class Connection implements Resource {
+    readonly #open = true;
+    *[Resource.release]() {
+      yield* ramme.sleep(this.#open ? 1 : 0);
+    }
+  }
+  const owned = ctx.own(new Connection());
+  type _Identity = Expect<Equal<typeof owned, Connection>>;
+  const _ambient: Connection = ramme.own(owned);
+  // every form a release takes: synchronous, an op, a promise, an async method, an object literal's method
+  const forms: Resource[] = [
+    { [Resource.release]() {} },
+    { [Resource.release]: () => quiet() },
+    { [Resource.release]: () => Promise.resolve() },
+    { async [Resource.release]() {} },
+    { *[Resource.release]() { yield* quiet(); } },
+  ];
+  for (const r of forms) ctx.own(r);
+
+  // @ts-expect-error -- a native release cannot yield an expected failure
+  const _fails: Resource = { *[Resource.release]() { yield* fail(new UserNotFound()); } };
+  // @ts-expect-error -- nor pass on a callee's
+  const _passesOn: Resource = { *[Resource.release]() { yield* t(); } };
+  // @ts-expect-error -- nor return the op of a task that has one
+  const _returns: Resource = { [Resource.release]: () => t() };
+  // @ts-expect-error -- a member named `release` is no native release, whatever it is
+  const _named: Resource = { release: quiet };
+  // @ts-expect-error -- so a value with nothing but one is not a resource `own` takes
+  ctx.own({ release: quiet });
+  // while a `Disposable` that also has an operation named `release` is still owned as the `Disposable` it is
+  class Semaphore implements Disposable {
+    readonly release = ramme.task(this, function* release(permit: number) {
+      yield* ramme.sleep(permit);
+    });
+    [Symbol.dispose](): void {}
+  }
+  const semaphore = ctx.own(new Semaphore());
+  type _Semaphore = Expect<Equal<typeof semaphore, Semaphore>>;
+  // @ts-expect-error -- and it is no `Resource`
+  const _notNative: Resource = semaphore;
+}
+
+/**
+ * `ctx.acquire(make, release?)` (D48): a creation attached to the node it is made through. A method only: a function
+ * that creates a resource is handed its owner, so there is no free form.
+ */
+export function acquisitions(ctx: Context, open: Task<[], Resource, UserNotFound>, idle: Resource[]): void {
+  class Connection implements Resource {
+    [Resource.release](): void {}
+  }
+  const _viaPromise = ctx.acquire((signal) => Promise.resolve(signal.aborted ? new Connection() : new Connection()));
+  const _viaAsync = ctx.acquire(async () => new Connection());
+  const _viaOp = ctx.acquire(() => ctx.call(open));
+  const _viaValue = ctx.acquire(() => new Connection());
+  const _eitherWay = ctx.acquire(() => idle.pop() ?? Promise.resolve<Resource>(new Connection()));
+  const _withRelease = ctx.acquire(
+    () => Promise.resolve({ id: 1 }),
+    (v) => void v.id,
+  );
+  const _disposable = ctx.acquire(() => Promise.resolve({ [Symbol.dispose]() {} }));
+  type _Promise = Expect<Equal<typeof _viaPromise, Op<Connection>>>;
+  type _Async = Expect<Equal<typeof _viaAsync, Op<Connection>>>;
+  type _Op = Expect<Equal<typeof _viaOp, Op<Resource, UserNotFound>>>;
+  type _Value = Expect<Equal<typeof _viaValue, Op<Connection>>>;
+  type _Either = Expect<Equal<typeof _eitherWay, Op<Resource>>>;
+  type _Release = Expect<Equal<typeof _withRelease, Op<{ id: number }>>>;
+  // a `make` that takes the signal is context-sensitive, as the release is: both are typed from the one signature
+  const _contextual = ctx.acquire(
+    (signal) => Promise.resolve({ id: signal.aborted ? 1 : 2 }),
+    (v) => void v.id.toFixed(),
+  );
+  const _contextualOp = ctx.acquire(
+    (signal) => (signal.aborted ? ctx.call(open) : ctx.call(open)),
+    (r) => r[Resource.release](),
+  );
+  type _Contextual = Expect<Equal<typeof _contextual, Op<{ id: number }>>>;
+  type _ContextualOp = Expect<Equal<typeof _contextualOp, Op<Resource, UserNotFound>>>;
+  // @ts-expect-error -- a value with no release of its own needs one
+  ctx.acquire(() => Promise.resolve({ id: 1 }));
+  // @ts-expect-error -- a release has no expected failures, here as anywhere (D47)
+  ctx.acquire(() => Promise.resolve({ id: 1 }), function* () { yield* fail(new UserNotFound()); });
+  // @ts-expect-error -- make is a function: a promise that already exists was started with nobody to own its value
+  ctx.acquire(Promise.resolve(new Connection()));
+  // @ts-expect-error -- there is no free acquire: the owner is named
+  void ramme.acquire;
 }
 
 /** `join` and `result` default `E` to `never`: a written `join<T>(f)` is the join of a fiber with no expected failure. */

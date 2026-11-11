@@ -477,6 +477,7 @@ describe('an expected failure through the verbs (D42)', () => {
     const e = new NotFound('in a release');
     const o = await within(
       root.attempt(function* () {
+        // @ts-expect-error -- untyped cleanup that violates the no-expected-failure contract still propagates a defect
         own({ conn: 1 }, function* () {
           yield* sleep(0);
           yield* fail(e);
@@ -499,10 +500,12 @@ describe('an expected failure through the verbs (D42)', () => {
     const outcomes = await within(
       Promise.all([
         root.attempt(function* () {
+          // @ts-expect-error -- exercise the runtime boundary for untyped cleanup
           own({ conn: 1 }, () => fail(released));
           return 'owner done';
         }),
         root.attempt(function* () {
+          // @ts-expect-error -- exercise the runtime boundary for untyped cleanup
           own(() => fail(deferredFail));
           return 'owner done';
         }),

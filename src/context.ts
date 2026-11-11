@@ -17,6 +17,7 @@
 
 import type { InjectionKey } from './context-key.js';
 import type { AnyMember, BodyOf, ErrorOf, FailedWith, Plain, TASK, ValueOf, Yields } from './internal-context.js';
+import type { Resource } from './resource.js';
 import type { Scope } from './scope.js';
 
 /** The brand of an `Instruction`. Declared only: no value outside ramme carries it. */
@@ -131,14 +132,16 @@ export type Body<T, A extends unknown[] = [], E = never> = (
 ) => Generator<Instruction | Fails<E>, T, unknown> | Op<T, E> | Plain<T>;
 
 /**
- * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4). A generator
- * function, or a function returning an op or a `fail(e)`, is driven in the release fiber (DESIGN.md §4.5). One returning a promise
- * (an `async` release) is waited for as a bare wait: the release fiber is current only until its first `await`, after
- * which ramme throws `NoCurrentNodeError`; write a release that waits for ramme work as `function*`. Any `E`: a
- * release's expected failure, its own `yield* fail(e)` or a callee's re-yielded, is a release failure of its owner,
- * which amends the owner's outcome to a `defect` (D42).
+ * The release half of `own(value, release)`; runs with the release fiber current (DESIGN.md §2.4), which no
+ * interruption of the owner cuts. A generator function, or a function returning an op, is driven in the release fiber
+ * (DESIGN.md §4.5). One returning a promise (an `async` release) is waited for as a bare wait: the release fiber is
+ * current only until its first `await`, after which ramme throws `NoCurrentNodeError`; write a release that waits for
+ * ramme work as `function*`. A release has no expected failures (D47): its `E` is `never`, so one that yields
+ * `fail(e)`, or calls an operation that may, is a type error. What it throws is a release failure of its owner, which
+ * amends the owner's outcome to a `defect` (DESIGN.md §4.12); so is an expected failure that untyped code yields
+ * there (D42). A `Resource`'s `[Resource.release]()` method is the same thing, declared on the value's class.
  */
-export type Release<T> = (value: T) => void | Promise<void> | Operation<void, unknown>;
+export type Release<T> = (value: T) => void | Promise<void> | Operation<void>;
 
 /**
  * A binding of `key` on the node it is registered on (`providers`, `addProvider`). Its value is stored on that
@@ -313,15 +316,47 @@ export interface Context {
   addProvider<T>(provider: Provider<T>): void;
 
   // --- attachment: the explicit stack (DESIGN.md §2.6) ---
-  /** The contract: attach a resource; it is released by this node (C1: before `own` returns). */
-  own<T extends Disposable | AsyncDisposable>(resource: T): T;
+  /**
+   * The contract: attach a resource; it is released by this node (C1: before `own` returns). A `Resource` is
+   * released by its `[Resource.release]()` method (D47), taken before the platform's dispose methods.
+   */
+  own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
   /** Sugar: attach `value` with a release function. */
   own<T extends object>(value: T, release: Release<T>): T;
   /** Sugar: attach a deferred function, run at release; a generator function is driven there (DESIGN.md §4.5). */
-  own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void, unknown>)): T;
+  own<T extends object>(defer: T & Release<void>): T;
   /** Release `value` now, exactly once (C7): eager, so its op only waits; a promise as well (DESIGN.md §4.2). */
   release(value: object): Op<void> & Promise<void>;
   releaseAll(): Op<void> & Promise<void>;
+
+  // --- creating a resource for THIS node (DESIGN.md §2.6, D48) ---
+  /**
+   * Create a resource for this node, its owner: `wait(make)`, whose result is attached to this node, as `own(value)`
+   * or `own(value, release)`, in the step that receives it, and is the op's value. There is no free form: a function
+   * that creates a resource is handed its owner, and names it here (`owner.acquire(…)`; a body that acquires for
+   * itself writes `current().acquire(…)`).
+   *
+   * Lazy, as every work op: `make` is called when the op runs, handed a signal that fires when the creation should
+   * stop, and never by a consumer that is already interrupted. It is plain code under no node, as an `async` function
+   * is after its first `await`: it creates, and names no owner, so `current()`, `own` and a task's call throw
+   * `NoCurrentNodeError` there, and ramme work is reached through a node it names (`() => owner.call(open)`). It may
+   * return a promise (an `async` function is the form for a creation of several steps, which nothing cuts between
+   * them), an op, or the value itself. A consumer
+   * interrupted while the creation runs is halted once it has completed, as on a task's call; a creation that was
+   * interrupted (its consumer's interruption, a lost `race`, this node's own) lets `make` finish and releases what it
+   * made at once, so this node never holds an entry nobody was handed, and the consumer of a creation that was
+   * aborted for any other reason hears `FiberAbortedError`. When this node has completed meanwhile, the value is
+   * released and the consumer hears `NodeCompletedError`. What `make` throws, or its promise rejects with, is thrown
+   * at the `yield*` and nothing is attached; an op's expected failure is re-yielded (D42).
+   *
+   * One signature for each arity, with `make`'s three results in one union: a second pair of overloads for an op
+   * would type a `release` written as `(c) => …` from the first of them, since TypeScript assigns a function's
+   * parameter types once, at the first overload it tries.
+   */
+  acquire<T extends Resource | Disposable | AsyncDisposable, E = never>(
+    make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>,
+  ): Op<T, E>;
+  acquire<T extends object, E = never>(make: (signal: AbortSignal) => T | PromiseLike<T> | Op<T, E>, release: Release<T>): Op<T, E>;
 
   // --- running bodies in a child of THIS node (DESIGN.md §4.5); E is the body's expected failures (D42) ---
   /** A body must join/result or explicitly abort each fork before returning successfully, even one already complete. */
