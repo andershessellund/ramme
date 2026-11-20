@@ -191,7 +191,9 @@ generator expression anywhere but an argument of `task` (free or bound,
 `promised` (a library's callback), `own` (a release entry,
 `own(tx, function* (tx) { … })`), or an `onFailure` option, as its value or as
 a generator method of the options (`{ *onFailure(e) { … } }`): a failure
-handler.
+handler. A `[Resource.release]` generator method of a class or an object
+literal is not flagged either: it is the value's release, the body of its
+release fiber as the function `own` takes is.
 
 **Why.** Every function that waits is a task: the tree is the call tree
 (D44). A generator function a body runs with `yield* parse(x)` runs in its
@@ -210,6 +212,9 @@ const parse = task(function* parse(req: Request) {   // instead of function* par
 **Approximations.** An `async function*` is not flagged (it is no ramme
 generator; `no-async-body` reports one passed as a body), and neither is an
 iterator-protocol method (`*[Symbol.iterator]()`, `*[Symbol.asyncIterator]()`).
+A native release is recognized by its key's spelling, `[Resource.release]`:
+a method named `release`, or one keyed by another name for the same symbol,
+is flagged as any generator method is.
 Every generator declaration is flagged, a task body passed by name included
 (`function* poll() { … }`, then `task(poll)`): write the body inline in
 `task(…)`.

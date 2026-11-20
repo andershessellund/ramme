@@ -45,11 +45,11 @@ class Lease {
   }
 }
 
-/** The pool hands out a lease synchronously and attaches it to `owner` before returning (DESIGN.md §2.6). */
+/** The pool hands out a lease synchronously and attaches it to the owner it is given before returning (DESIGN.md §2.6, D48). */
 class DbPool {
   readonly #log = inject(Log);
   readonly #conn = inject(Conn);
-  acquire(owner: Context = current()): Lease {
+  acquire(owner: Context): Lease {
     const lease = new Lease(this.#conn, this.#log);
     owner.own(lease);
     return lease;
@@ -66,7 +66,7 @@ class UnitOfWork {
   static readonly scope = RequestScope;
   readonly #log = inject(Log);
   readonly #node = current(); // this value's node; declared placement, so #node.parent is already the request node
-  readonly #lease = inject(DbPool).acquire(); // owned by this value's node; released after the release below (LIFO)
+  readonly #lease = inject(DbPool).acquire(this.#node); // owned by this value's node; released after the release below (LIFO)
   constructor() {
     own(this, () => {
       const o = this.#node.parent!.outcome; // the request's outcome: fixed before its provided stack is released

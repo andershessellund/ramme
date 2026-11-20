@@ -93,7 +93,196 @@ Danish rendering (*spindel*) is taken on npm. **Accepted:** one-letter
 adjacency to `samme`; they are different domains (codec vs DI) and rarely
 meet in an import block. Extraction-time decision.
 
+### D47. A release declared on the class: `Resource.release`; no expected failures; a self-completing resource is a node
+
+A value says how it is released by defining a `[Resource.release]()` method:
+`own(value)` is `own(value, (v) => v[Resource.release]())`, so the method is
+the entry's release, run once, with the value as `this`, in a release fiber
+of the owner (D3′), and it may be whatever a release may be: a generator
+method, driven there, a synchronous function, or one that returns an op or a
+promise. `Resource.release` is a registered symbol,
+`Symbol.for('ramme.release')`, a member of the object `Resource`, which
+shares its name with the interface. `own` takes the native method before
+`[Symbol.asyncDispose]` and `[Symbol.dispose]`, and `own(value, release)`
+replaces all three for that entry. A release has no expected failures:
+`Release<T>` and `Resource` are typed `Operation<void, never>`, and what a
+release throws, what a promise it returns rejects with, and an expected
+failure that untyped code yields there are the owner's defect, reported once
+the remaining entries are released and beside the body's own failure; ramme
+neither logs it nor shuts anything down. A task given as a release is called
+as any task is. And a resource that can finish on its own is given a node,
+`owner.own(owner.child())`, which leaves its owner's stack when it
+completes: no passive entry leaves a stack but by being released.
+
+**Why.** A class written for ramme had no way to say how it is released.
+`[Symbol.asyncDispose]` is typed to return a promise, so a release that needs
+the release fiber across its waits (`yield*`, `own`, the deadline in
+`signal()`) could only be handed over at every `own(value, release)`. The
+method is that function, declared once, on the class: the protocol adds a
+place to write a release and no semantics of its own, so everything
+DESIGN.md §2.4 says of a release holds of it, and the method costs nothing
+per instance. A symbol, because the name `release` is taken twice over: a
+producer's handle has a `release()` that goes through its owner (DESIGN.md
+§2.6), and services have operations named `release`, a semaphore's or a
+lock's; a protocol found by that name would run either as cleanup. And
+because a member reached by a name is called by it: nothing calls
+`[Resource.release]()` but the owner, so the one early release is
+`release(value)`, protected and exactly once (C7). `E = never` states what
+was already so: a release failure always amended its owner's outcome to a
+defect (D42), so `Operation<void, unknown>` typed a channel that led
+nowhere, and an operation that may be refused as a matter of course, a
+commit, belongs in the body, where its failure has a type and a reader. The
+defect is the owner's to report and nobody's to act on by default, since a
+server and a client answer a failed release differently. A resource that
+finishes on its own needs what a passive entry lacks by definition, a state
+its owner can read (DESIGN.md §2.1), and a node is the thing in the tree that
+has one: its completion takes it off its owner's stack, `close()` of a
+complete node is a no-op, and its failure is routed as any child's is
+(DESIGN.md §2.4, §2.7, §4.12). The node is owned, `own(child())` and not
+`child()` alone, because a subscribed child is a scope of the work, ended at
+its owner's body exit ahead of the entries attached after it, and an
+unsubscribed one hears at its turn (D18, D19).
+
+**Rejected:** *a member named `release`, a `Task<[], void>` found by its
+brand*, this entry's first form. `own(x)` ran any task called `release` in
+place of `x`'s `[Symbol.dispose]`, with no arguments, for a value that was no
+`Resource` by its type; a handle whose `release` task goes through its owner
+deadlocked, its release waiting for its own entry; `yield* x.release()`
+compiled and ran the cleanup as an ordinary call, cut by the caller's
+interruption and run again at the owner's exit; and the task was a field,
+made per instance. *Running a task given as a release directly in the release
+fiber, its `interrupt`, `signal` and `timeoutMs` overridden*: options dropped
+without a word, so `own(tx, rollback.with({ timeoutMs }))`, bounded until
+then, could hang; a child of the `observe` release fiber is not reached by
+the owner's interruption in any case (D20), and a task is a task wherever it
+is called. *A terminal `released: AbortSignal` that unlinks a live entry when
+it fires*, automatic retirement: a bare detach, which D1′ refuses, in the
+hands of whoever holds the controller; `release(x)` of a resource that had
+finished by itself became `NotOwnedError`, a race between the peer and its
+owner's own early release; each resource carried an `AbortController` and a
+listener, removed on every path by code that existed for that alone; and a
+node gives the same without any of it. Its one extra was a resource retired
+from several owners at once, and two owners that ended together still ran its
+release twice. *A generator returned from `[Symbol.asyncDispose]`*: the
+platform types a promise there, and `await using` outside ramme would be
+handed a generator. *A fatal release failure, or one logged by default*; and
+*a swallowed one*, which hides a broken guarantee. *Dropping the platform's
+dispose methods*: they stay the contract for foreign resources (D3′).
+**Cost.** `Resource` is a type and a value under one name. A release that
+calls an operation with expected failures turns them into defects itself,
+with `attempt` and a rethrow. A class that keeps a platform dispose method
+beside the native one has two releases to keep in step. The lint takes a
+`[Resource.release]` generator method for a release by its key's spelling
+(D44, decision 5). A self-completing resource costs a node (DESIGN.md §7.1),
+and is made where a node is current. The types refuse an expected failure,
+not a throw: a caller that catches a release's defect may go on with a
+resource that was never released. DESIGN.md §2.1, §2.4, §2.6, §4.12, §8.
+
+**Settled while implementing it.**
+
+- *The symbol's type is the property's own*: `Resource` is declared
+  `{ readonly release: unique symbol }`, not as an object naming a constant
+  of that type. A library's declaration emit writes the key of an inferred
+  type that holds the member (an object literal that is a resource, a
+  factory's return) as `[Resource.release]`, through the `Resource` its file
+  imports; a constant the package's entry does not export could not be named
+  there, and the emit failed (TS4023). `check:surface` compiles such a
+  library.
+- *A `Disposable` with an operation named `release` is owned as the
+  `Disposable` it is*, and a value with nothing but such a member is no
+  resource: `own` refuses it, by type and with its `TypeError`.
+- *`[Resource.release]()` may return a promise*, as `Release<T>` may: it is
+  the same function, so an `async` method is a bare wait, current only until
+  its first `await` (DESIGN.md §4.5).
+
+### D48. A function that creates a resource takes its owner; `ctx.acquire` attaches an asynchronous creation
+
+A function that creates a resource is handed the node the resource belongs
+to, as an argument and never as a default, and attaches what it creates
+before handing it over. A synchronous creation attaches with
+`owner.own(value)`. An asynchronous one is `owner.acquire(make, release?)`:
+`wait(make)` in a fiber of its own, the creation's, whose result that fiber
+attaches to `owner`, as `own(value)` or `own(value, release)`, in the step
+that receives it. `make` is called when the op runs, under no node, handed
+the creation's signal, and returns a promise, an op or the value. A creation
+that was delivered, by its consumer's interruption, a lost `race` or the
+owner's own, lets `make` finish and attaches the value to itself, so it is
+released when the creation ends; one whose owner has completed does the same
+and its consumer hears `NodeCompletedError`. `acquire` is a method only
+(DESIGN.md §2.6). Application code therefore names an owner and attaches
+nothing: `own` is the verb of the function that creates the resource, tier
+2, and `current()`, the owner a body names for itself, is tier 1 (DESIGN.md
+§1.3).
+
+**Why.** Acquisition is ownership (law 1), and a function that returns a
+resource is where the two come apart. The owner is an argument because "the
+caller's node" cannot be read from inside the function. In a task
+`current()` is the task's own node, which ends when it returns, so a
+producer written as a task released its connection before its caller used
+it; `parent` is the caller for a call and the group under `all`; and a body
+cannot tell whether it was forked or called (DESIGN.md §4.6). An argument is
+one rule for every producer, a task included, and it writes the owner where
+the resource is made. The verb exists because attaching by hand after a wait
+is right only while somebody still waits for the value. A producer that
+does `owner.own(yield* wait(p))` also attaches the value of a creation that
+lost a race, or whose consumer was interrupted: the owner then holds an
+entry nobody was handed until it ends, one per attempt for a retry loop on a
+long-lived owner; and an owner that has completed leaves the value with no
+owner at all. Both are known in the step that receives the value, to the
+fiber that waited for it, so the verb owns that step and that fiber. `make`
+runs under no node because the creation's fiber is no owner for what `make`
+makes: an ambient `own` there, or a producer's defaulted owner, would attach
+to a node that ends when `make` is done, and fails loudly instead (I22). A
+method only, because a free `acquire` is `current().acquire`, the defaulted
+owner again in the one place the default is wrong.
+
+**Rejected:** *a defaulted owner*, `acquire(owner = current())`, the
+producer of DESIGN.md §2.6 until now: right in a plain function, whose
+default is read in the caller's step, and wrong in a task, two rules told
+apart by whether the producer waits. *Handing the body its caller's node*,
+`parent` or the node whose step made the op: it finds an owner and not the
+moment, and the value nobody is handed is attached all the same.
+*Ownership handed over when the value is delivered*, the callee's until its
+caller's resume step: the transfer D1′ refuses, which would also have to
+pass through every wrapper a value travels in, an `all` tuple or an outcome.
+*`make` as a generator body*: a halt between its steps leaves what the
+first steps made, where an `async` function finishes, and it is one more
+place a body may be written (D44, decision 5). *`make` in the creation's
+frame* (above). *Holding an owner open for a creation run elsewhere*: one
+more hold on the release loop (D23), for a case that is an error. *A lint
+for a dropped `owner.acquire(…)`*: the name is common, and a creation whose
+value nobody uses is rare (D35).
+**Cost.** Call sites spell the owner, `yield* db.connect(current())`, which
+brings `current()` into a body that acquires for itself, and into tier 1:
+law 2's default, the ambient node, has this one exception (DESIGN.md §10).
+A node per asynchronous creation (DESIGN.md §7.1). `make` is all or nothing:
+what it made before it threw is its own to undo. A consumer of a creation
+for an owner that is closing is handed a value that owner is about to
+release, as `own` on that owner would attach it (DESIGN.md §2.7). A body
+that acquires for itself may still write `own(yield* wait(p))`, which D45's
+grant keeps safe there, so that case has two spellings; README and DESIGN.md
+write the one, `owner.acquire`. A deferred cleanup of application code has
+no tier-1 verb: it is the release of a resource somebody writes, a few lines
+where `own(() => …)` was one. DESIGN.md §1.3, §2.3, §2.6, §4.2, §8, §10.
+
+**Settled while implementing it.**
+
+- *The creation's op is marked as a task's call is* (D44, decision 4), so
+  `fork`, the groups and a pool run it as their own fiber, and no second
+  node stands for the op; yielded, it is a child of the owner, which waits
+  for it as for any subscriber.
+- *A value `make` returns that is no wait is taken as it is*: an idle
+  resource a pool hands back needs no promise, and is never probed for a
+  `then` (DESIGN.md §4.5).
+- *Only a completed owner sends the value back to the creation*: any other
+  refusal of `own` (a value with no release, one the owner already owns
+  with another) is thrown as it is.
+
 ### D3′. One release contract: `[Symbol.asyncDispose]`
+
+*Amended by D47: a value may declare its release natively, under
+`Resource.release`; the platform's dispose methods stay the contract for
+foreign resources.*
 
 The resource protocol is the platform's: an entry is an `AsyncDisposable`
 (a `Disposable` is accepted and wrapped), and `own(value, release)` and
@@ -402,8 +591,9 @@ task's call runs with no options of its own.
 **5. No helpers.** Every function that waits is a task, a synchronous
 function is a plain function, and there is no third kind; the lint
 `no-generator-helper` refuses a generator function not written inline as a
-task body, `promised` body, release or failure handler, and the lost-halt detector
-stays (DESIGN.md §4.4, §4.5). **Why.** The tree is the call tree. A helper,
+task body, `promised` body, release or failure handler, or as a
+`[Resource.release]` method, a release declared on its value's class (D47),
+and the lost-halt detector stays (DESIGN.md §4.4, §4.5). **Why.** The tree is the call tree. A helper,
 a generator function a body runs with `yield*`, shares its caller's node:
 its temporaries are the caller's, it is not interrupted, timed or seen on
 its own, and a trace has a hole where it ran. A node per operation costs
@@ -1858,9 +2048,10 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   `Fiber<T, E>` with the task's `E` and `Fiber<T>` is the fiber of a
   `Task<A, T>`; a failure handler is handed `Fiber<unknown, unknown>`.
   `Outcome`'s defaults to `unknown`, the outcome of any node.
-- *A release takes any `E`*: `Release<T>` may return `Operation<void,
-  unknown>`, since a release's expected failure, its own or a callee's
-  re-yielded, is its owner's release failure, a defect there.
+- *A release has no expected failures* (D47): `Release<T>` may return
+  `Operation<void, never>`, where it once took any `E`. A release's
+  expected failure was always its owner's release failure, a defect there,
+  and one that untyped code yields still is.
 - *`$` takes a `Result`, not a promise of one* (DESIGN.md §4.13).
 - *A failure handler's generator that fails* (its own `fail`, or a callee's
   re-yielded) is returned, its `finally` blocks run as the rest of the
@@ -1873,8 +2064,9 @@ a fiber's `[Symbol.asyncDispose]()` throws its expected failure at the
   module-level `const notFound = fail(e)` is fine, and each `yield*` yields
   afresh, as an op's description does (D41, decision 3). What it returns is
   an instance of a private class, recognized as decision 28 recognizes an op
-  (DESIGN.md §4.5): `own(v, () => fail(e))` is the owner's release failure,
-  never a dropped value.
+  (DESIGN.md §4.5): `own(v, () => fail(e))`, which the types refuse (D47),
+  is the owner's release failure when untyped code writes it, never a
+  dropped value.
 
 ### D43. The platform layer: every wait and every callback has a ramme spelling
 
@@ -2015,6 +2207,10 @@ reports it). The rest of the proposal's catalogue (`once`, `on`, `idle`,
   now removes it at once, and nothing is left on `opts.signal`.
 
 ### D45. A halt has one grant; a halted `finally`'s throw is a release failure
+
+*Amended by D48: a creation goes through `ctx.acquire`, which never resumes
+an interrupted consumer with the value; the grant stays for a body that owns
+what it waited for, that verb's own creation first among them.*
 
 Two rules of the halt (DESIGN.md §4.2), the first replacing D41's decision 8
 for a body resumed after its delivery, the second D24's discard.

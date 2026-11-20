@@ -11,7 +11,7 @@
 //   halts the previous search at its `sleep` or aborts its `fetch`.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Context, Fiber } from '../../src/index.js';
-import { RequestScope, createRootContext, fork, join, lookup, own, result, sleep, task, wait } from '../../src/index.js';
+import { RequestScope, Resource, createRootContext, fork, join, lookup, own, result, sleep, task, wait } from '../../src/index.js';
 import { fetch, listen } from '../../src/platform.js';
 import { trace, within } from '../support/util.js';
 
@@ -29,6 +29,32 @@ function app(): Context {
 }
 
 describe('the browser is a target: the core and ramme/platform through their public entries', () => {
+  it('a native resource is released by its [Resource.release](), protected, and its defect reaches the owner after the remaining releases', async () => {
+    const root = createRootContext();
+    roots.push(root);
+    const released: string[] = [];
+    class Connection implements Resource {
+      constructor(readonly name: string) {}
+      *[Resource.release]() {
+        yield* wait(Promise.resolve());
+        released.push(this.name);
+      }
+    }
+    root.own(new Connection('first'));
+    const error = new Error('cleanup defect');
+    root.own({
+      *[Resource.release]() {
+        yield* wait(Promise.resolve());
+        throw error;
+      },
+    });
+    const early = root.own(new Connection('released early'));
+    await root.release(early);
+    root.abort();
+    await expect(root.close()).rejects.toBe(error);
+    expect(released).toEqual(['released early', 'first']);
+  });
+
   it('a body runs task, call, fork, join, sleep, wait and own, with a request-scoped service, and a halt runs a finally that waits', async () => {
     const t = trace();
     let sessions = 0;

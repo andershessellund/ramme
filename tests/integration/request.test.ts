@@ -1,13 +1,14 @@
 // request-example.test.ts — the request of README.md 'A request', end to
 // end. The handler is the README's request handler verbatim (its unused `res`
 // parameter is spelled `_res` for the lint rule, and its pool is `Pool`);
-// `Pool` is a class key whose default factory has an owned reaper; `Orders` is
-// a service whose `place`, a bound task (`task(this, …)`), runs the work the
-// test sets, which `lookup`s `Conn`; a fake server delivers its request
-// callback to the listener and its other callbacks in a later job, with no
-// current node, and the one
-// place a node is named is `app.fork(...)` there (line 4). Each root is created
-// under `await using` and each test body runs as a top-level
+// `Pool` is a class key whose default factory has an owned reaper, and whose
+// `acquire(owner)` creates a lease for the node it is handed, through
+// `owner.acquire` (DESIGN.md §2.6, D48); `Orders` is a service whose `place`,
+// a bound task (`task(this, …)`), runs the work the test sets, which `lookup`s
+// `Conn`; a fake server delivers its request callback to the listener and its
+// other callbacks in a later job, with no current node, and the one place work
+// is given a node by name is `app.fork(...)` there (line 4). Each root is
+// created under `await using` and each test body runs as a top-level
 // `await app.call(main)`.
 import { describe, expect, it } from 'vitest';
 import { current, fork, join, lookup, own, result, signal, sleep, wait } from '../../src/ambient.js';
@@ -61,6 +62,8 @@ function world() {
   const t: Trace = trace();
   const pending = new Map<string, PromiseWithResolvers<string>>();
   const acquired: { pool: Pool; owner: Context; lease: Lease }[] = [];
+  /** When set, the pool's next connect waits for it: an acquisition in flight. */
+  let connecting: PromiseWithResolvers<void> | undefined;
   const failures: { error: unknown; current: Context }[] = [];
   let opened = 0;
 
@@ -76,7 +79,7 @@ function world() {
   }
   const Conn = createInjectionKey<Connection>('Conn');
 
-  /** What acquire() returns: a handle whose release() goes through the owner (DESIGN.md §2.6, I23). */
+  /** What acquire(owner) creates: a handle whose release() goes through its owner (DESIGN.md §2.6, I23). */
   class Lease implements Disposable {
     readonly #owner: Context;
     readonly #give: (lease: Lease) => void;
@@ -127,14 +130,17 @@ function world() {
       return this.#ctx;
     }
 
-    acquire(owner: Context = current()): Promise<Lease> {
-      if (this.#closed) throw new PoolClosedError('pool is closed');
-      const conn = this.free.pop() ?? this.#open();
-      this.#inUse++;
-      const lease = new Lease(conn, owner, (l) => this.#return(l.conn));
-      owner.own(lease); // attached before the promise resolves: no moment without an owner
-      acquired.push({ pool: this, owner, lease });
-      return Promise.resolve(lease); // bare promise; no finally
+    /** A function that creates a resource takes its owner: the lease is attached there before it is handed over (D48). */
+    acquire(owner: Context) {
+      return owner.acquire(async () => {
+        if (this.#closed) throw new PoolClosedError('pool is closed');
+        const conn = this.free.pop() ?? this.#open();
+        this.#inUse++;
+        const lease = new Lease(conn, owner, (l) => this.#return(l.conn));
+        acquired.push({ pool: this, owner, lease });
+        await connecting?.promise; // plain code under no node: it attaches nothing, the creation does
+        return lease;
+      });
     }
 
     #open(): Connection {
@@ -178,7 +184,7 @@ function world() {
   // The README's request handler, verbatim.
   const handle = task(function* handle(req: Req, _res: Res) {
     const pool = lookup(Pool); // 1
-    const lease = own(yield* wait(pool.acquire())); // 2
+    const lease = yield* pool.acquire(current()); // 2
     return yield* lookup(Orders).place.with({ providers: [valueProvider(Conn, lease.conn)] })(req); // 3
   });
 
@@ -210,6 +216,10 @@ function world() {
     Pool,
     Lease,
     acquired,
+    /** Make the pool's next connect wait; returns what lets it arrive. */
+    holdConnect(): PromiseWithResolvers<void> {
+      return (connecting = deferred());
+    },
     failures,
     pending,
     app,
@@ -263,7 +273,7 @@ describe('a request, end to end', () => {
     expect(ev.of('node:started').filter((e) => e.id === reaper.id)).toHaveLength(1);
   });
 
-  it('(2) work runs in the call’s node, a child of the handler, which nothing lends: it may fork through the handler’s node; own(yield* wait(pool.acquire())) registers one entry', async () => {
+  it('(2) work runs in the call’s node, a child of the handler, which nothing lends: it may fork through the handler’s node; pool.acquire(current()) attaches one entry, to the handler', async () => {
     const w = world();
     const { ev, server } = w.app();
     let forked: Fiber<string> | undefined;
@@ -287,7 +297,7 @@ describe('a request, end to end', () => {
     }
     expect(forked?.outcome).toEqual({ status: 'success', value: 'forked through the handler' });
     expect(impl(forked!).parent).toBe(handler);
-    // D16: acquire() attached the lease to the handler; own(lease) with one argument is a no-op by identity.
+    // D48: the creation attached the lease to the owner it was handed, the handler: one entry, released once.
     const lease = w.acquired[0].lease;
     expect(w.acquired[0].owner).toBe(handler);
     const registered = ev.of('entry:registered').filter((e) => e.id === handler!.id && e.entryName === 'Lease');
@@ -319,6 +329,42 @@ describe('a request, end to end', () => {
     }
     expect(ev.of('node:settled').filter((e) => e.id === handlerId).map((e) => e.outcome)).toEqual(['aborted']);
     expect(w.failures).toEqual([]); // I12: aborted is not failure
+    expect(w.t.log).toEqual(['lease', 'reaper', 'pool']);
+  });
+
+  it('(3b) a client that hangs up while the pool connects: the lease that arrives is returned by its creation, never attached to the handler, which is halted without running its work', async () => {
+    const w = world();
+    const { ev, server } = w.app();
+    let worked = false;
+    w.setWork(function* () {
+      worked = true;
+      return 'never';
+    });
+    let handlerId = -1;
+    {
+      await using app = ev.root;
+      await app.call(function* () {
+        const connect = w.holdConnect();
+        const r = server.request('/a');
+        handlerId = r.fiber.id;
+        yield* wait(tick());
+        expect(w.acquired).toHaveLength(1); // the creation is in flight: a connection is out, and nobody holds its lease
+        const pool = w.acquired[0].pool;
+        expect(pool.free).toHaveLength(0);
+        r.hangUp(new Error('client went away'));
+        yield* wait(tick());
+        expect(r.fiber.state).not.toBe('complete'); // the handler waits for the creation, which waits for the driver
+        connect.resolve();
+        expect((yield* result(r.fiber)).status).toBe('aborted');
+        expect(pool.free).toHaveLength(1); // the lease went back
+      });
+    }
+    expect(worked).toBe(false);
+    const leases = ev.of('entry:registered').filter((e) => e.entryName === 'Lease');
+    expect(leases).toHaveLength(1);
+    expect(leases[0].id).not.toBe(handlerId); // the handler never owned it:
+    expect(leases[0].parentId).toBe(handlerId); // its creation did, and released it when it ended
+    expect(w.failures).toEqual([]);
     expect(w.t.log).toEqual(['lease', 'reaper', 'pool']);
   });
 
@@ -418,7 +464,7 @@ describe('a request, end to end', () => {
     expect(w.failures).toEqual([]);
   });
 
-  it('a platform callback runs with no current node, even when a body scheduled it: line 4 is the one place a node is named', async () => {
+  it('a platform callback runs with no current node, even when a body scheduled it: line 4 is where the handler is given its node by name', async () => {
     const w = world();
     const { ev, server } = w.app();
     let seen: unknown;

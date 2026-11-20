@@ -21,7 +21,7 @@ Zero dependencies. Node 22+ or an evergreen browser ([below](#the-platform)).
 ## Sixty seconds
 
 ```ts
-import { createRootContext, task, all, lookup, own, inject, wait } from 'ramme';
+import { createRootContext, task, all, lookup, current, inject, wait } from 'ramme';
 import { fetch } from 'ramme/platform';
 
 class Config {
@@ -29,8 +29,8 @@ class Config {
 }
 
 class Api {
-  readonly #base = inject(Config).apiUrl;          // a dependency, declared where the service is built
-  readonly #pool = own(openPool(this.#base));      // released with the service, never before its users
+  readonly #base = inject(Config).apiUrl;             // a dependency, declared where the service is built
+  readonly #pool = openPool(current(), this.#base);   // a resource, created for its owner: released with the service
 
   readonly get = task(this, function* get(path: string) {   // an operation: yield* api.get(…)
     const res = yield* fetch(this.#base + path);    // an op: interrupting the task aborts the request
@@ -70,12 +70,16 @@ What the example shows:
   `Api` has no provider, so the class is its own default factory: it is built
   on first use and placed as deep in the tree as its dependencies require,
   here at the root.
-- **Acquisition is ownership.** `own(x)` attaches `x` (an `AsyncDisposable`
-  or `Disposable`) to the current node, which releases it. In a constructor
-  that node is the service's own, so the pool lives exactly as long as `Api`.
-- **Nothing is threaded through.** `signal()`, `lookup`, `own`, `fork` act on
-  the *current node*, which ramme sets while a body runs, on every platform,
-  with no setup: ramme has no async context.
+- **Acquisition is ownership.** A function that creates a resource takes the
+  node the resource belongs to, and that node releases it
+  ([below](#resources)). `current()` is the node the running code belongs to:
+  in a constructor the service's own, so the pool lives exactly as long as
+  `Api` and never ends before its users; in a task the task's, so what it
+  acquired is released when it finishes.
+- **Nothing is threaded through.** `signal()`, `lookup`, `fork` and
+  `current()` read the *current node*, which ramme sets while a body runs, on
+  every platform, with no setup: ramme has no async context. The one node a
+  call is handed is the owner of a resource it creates.
 - **Shutdown lives on the root.** `await using app` releases the whole tree:
   running work first, then the services it used. `app.abort()` interrupts
   the tree without waiting, and `await app.close()` lets running work
@@ -84,13 +88,13 @@ What the example shows:
 ## A request
 
 ```ts
-import { createInjectionKey, valueProvider, task, lookup, own, wait } from 'ramme';
+import { createInjectionKey, valueProvider, task, lookup, current } from 'ramme';
 
 const Conn = createInjectionKey<Connection>('Conn');
 
 const handle = task(function* handle(req: Request, res: Response) {
-  const db = lookup(Connections);                   // a driver's pool, provided as a service: shared, outlives every request
-  const lease = own(yield* wait(db.acquire()));     // returned to the pool when the handler ends
+  const pool = lookup(Connections);                 // a pool, provided as a service: shared, outlives every request
+  const lease = yield* pool.acquire(current());     // this handler's lease: back in the pool when the handler ends
   return yield* lookup(Orders).place.with({ providers: [valueProvider(Conn, lease.conn)] })(req);
 });
 
@@ -98,18 +102,19 @@ server.on('request', (req, res) =>
   app.fork(handle.with({ name: req.url, signal: req.signal, onFailure: (e) => respond500(res, e) }), req, res));
 ```
 
-- `Connections` is a database driver's pool, foreign code provided as a
-  service; its `acquire()` is the driver's, a promise of a lease that can be
-  released, so the handler waits for it as for any foreign promise.
+- `Connections` is a pool of database connections, a service every request
+  shares. Its `acquire` creates a resource, a lease, so it takes the lease's
+  owner ([below](#resources)): `current()` is the handler's node, which
+  returns the lease when the handler ends, however it ends.
 - `Orders` is a service too, and `place` one of its operations, a
   `task(this, …)` field. `place.with({ providers })` is the same task with a
   provider for this run: it runs in a node of its own below the handler, so
   a `lookup(Conn)` there, or in a service it calls, reads this request's
   connection. The handler is the one standalone task; the work it does is
   the services'.
-- The server's callback runs outside any node, so it names one:
-  `app.fork(...)` attaches the handler to the root. This is the only place a
-  node is passed explicitly. `handle.with({...})` is the same task with
+- The server's callback runs outside any node, so it names the one the
+  handler runs on: `app.fork(...)` attaches it to the root. Everywhere else
+  work starts on the current node. `handle.with({...})` is the same task with
   options for this use: a `name`, a `signal` that interrupts it, and
   `onFailure`, where its failure goes.
 - When the client hangs up, `req.signal` interrupts the handler: ramme
@@ -188,7 +193,7 @@ import { RequestScope, current, inject, lookup, own, task, wait } from 'ramme';
 class UnitOfWork {
   static readonly scope = RequestScope;
   readonly #node = current();                     // this value's own node; its parent is the request's node
-  readonly #lease = inject(DbPool).acquire();     // a synchronous acquire(owner = current()): owned by #node, returned after the commit
+  readonly #lease = inject(DbPool).acquire(this.#node);   // a synchronous acquire(owner): owned by #node, returned after the commit
   constructor() {
     own(this, () => {
       const o = this.#node.parent!.outcome;       // how the request ended
@@ -367,18 +372,18 @@ fails: a `finally` that throws, or a wait in it that fails, makes the
 outcome a `defect`, which is reported. When the body is returned depends on
 what it waits on: at once for a `sleep`, a `never()`, an owned fork's
 `join`; once the awaited work has stopped for a task's call, an `all`, a
-`join` of a fork it made; and for a release or a foreign promise, after it
-finishes: the body is resumed with its value once, so it can own it, and
-stops at its next wait. The `finally` the halt runs may wait, and the
-interruption does not cut what it waits on, so cleanup can wait for a
-rollback:
+`join` of a fork it made, and for a resource being created, which is
+released if it still arrives; and for a release or a foreign promise, after
+it finishes: the body is resumed with its value once, and stops at its next
+wait. The `finally` the halt runs may wait, and the interruption does not cut
+what it waits on, so cleanup can wait for a rollback:
 
 ```ts
-import { own, task, wait } from 'ramme';
+import { current, task, wait } from 'ramme';
 
 const transfer = task(function* transfer(from: Id, to: Id, amount: number) {
-  const conn = own(yield* wait(db.connect()), (c) => c.release());   // interrupted while connecting: still owned
-  yield* wait((signal) => conn.query('BEGIN', signal));              // not started at all once interrupted
+  const conn = yield* db.connect(current());              // this task's connection; interrupted while connecting, it holds none
+  yield* wait((signal) => conn.query('BEGIN', signal));   // interrupted here: the signal aborts the query
   let done = false;
   try {
     yield* debit(conn, from, amount);              // halted here: debit stops and completes first
@@ -397,18 +402,20 @@ Start foreign work with `wait((signal) => p)`: hand the signal on, and the
 work stops when you do (`wait((signal) => driver.query(sql, { signal }))`;
 for `fetch`, `yield* fetch(url)` from `ramme/platform` does it for you); an
 interrupted body starts it only in the `finally` the halt runs, as the
-`ROLLBACK` above. A promise that already exists is
-`yield* wait(p)`, for acquisition you want to finish so you can own what it
-produced, as `db.connect()` above: an interrupted body finishes the wait it
-is in, then stops at its next. `wait(p, { abandon: true })` stops waiting at
-once instead. Past the wait in flight, every `wait` an interrupted body
-yields stops at once, except in the `finally` the halt runs, which waits for
-everything it yields; a `finally` the body enters on its own after the
+`ROLLBACK` above. A promise that already exists is `yield* wait(p)`: an
+interrupted body finishes the wait it is in, so what was on its way is not
+dropped unseen, then stops at its next. `wait(p, { abandon: true })` stops
+waiting at once instead. Past the wait in flight, every `wait` an interrupted
+body yields stops at once, except in the `finally` the halt runs, which waits
+for everything it yields; a `finally` the body enters on its own after the
 interruption, by a `return` or a throw, stops at its first wait, so cleanup
-that must finish belongs in `own(...)`. A library that
-calls you back with an async function gets `promised(function* …)`, which
-runs your generator as a child of the current task and hands the library a
-real promise:
+that must finish belongs in a resource's release ([below](#resources)). A
+resource is not acquired with a `wait`: the function that creates it takes
+its owner, as `db.connect(current())` above, and a connection that arrives
+for a task interrupted meanwhile is released, never handed over. A library
+that calls you back with an async function gets `promised(function* …)`,
+which runs your generator as a child of the current task and hands the
+library a real promise:
 
 ```ts
 import { promised, task, wait } from 'ramme';
@@ -455,12 +462,15 @@ a key, a token with a factory), which
 style preset ([below](#lint)) reports a function key and an anonymous task,
 not a token with a factory. The rules:
 
-- **Own it before the work.** Anything that must be undone is attached with
-  `own(...)` and released by its node, however the body ends. ramme cannot
-  see what a `finally` cleans up, and an interruption cuts short a
-  `finally` the body reached on its own (by finishing its `try`, a `return`
-  or a throw) at its first wait, so keep invariants in `own`. `await using`
-  for the root at the top level is fine.
+- **Every resource has an owner from the start.** A function that creates one
+  takes the node it belongs to, `pool.acquire(current())` for the running
+  task, and that node releases it, however the body ends. Application code
+  names an owner and attaches nothing itself: `own` is for the function that
+  creates the resource ([below](#resources)). ramme cannot see what a
+  `finally` cleans up, and an interruption cuts short a `finally` the body
+  reached on its own (by finishing its `try`, a `return` or a throw) at its
+  first wait, so keep invariants in a resource's release. `await using` for
+  the root at the top level is fine.
 - **Every wait is a `yield*`.** Run ramme's ops with `yield*`
   (`yield* api.get(path)`, `yield* sleep(ms)`): an op you make and do not
   yield runs nothing, and the lint reports `api.get(path);` alone when it
@@ -478,7 +488,7 @@ not a token with a factory. The rules:
   not written inline as a body. The `finally` an interruption runs in a
   task's body may wait: what it yields is not cut by the interruption.
 - **A library's async callback is `promised(function* …)`.** Plain async
-  code has no current node after its first `await`: `lookup`, `own` and the
+  code has no current node after its first `await`: `lookup`, `fork` and the
   other free functions throw there. Reach ramme from plain async code
   through a node you name (`await app.call(main)`), `promised`, or
   `node.run(fn)` for a synchronous callback.
@@ -510,6 +520,125 @@ borrowed. Two more things to know about libraries:
   cleanup a driver-level timeout, or hand it the deadline:
   `yield* wait((signal) => conn.query('ROLLBACK', signal))`.
 
+## Resources
+
+A value that says how it is released is a `Resource`: its class defines a
+`[Resource.release]()` method. A function that creates a resource takes its
+owner, the node the resource belongs to, and attaches it there before
+handing it over:
+
+```ts
+import { Resource, current, inject, lookup, task, wait, type Context } from 'ramme';
+
+class Connection implements Resource {
+  constructor(readonly socket: Socket) {}
+  *[Resource.release]() {                             // the release, declared once, on the class
+    yield* wait(this.socket.end());
+  }
+}
+
+class Connections {
+  readonly #driver = inject(Driver);
+  open(owner: Context) {                              // the caller says whose connection it is
+    return owner.acquire(async (signal) => new Connection(await this.#driver.connect({ signal })));
+  }
+}
+
+const session = task(function* session() {
+  const connection = yield* lookup(Connections).open(current());   // this task's: released when it ends, however it ends
+  yield* serve(connection);
+});
+```
+
+**Creating.**
+
+- **The owner is an argument, never a default.** `open(current())` is a
+  connection of the calling task; `open(app)` one that outlives it. A default
+  would be read where `open` runs, and inside a task that is the task's own
+  node, which ends when it returns.
+- **`owner.acquire(make, release?)`** waits for `make` and attaches what it
+  returns to `owner`, as `own(value)` or `own(value, release)` would. `make`
+  is called when the op is yielded and is handed a signal for the driver. It
+  is plain code under no node, so it creates and attaches nothing itself; an
+  `async` function is the form for a creation of several steps, which nothing
+  cuts between them.
+- **A connection nobody is handed is released at once.** A task interrupted
+  while the driver connects is halted once the connection has arrived and
+  been released, and one whose connect loses a `race` holds nothing for it
+  afterwards. Attached by hand, `own(yield* …)` in a producer, each such
+  connection would stay on its owner until the owner ends.
+- **A synchronous creation** attaches with `owner.own(value)`: the caller
+  holds the value in the same step.
+
+**Releasing.**
+
+- `own(connection)` is `own(connection, (c) => c[Resource.release]())`. The
+  method is the entry's release: it runs once, with the connection as `this`,
+  in a release fiber of the owner, which no interruption of the owner cuts.
+  A generator method is driven there as a body is, so `yield*`, `own` and
+  `signal()` work across its waits; the method may also be synchronous, or
+  return an op or a promise.
+- The key is a symbol, as the platform's `Symbol.asyncDispose` is: a member
+  a class happens to name `release` is nothing to `own`, and the method is
+  the owner's to call, never a body's. `yield* release(connection)` releases
+  early: now, exactly once.
+- A class may keep `[Symbol.asyncDispose]` or `[Symbol.dispose]` for `using`
+  outside ramme: `own` takes the native method first, and
+  `own(value, release)` replaces all three for that entry.
+- **A release has no expected failures.** One that yields `fail(e)`, or calls
+  an operation that may, is a type error. What a release throws is a defect
+  of its owner, reported once the remaining entries are released, beside the
+  body's own failure. ramme neither logs it nor shuts anything down: the
+  caller's error boundary decides. An operation that may be refused as a
+  matter of course, a commit, runs in the body, before the release.
+- `signal()` in a release is the owner's release deadline
+  (`releaseTimeoutMs`), which signals and abandons nothing. The release's own
+  waits hear it, so hand it on there:
+  `yield* wait((signal) => socket.end({ signal }))`. A task the release calls
+  has a signal of its own, which the deadline fires only when the task is
+  `interrupt: 'restore'`, halting it. A task given as the release itself
+  (`own(tx, rollback)`) is called as any task is, so its own `timeoutMs`
+  bounds it.
+
+**A resource that can finish on its own is a node.** An entry has no state:
+its owner cannot tell that the connection behind it is gone, and keeps it
+until its own end. A connection whose peer may hang up, a subscription that
+completes, a watcher that ends gets a node of its own instead, below its
+owner. The node is one entry of the owner, released at its turn like any
+other, and a node that completes leaves its owner's stack:
+
+```ts
+import { Resource, wait, type Context } from 'ramme';
+import { listen } from 'ramme/platform';
+
+class Connection implements Resource {
+  readonly #node: Context;
+  constructor(owner: Context, readonly socket: Socket) {
+    this.#node = owner.own(owner.child({ name: 'connection' }));   // a lifetime of its own, below its owner
+    this.#node.own(this);                                          // released by [Resource.release] when the node ends
+    this.#node.run(() => listen(socket, 'close', () => void this.#node.close()));   // the peer hung up: the node ends now
+  }
+  *[Resource.release]() {
+    yield* wait(this.socket.end());
+  }
+  close() {
+    return this.#node.close();                                     // early: yield* connection.close()
+  }
+}
+```
+
+- When the peer hangs up, the node closes: its listener is removed, the
+  connection is released, and its owner keeps nothing for it, however long
+  the owner lives.
+- `close()` of a node that has completed is a no-op, so the owner's
+  `yield* connection.close()` and the peer's hang-up never collide: whichever
+  comes first releases the connection, once.
+- A release failure of a connection that closed by itself, with no body
+  waiting for it, surfaces from its owner's completion.
+- `owner.own(owner.child())`, not `owner.child()` alone: a bare `child()` is
+  a scope of the work, which a body's exit ends first, before the entries
+  attached after it.
+
 ## The platform
 
 Node 22+ or an evergreen browser, with nothing to import or register: the
@@ -529,10 +658,10 @@ from Node:
 - `yield* fetch(input, init)`: the global's `fetch` as an op, handed the
   task's signal, so interrupting the task aborts the request.
 - `listen(target, type, handler)`: an `EventTarget` or an emitter (`on`/`off`);
-  the handler runs inside the node that registered it (`lookup`, `own` and
-  `fork` work there; nothing waits, so fork a task for work that does), and is
-  removed when that node ends. A throw from it ends the node, never the
-  emitter. Each call is its own registration, as an emitter's `on` is: unlike
+  the handler runs inside the node that registered it (`lookup`, `current()`
+  and `fork` work there; nothing waits, so fork a task for work that does),
+  and is removed when that node ends. A throw from it ends the node, never
+  the emitter. Each call is its own registration, as an emitter's `on` is: unlike
   `addEventListener`, listening twice with the same handler runs it twice.
 - `yield* nextFrame()`: the next animation frame's timestamp, its frame
   cancelled if the task is interrupted (a 16 ms timer where there are no
@@ -569,7 +698,7 @@ operation a task, every wait an op, every async callback it takes a
 (`import pg from 'pg'`), say, behind a service:
 
 ```ts
-import { inject, lookup, own, promised, task, wait, type Task } from 'ramme';
+import { current, inject, lookup, own, promised, task, wait, type Task } from 'ramme';
 
 class Db {
   readonly #pool = own(new pg.Pool(inject(DbConfig)), (p) => p.end());   // closed with the service, after its users
@@ -577,7 +706,7 @@ class Db {
     return (yield* wait(this.#pool.query(sql, params))).rows;
   });
   readonly transaction = task(this, function* transaction(work: Task<[tx: pg.PoolClient], void>) {
-    const client = own(yield* wait(this.#pool.connect()), (c) => c.release());   // back to the pool when the transaction ends
+    const client = yield* current().acquire(() => this.#pool.connect(), (c) => c.release());   // this transaction's: back to the pool when it ends
     yield* wait(withTx(client, promised(work)));   // your async withTx(client, fn): BEGIN, fn, then COMMIT or ROLLBACK
   });
 }

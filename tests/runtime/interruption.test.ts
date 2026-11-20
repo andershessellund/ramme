@@ -286,10 +286,10 @@ describe('interruption at operation boundaries', () => {
         t.push('lease returned');
       }
     }
-    /** A synchronous acquire that attaches the lease to `owner` before returning (DESIGN.md §2.6). */
+    /** A synchronous acquire that attaches the lease to the owner it is given before returning (DESIGN.md §2.6, D48). */
     class DbPool {
       readonly #conn = new Conn();
-      acquire(owner: Context = current()): Lease {
+      acquire(owner: Context): Lease {
         return owner.own(new Lease(this.#conn));
       }
     }
@@ -297,7 +297,7 @@ describe('interruption at operation boundaries', () => {
     class UnitOfWork {
       static readonly scope = RequestScope;
       readonly #node = current();
-      readonly #lease = inject(DbPool).acquire(); // owned by this value's node, below the entry that commits (LIFO)
+      readonly #lease = inject(DbPool).acquire(this.#node); // owned by this value's node, below the entry that commits (LIFO)
       constructor() {
         own(this, () => {
           const o = this.#node.parent!.outcome; // the request's outcome

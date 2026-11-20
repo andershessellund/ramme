@@ -53,6 +53,7 @@ import type { AnyMember, BodyOf, ErrorOf, FailedWith, TaskLike, ValueOf, Yields 
 import { failOp } from './managed.js';
 import type { NodeImpl } from './node-impl.js';
 import { CreationViolationError, NoCurrentNodeError } from './resource.js';
+import type { Resource } from './resource.js';
 
 /**
  * @internal The current node for a free function: a body frame's node, or the value node of a creation
@@ -109,7 +110,9 @@ function namingTask(e: unknown, name: string): unknown {
 
 /**
  * The current node: the running body's fiber, the release fiber during a
- * release, or the value's node during creation (created on first use).
+ * release, or the value's node during creation (created on first use). It
+ * is the owner a body hands a function that creates a resource for it:
+ * `yield* pool.acquire(current())` (DESIGN.md §2.6, D48).
  *
  * @throws NoCurrentNodeError outside any node.
  */
@@ -142,11 +145,16 @@ export function lookup<T>(key: InjectionKey<T>, options?: LookupOptions): T | un
 /**
  * Attach to the current node; it is released when the node completes, or
  * earlier with `release(x)`. Returns what it attached. `own(x)` with one
- * argument on an object the node already owns returns it (D16).
+ * argument on an object the node already owns returns it (D16). A `Resource`
+ * is released by its `[Resource.release]()` method (D47); a release has no
+ * expected failures. `own` is the verb of a function that creates a
+ * resource, which attaches it to the owner it was handed (`owner.own(x)`,
+ * or `owner.acquire(make)` for one that is waited for); application code
+ * names the owner and attaches nothing (D48).
  */
-export function own<T extends Disposable | AsyncDisposable>(resource: T): T;
+export function own<T extends Resource | Disposable | AsyncDisposable>(resource: T): T;
 export function own<T extends object>(value: T, release: Release<T>): T;
-export function own<T extends object>(defer: T & (() => void | Promise<void> | Operation<void, unknown>)): T;
+export function own<T extends object>(defer: T & Release<void>): T;
 export function own(target: object, release?: Release<any>): object {
   const n = requireCurrent('own');
   return release === undefined ? n.own(target as Disposable) : n.own(target, release);
@@ -320,7 +328,7 @@ export function sleep(ms: number): Op<void> {
 /**
  * Wait for a foreign promise in a body (DESIGN.md §4.2, D41 decision 10, D45): `yield* wait(p)`. The `wait(p)` in
  * flight at an interruption lets `p` finish: the body is resumed with its value once, its grant, and returned at its
- * next `yield*`, so `own(yield* wait(pool.connect()), …)` attaches what an acquisition in flight produced; a failure of
+ * next `yield*`, so a body that owns what it waited for still attaches it, as the creation of `ctx.acquire` does (D48); a failure of
  * `p` then ends the body there and is discarded, as a halted body's throw outside its `finally` is (in its halted
  * `finally` it is a release failure). A `wait(p)` yielded after the grant abandons `p`, as `{ abandon: true }` does at
  * the halt: `p` runs on, marked handled.

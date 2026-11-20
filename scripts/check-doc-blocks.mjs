@@ -66,23 +66,27 @@ const RETIRED = new Map([
 const ENVIRONMENT = new Map([
   // README's services: a configuration class.
   ['Config', 'declare class Config { readonly apiUrl: string; }'],
-  // The examples' database: a connection to own, a transaction to commit or roll back, and a driver's transaction
-  // callback; and the client the expected-failure examples' `Users` service is made of, with its rows.
+  // The examples' database: a connection it creates for the owner it is handed (D48), a transaction to commit or roll
+  // back, and a driver's transaction callback; and the client the expected-failure examples' `Users` service is made
+  // of, with its rows.
   [
     'db',
-    'declare const db: { connect(): Promise<Connection>; begin(): Promise<Transaction>; ' +
-      'transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> };',
+    'declare const db: { connect(owner: import("ramme").Context): import("ramme").Op<Connection>; ' +
+      'begin(): Promise<Transaction>; transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> };',
   ],
   [
     'Database',
     'declare class Database { findUser(id: string): Promise<User | undefined>; findOrder(user: User): Promise<Order | undefined>; }',
   ],
-  ['Connection', 'interface Connection { query(sql: string, signal?: AbortSignal): Promise<unknown>; release(): void; }'],
+  ['Connection', 'interface Connection { query(sql: string, signal?: AbortSignal): Promise<unknown>; }'],
   ['Transaction', 'interface Transaction { commit(): Promise<void>; rollback(): Promise<void>; }'],
-  // The unit of work's pool (README; DESIGN.md §2.6), which hands out a lease synchronously, and README's request's
-  // pool, a driver's, which hands one out asynchronously.
-  ['DbPool', 'declare class DbPool { acquire(owner?: unknown): { readonly conn: Connection }; }'],
-  ['Connections', 'declare class Connections { acquire(): Promise<AsyncDisposable & { readonly conn: Connection }>; }'],
+  // The pools, each handed the owner of the lease it creates (D48): the unit of work's (README; DESIGN.md §2.6), which
+  // hands one out synchronously, and README's request's, whose creation is an op.
+  ['DbPool', 'declare class DbPool { acquire(owner: import("ramme").Context): { readonly conn: Connection }; }'],
+  [
+    'Connections',
+    'declare class Connections { acquire(owner: import("ramme").Context): import("ramme").Op<{ readonly conn: Connection }>; }',
+  ],
   // README's `$`: the gateway client `Payments` is made of, whose authorization is a `Result`, written out (a ramme
   // name is never declared here).
   [
@@ -103,6 +107,10 @@ const ENVIRONMENT = new Map([
   ['Orders', 'declare class Orders { readonly place: import("ramme").Task<[req: Request], unknown>; }'],
   ['Api', 'declare class Api { readonly getUser: import("ramme").Task<[id: string], User, NotFound>; }'],
   ['SmtpClient', 'declare class SmtpClient { deliver(to: string, body: string): Promise<void>; }'],
+  // The resource examples (README, 'Resources'; DESIGN.md §2.6): a transport that ends and says when its peer did, and
+  // the driver that connects one, both handed a signal.
+  ['Socket', 'interface Socket extends EventTarget { end(opts?: { signal?: AbortSignal }): Promise<void>; }'],
+  ['Driver', 'declare class Driver { connect(opts?: { signal?: AbortSignal }): Promise<Socket>; }'],
 ]);
 /** The diagnostics that name an identifier nothing declares. */
 const UNRESOLVED = new Set([2304, 2552, 2580, 2581, 2582, 2583, 2584, 2591, 2592, 2593]);
